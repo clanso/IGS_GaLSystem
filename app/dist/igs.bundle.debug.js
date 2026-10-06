@@ -10260,6 +10260,8 @@ const READER_REQUIRED_SETTINGS_PATHS = Object.freeze([
     'readerSettings.spriteGenderScale.female',
     'readerSettings.spriteGenderScale.male',
     'readerSettings.spriteGenderScale.other',
+    'readerSettings.spriteGenderScale.elderShorter',
+    'readerSettings.spriteGenderScale.childShorter',
     'readerSettings.spriteDisplayScale',
     'readerSettings.spriteHeads',
     'readerSettings.vnTheme.preset',
@@ -10846,7 +10848,7 @@ const { pickFxAccent } = require("src/visual/igs-ui/fx-symbols.js");
 const { prefersReducedMotion } = require("src/visual/igs-ui/reduced-motion.js");
 const { applyImageCountOverride, buildImageActionContext, buildProgressText, countBoundImageSlots, normalizePollAttempts, normalizePollInterval, normalizeSnapshotImageState, resolveSegmentImageIndex, shouldPollReaderImages, waitForReaderImagePoll } = require("src/visual/igs-ui/reader-image-state.js");
 const { attachSettingsViewportEvents, clearChildren, detachSettingsViewportEvents, ensureImageLoadingSpinner, ensureStyleTag, getOwnerWindow, getRootDocument, removeImageLoadingSpinner, syncSettingsViewportVars, unmountNode } = require("src/visual/igs-ui/reader-dom-utils.js");
-const { buildTextSegments, getPath, normalizeBtnOrder, normalizeHiddenButtons, normalizePerformanceSettings, normalizePinnedButtons, normalizeReaderMode, normalizeSettingsTab, normalizeSettingsValue, normalizeSpriteDefaultScale, normalizeSpriteDisplayScale, normalizeSpriteGenderScale, normalizeSpriteLayouts, setPath, SPRITE_HEIGHT_RANGE } = require("src/visual/igs-ui/settings-normalize.js");
+const { buildTextSegments, getPath, normalizeBtnOrder, normalizeHiddenButtons, normalizePerformanceSettings, normalizePinnedButtons, normalizeReaderMode, normalizeSettingsTab, normalizeSettingsValue, normalizeSpriteDefaultScale, normalizeSpriteDisplayScale, normalizeSpriteGenderScale, normalizeSpriteLayouts, setPath, SPRITE_HEIGHT_RANGE, SPRITE_SHORTER_RANGE } = require("src/visual/igs-ui/settings-normalize.js");
 const { clearReaderModeRuntime, exitDocumentFullscreen } = require("src/visual/igs-ui/reader-runtime.js");
 const { enterSpriteEditMode } = require("src/visual/igs-ui/sprite-edit.js");
 const { normalizeCharacterSpriteScales } = require("src/visual/igs-ui/sprite-height.js");
@@ -14585,14 +14587,16 @@ function createIgsReaderHost(options = {}) {
         ${checkbox('bridge.sceneAssets.unifiedSpriteLayout', sceneAssets.unifiedSpriteLayout, '统一角色立绘位置')}
         ${checkbox('bridge.sceneAssets.spriteEnhance.enabled', spriteEnhance.enabled === true, '立绘增强（手机较耗电）')}
         ${checkbox('readerSettings.spriteGenderScale.enabled', spriteGenderScale.enabled, '按性别区分默认高度')}
-        <div class="igs-source-filter-note">按 DNA 判断男女；调过的立绘和单独填了高度的角色不受影响。</div>
+        <div class="igs-source-filter-note">按 DNA（没有时看生成 tag）判断男女和老人、儿童；调过的立绘和单独填了高度的角色不受影响。</div>
         <div class="igs-source-filter-grid">
           ${field('readerSettings.spriteDisplayScale', '立绘全局缩放', selectInput('readerSettings.spriteDisplayScale', reader.spriteDisplayScale || 100, [50, 60, 70, 80, 90, 100, 110, 120, 130, 150].map((n) => [n, `${n}%`])))}
           ${field('readerSettings.spriteDefaultScale', '立绘基准高度 %', numberInput('readerSettings.spriteDefaultScale', normalizeSpriteDefaultScale(reader.spriteDefaultScale), SPRITE_HEIGHT_RANGE[0], SPRITE_HEIGHT_RANGE[1]))}
           ${spriteGenderScale.enabled ? `
           ${field('readerSettings.spriteGenderScale.female', '女性默认高度 %', numberInput('readerSettings.spriteGenderScale.female', spriteGenderScale.female, SPRITE_HEIGHT_RANGE[0], SPRITE_HEIGHT_RANGE[1]))}
           ${field('readerSettings.spriteGenderScale.male', '男性默认高度 %', numberInput('readerSettings.spriteGenderScale.male', spriteGenderScale.male, SPRITE_HEIGHT_RANGE[0], SPRITE_HEIGHT_RANGE[1]))}
-          ${field('readerSettings.spriteGenderScale.other', '其他默认高度 %', numberInput('readerSettings.spriteGenderScale.other', spriteGenderScale.other, SPRITE_HEIGHT_RANGE[0], SPRITE_HEIGHT_RANGE[1]))}` : ''}
+          ${field('readerSettings.spriteGenderScale.other', '其他默认高度 %', numberInput('readerSettings.spriteGenderScale.other', spriteGenderScale.other, SPRITE_HEIGHT_RANGE[0], SPRITE_HEIGHT_RANGE[1]))}
+          ${field('readerSettings.spriteGenderScale.elderShorter', '老人比同性别矮', numberInput('readerSettings.spriteGenderScale.elderShorter', spriteGenderScale.elderShorter, SPRITE_SHORTER_RANGE[0], SPRITE_SHORTER_RANGE[1]))}
+          ${field('readerSettings.spriteGenderScale.childShorter', '儿童比同性别矮', numberInput('readerSettings.spriteGenderScale.childShorter', spriteGenderScale.childShorter, SPRITE_SHORTER_RANGE[0], SPRITE_SHORTER_RANGE[1]))}` : ''}
           ${spriteEnhance.enabled === true ? `
           ${field('bridge.sceneAssets.spriteEnhance.mode', '效果', selectInput('bridge.sceneAssets.spriteEnhance.mode', spriteEnhance.mode || 'outline', [['outline', '硬描边'], ['shadow', '投影式']]))}
           ${field('bridge.sceneAssets.spriteEnhance.color', '增强颜色', colorInput('bridge.sceneAssets.spriteEnhance.color', spriteEnhance.color || '#000000'))}
@@ -15866,6 +15870,10 @@ function createIgsReaderHost(options = {}) {
         readerSettings._ancientEra = worldview === 'ancient';
         readerSettings._worldview = worldview;
         readerSettings._sceneAssets = sceneAssets;
+        // 还没入库的生成立绘的 tag：立绘默认高度据此判断没有 DNA 的角色性别。
+        const generatedService = options.generatedAssets;
+        readerSettings._tempSpriteTags = generatedService && typeof generatedService.tempSpriteTags === 'function'
+            ? generatedService.tempSpriteTags() : {};
         readerSettings._sentencePaging = Boolean(bridge.sentencePaging);
         const bilingualOverride = state.bilingualDisplay;
         readerSettings._bilingualDisplay = bilingualOverride && bilingualOverride.base === normalizeBilingualSettings(readerSettings.bilingual).display ? bilingualOverride.value : '';
@@ -36478,13 +36486,15 @@ function renderCharacterVoiceRow(charName, { sceneAssets }) {
 }
 
 const SPRITE_HEIGHT_SOURCE_LABELS = { female: '女性', male: '男性', other: '其他', base: '基准高度' };
+const SPRITE_HEIGHT_AGE_LABELS = { elder: '老人', child: '儿童' };
 
 // 角色立绘高度（角色展开后放在立绘列表最上面）：留空跟随性别默认 / 基准高度；填了就固定这个角色的高度，「调整立绘」调过的表情仍按调整结果。
 function renderCharacterSpriteHeightRow(charName, { sceneAssets, reader }) {
     const assets = sceneAssets && typeof sceneAssets === 'object' ? sceneAssets : {};
     const manual = resolveSpriteBaseScale(assets, reader, charName);
     const auto = manual.source === 'manual' ? resolveSpriteBaseScale({ ...assets, characterSpriteScales: {} }, reader, charName) : manual;
-    const autoText = `${SPRITE_HEIGHT_SOURCE_LABELS[auto.source]} ${auto.defaultScale}%`;
+    const ageLabel = SPRITE_HEIGHT_AGE_LABELS[auto.age] ? ` · ${SPRITE_HEIGHT_AGE_LABELS[auto.age]}` : '';
+    const autoText = `${SPRITE_HEIGHT_SOURCE_LABELS[auto.source]}${ageLabel} ${auto.defaultScale}%`;
     const placed = hasCharacterSpriteLayout(reader && reader.spriteLayouts, charName);
     const hint = `留空＝自动（${autoText}）${placed ? '；用「调整立绘」调过的表情按调整结果' : ''}`;
     return `<div class="igs-char-info-row igs-char-height-row"><span class="igs-char-info-label">立绘高度 %</span>`
@@ -37619,9 +37629,14 @@ function detectVoiceGender(text) {
 
 // 按主名查 DNA 判断性别（声线和立绘默认高度共用）；没有 DNA 或看不出时返回 ''。
 function characterDnaGender(sceneAssets, name) {
+    return detectVoiceGender(characterDnaText(sceneAssets, name));
+}
+
+// 主名 DNA 里描述角色本身的文字（触发词、固定身份、默认外观；不含负面词）；没有 DNA 时为 ''。
+function characterDnaText(sceneAssets, name) {
     const dnaMap = plainObject(sceneAssets && sceneAssets.characterDna) || {};
     const dna = name && hasOwn(dnaMap, name) ? plainObject(dnaMap[name]) : null;
-    return dna ? detectVoiceGender(`${dna.triggerWords || ''}\n${dna.identity || ''}\n${dna.defaultAppearance || ''}`) : '';
+    return dna ? `${dna.triggerWords || ''}\n${dna.identity || ''}\n${dna.defaultAppearance || ''}` : '';
 }
 
 function hashName(name) {
@@ -37933,6 +37948,7 @@ __igsDefine(exports, "normalizeCharacterVoices", () => normalizeCharacterVoices)
 __igsDefine(exports, "canonicalName", () => canonicalName);
 __igsDefine(exports, "detectVoiceGender", () => detectVoiceGender);
 __igsDefine(exports, "characterDnaGender", () => characterDnaGender);
+__igsDefine(exports, "characterDnaText", () => characterDnaText);
 __igsDefine(exports, "resolveCharacterVoice", () => resolveCharacterVoice);
 __igsDefine(exports, "resolveBarkMood", () => resolveBarkMood);
 __igsDefine(exports, "pickBarkClip", () => pickBarkClip);
@@ -39311,6 +39327,8 @@ function normalizeSettingsValue(path, value) {
         if (path === 'readerSettings.spriteGenderScale.enabled') return value === true || value === 'true' || value === 1 || value === '1';
         const genderHeight = path.match(/^readerSettings\.spriteGenderScale\.(female|male|other)$/);
         if (genderHeight) return normalizeSpriteHeight(value, SPRITE_GENDER_SCALE_DEFAULTS[genderHeight[1]]);
+        const ageShorter = path.match(/^readerSettings\.spriteGenderScale\.(elderShorter|childShorter)$/);
+        if (ageShorter) return normalizeSpriteShorter(value, SPRITE_GENDER_SCALE_DEFAULTS[ageShorter[1]]);
         if (path === 'readerSettings.spriteDisplayScale') return normalizeSpriteDisplayScale(value);
         if (path === 'readerSettings.dialogTextEffectStrength') return Math.max(5, Math.min(50, Number(value) || 20));
         if (path === 'readerSettings.dialogTextEffectSize') return [0.4, 0.6, 0.8, 1, 1.2, 1.6, 2].includes(Number(value)) ? Number(value) : 0.8;
@@ -39425,7 +39443,9 @@ function normalizeSpriteDefaultScale(value) {
 
 // 设置里能填的立绘高度（基准高度、性别默认、角色自定义），单位是舞台高度百分比。
 const SPRITE_HEIGHT_RANGE = Object.freeze([60, 150]);
-const SPRITE_GENDER_SCALE_DEFAULTS = Object.freeze({ enabled: false, female: 90, male: 100, other: 95 });
+// elderShorter / childShorter：老人、儿童比同性别默认高度矮多少（百分点）。
+const SPRITE_GENDER_SCALE_DEFAULTS = Object.freeze({ enabled: false, female: 90, male: 100, other: 95, elderShorter: 5, childShorter: 20 });
+const SPRITE_SHORTER_RANGE = Object.freeze([0, 60]);
 
 // 留空或不是数字时用 fallback；超出范围夹到两端并取整。
 function normalizeSpriteHeight(value, fallback = null) {
@@ -39433,6 +39453,12 @@ function normalizeSpriteHeight(value, fallback = null) {
     const n = Number(value);
     if (!Number.isFinite(n)) return fallback;
     return Math.round(Math.max(SPRITE_HEIGHT_RANGE[0], Math.min(SPRITE_HEIGHT_RANGE[1], n)));
+}
+function normalizeSpriteShorter(value, fallback = 0) {
+    if (value == null || String(value).trim() === '') return fallback;
+    const n = Number(value);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.round(Math.max(SPRITE_SHORTER_RANGE[0], Math.min(SPRITE_SHORTER_RANGE[1], n)));
 }
 function normalizeSpriteGenderScale(value) {
     const src = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
@@ -39442,6 +39468,8 @@ function normalizeSpriteGenderScale(value) {
         female: normalizeSpriteHeight(src.female, defaults.female),
         male: normalizeSpriteHeight(src.male, defaults.male),
         other: normalizeSpriteHeight(src.other, defaults.other),
+        elderShorter: normalizeSpriteShorter(src.elderShorter, defaults.elderShorter),
+        childShorter: normalizeSpriteShorter(src.childShorter, defaults.childShorter),
     };
 }
 
@@ -39560,6 +39588,7 @@ __igsDefine(exports, "normalizeBtnOrder", () => normalizeBtnOrder);
 __igsDefine(exports, "normalizeSpriteLayouts", () => normalizeSpriteLayouts);
 __igsDefine(exports, "normalizeSpriteDefaultScale", () => normalizeSpriteDefaultScale);
 __igsDefine(exports, "normalizeSpriteHeight", () => normalizeSpriteHeight);
+__igsDefine(exports, "normalizeSpriteShorter", () => normalizeSpriteShorter);
 __igsDefine(exports, "normalizeSpriteGenderScale", () => normalizeSpriteGenderScale);
 __igsDefine(exports, "normalizeSpriteDisplayScale", () => normalizeSpriteDisplayScale);
 __igsDefine(exports, "applySpriteDisplayScale", () => applySpriteDisplayScale);
@@ -39568,6 +39597,7 @@ __igsDefine(exports, "resolveSpriteLayout", () => resolveSpriteLayout);
 __igsDefine(exports, "resolveActiveTheme", () => resolveActiveTheme);
 __igsDefine(exports, "renderDialogueHtml", () => renderDialogueHtml);
 __igsDefine(exports, "SPRITE_HEIGHT_RANGE", () => SPRITE_HEIGHT_RANGE);
+__igsDefine(exports, "SPRITE_SHORTER_RANGE", () => SPRITE_SHORTER_RANGE);
 });
 __igsRegister("src/visual/igs-ui/settings-tabs.js", function(module, exports, require) {
 const BASIC_TAB_TEMPLATE = `
@@ -40982,11 +41012,28 @@ __igsDefine(exports, "PSYCH_CHOICE_STYLE", () => PSYCH_CHOICE_STYLE);
 __igsDefine(exports, "PSYCH_HUD_THEME", () => PSYCH_HUD_THEME);
 });
 __igsRegister("src/visual/igs-ui/sprite-height.js", function(module, exports, require) {
-// 立绘默认高度：没被「调整立绘」单独调过的立绘，先看角色自定义高度，再看性别默认高度（开关打开时按 DNA 判断），最后是立绘基准高度。
-const { normalizeSpriteDefaultScale, normalizeSpriteGenderScale, normalizeSpriteHeight } = require("src/visual/igs-ui/settings-normalize.js");
-const { canonicalName, characterDnaGender } = require("src/visual/igs-ui/voice-bark.js");
+// 立绘默认高度：没被「调整立绘」单独调过的立绘，先看角色自定义高度，再看性别默认高度（开关打开时按 DNA 判断；没有 DNA 时看生成立绘的 tag；老人、儿童在此基础上再矮一点），最后是立绘基准高度。
+const { SPRITE_HEIGHT_RANGE, normalizeSpriteDefaultScale, normalizeSpriteGenderScale, normalizeSpriteHeight } = require("src/visual/igs-ui/settings-normalize.js");
+const { canonicalName, characterDnaText, detectVoiceGender } = require("src/visual/igs-ui/voice-bark.js");
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const plain = (value) => (value && typeof value === 'object' && !Array.isArray(value) ? value : null);
+
+// 年龄只分老人、儿童两档。先认明写的岁数（60 岁以上 / 12 岁以下，写了成年岁数就不再看称呼），再认称呼与 tag；
+// 刻意不认单字「老」（老师、老板）、elder（elder sister）和爷爷奶奶这类亲属称呼，childhood friend 也不会误中 child。
+const AGE_NUMBER_RE = /(\d{1,3})\s*(?:岁|周岁|歳|years?\s*old)/i;
+const ELDER_RE = /\b(?:old (?:man|woman|lady)|elderly|grandpa|grandma)\b|老人|老者|老头|老太|老妇|老翁|老妪|老爷爷|老奶奶|老婆婆|老爷子|年迈|年老|垂暮|花甲|古稀|耄耋|白发苍苍/i;
+const CHILD_RE = /\b(?:child|kid|toddler|loli|shota|little (?:girl|boy))\b|儿童|小孩|孩童|幼童|幼女|幼儿|女童|男童|小女孩|小男孩|萝莉|正太|小学生/i;
+function detectSpriteAge(text) {
+    const value = String(text || '');
+    const number = value.match(AGE_NUMBER_RE);
+    if (number) {
+        const years = Number(number[1]);
+        return years >= 60 ? 'elder' : years <= 12 ? 'child' : '';
+    }
+    const elder = ELDER_RE.test(value);
+    const child = CHILD_RE.test(value);
+    return elder === child ? '' : elder ? 'elder' : 'child';
+}
 
 // 角色自定义高度和声线一样按主名记在根素材库：{ 角色名: 60~150 }，留空的角色不进表。
 function normalizeCharacterSpriteScales(value) {
@@ -40999,8 +41046,8 @@ function normalizeCharacterSpriteScales(value) {
     return out;
 }
 
-// 返回 { characterScale, defaultScale, source }：characterScale 只在角色自定义时有值，交给 resolveSpriteLayout 压过模式整体缩放；
-// source 为 manual / female / male / other / base，设置页据此显示「自动」用的是哪一档。
+// 返回 { characterScale, defaultScale, source, age? }：characterScale 只在角色自定义时有值，交给 resolveSpriteLayout 压过模式整体缩放；
+// source 为 manual / female / male / other / base，按性别取高度时另给 age（elder / child / ''），设置页据此显示「自动」用的是哪一档。
 function resolveSpriteBaseScale(sceneAssets, readerSettings, character) {
     const assets = plain(sceneAssets) || {};
     const reader = plain(readerSettings) || {};
@@ -41012,10 +41059,17 @@ function resolveSpriteBaseScale(sceneAssets, readerSettings, character) {
     if (manual != null) return { characterScale: manual, defaultScale: base, source: 'manual' };
     const genders = normalizeSpriteGenderScale(reader.spriteGenderScale);
     if (!genders.enabled) return { characterScale: null, defaultScale: base, source: 'base' };
-    const gender = characterDnaGender(assets, name) || 'other';
-    return { characterScale: null, defaultScale: genders[gender], source: gender };
+    // 有 DNA 先看 DNA；待确认 / 仅本聊天的生成立绘没有 DNA，用生成时的 tag（第一个是 1girl / 1boy，接着写外观年龄），由 reader-host 挂在 _tempSpriteTags。
+    const dnaText = characterDnaText(assets, name);
+    const tempTags = plain(reader._tempSpriteTags) || {};
+    const tagText = Object.hasOwn(tempTags, name) ? tempTags[name] : '';
+    const gender = detectVoiceGender(dnaText) || detectVoiceGender(tagText) || 'other';
+    const age = detectSpriteAge(dnaText) || detectSpriteAge(tagText);
+    const shorter = age === 'elder' ? genders.elderShorter : age === 'child' ? genders.childShorter : 0;
+    return { characterScale: null, defaultScale: Math.max(SPRITE_HEIGHT_RANGE[0], genders[gender] - shorter), source: gender, age };
 }
 
+__igsDefine(exports, "detectSpriteAge", () => detectSpriteAge);
 __igsDefine(exports, "normalizeCharacterSpriteScales", () => normalizeCharacterSpriteScales);
 __igsDefine(exports, "resolveSpriteBaseScale", () => resolveSpriteBaseScale);
 });
@@ -75872,6 +75926,16 @@ function createAssetGenerationService(deps) {
         return tempUrl(currentTempRecords().get(tempAssetKeyOf(tempChatId, { type: 'sprite', name })));
     }
 
+    // 待确认 / 仅本聊天使用的立绘生成时写的 tag（第一个是 1girl / 1boy）：{ 角色名: tags }。
+    // 这些角色通常没有 DNA，立绘默认高度据此判断性别。
+    function tempSpriteTags() {
+        const out = {};
+        for (const record of currentTempRecords().values()) {
+            if (record.type === 'sprite' && record.name && record.tags && tempUrl(record)) out[record.name] = String(record.tags);
+        }
+        return out;
+    }
+
     // 同步取图：命中内存直接返回；否则异步从 IndexedDB 补并在补完后通知重渲染。
     function resolveUrl(url) {
         if (!isGeneratedAssetUrl(url)) return String(url || '');
@@ -76767,7 +76831,7 @@ function createAssetGenerationService(deps) {
     }
 
     return {
-        processMessage, resolveUrl, resolveThumbUrl, tempBackground, tempSceneTime, tempSprite, listReview, listTemp, setStatus, deleteImages, getImageDataUrl, getImagePrompt, saveImagePrompt, readStoredImage, writeStoredImage, importAssetImage,
+        processMessage, resolveUrl, resolveThumbUrl, tempBackground, tempSceneTime, tempSprite, tempSpriteTags, listReview, listTemp, setStatus, deleteImages, getImageDataUrl, getImagePrompt, saveImagePrompt, readStoredImage, writeStoredImage, importAssetImage,
         generateExpressionSet, generateExpressionImage, paintExpressionCaptions, generateSceneVariants, generateCharacterSprite, generateCharacterAvatar, writeWardrobePrompt, paintWardrobeReference,
         getEditableImage, saveMatteEdit,
         getRecord: (key) => currentTempRecords().get(key) || null,
