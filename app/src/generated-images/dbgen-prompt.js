@@ -260,7 +260,17 @@ export function characterSourceLines(name, sourcesText) {
     const text = String(sourcesText || '').trim();
     if (!text) return [];
     return [
-        `下面是「${name || ''}」在角色卡、世界书和数据库里的资料节选。长相和服装以角色设定（DNA）为准；设定没写到的按这些资料补，只取长相、穿着和身份气质，资料里的剧情不要画进去：`,
+        `下面是「${name || ''}」的资料节选（每段开头标了出处：角色卡、世界书、数据库或前文）。长相和服装以角色设定（DNA）为准；设定没写到的按这些资料补，只取长相、穿着和身份气质，资料里的剧情不要画进去：`,
+        text,
+    ];
+}
+
+// 背景：角色卡 / 世界书 / 数据库 / 前文里提到这个地点的节选，只取地点本身的样子。
+export function sceneSourceLines(name, sourcesText) {
+    const text = String(sourcesText || '').trim();
+    if (!text) return [];
+    return [
+        `下面是地点「${name || ''}」的资料节选（每段开头标了出处）。只取地点本身：档次、规模、建筑风格、年代、陈设和氛围；资料里的人物和剧情不要画进去：`,
         text,
     ];
 }
@@ -356,10 +366,17 @@ export function buildDbgenBackgroundBatchDescription(needs = []) {
         return `${index + 1}. ${need && need.name ? need.name : ''}${when ? `（${when}）` : ''}`;
     });
     const count = list.length;
+    const profiles = (Array.isArray(needs) ? needs : [])
+        .map((need, index) => {
+            const lines = sceneSourceLines(need && need.name, need && need.sources);
+            return lines.length ? [`第 ${index + 1} 份：`, ...lines].join('\n') : '';
+        })
+        .filter(Boolean);
     return [
         `为本楼写${count}张背景的提示词，按下面的顺序各一份，slotid 从 1 数到 ${count}。`,
         list.join('\n'),
         '地点陈设、光线与氛围依据楼层正文补充。',
+        ...profiles,
         '不要写生成点，不要从正文摘挂载句。',
     ].join('\n');
 }
@@ -373,12 +390,14 @@ export function buildDbgenAssetDescription(need = {}) {
             SPRITE_NO_BACKGROUND_LINE,
             SPRITE_DAILY_POSE_LINE,
             ...characterDnaLines(need.name, need.dna),
+            ...characterSourceLines(need.name, need.sources),
         ].join('\n');
     }
     if (need.type === 'background') {
         return [
             `画场景「${need.name || ''}」${when ? `（${when}）` : ''}的背景图。`,
             '地点陈设、光线与氛围依据楼层正文补充。',
+            ...sceneSourceLines(need.name, need.sources),
         ].join('\n');
     }
     return '';
