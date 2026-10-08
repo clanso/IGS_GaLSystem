@@ -180,7 +180,13 @@ function outfitMetaSummary(entry, words, scenes, avatar) {
     ].filter(Boolean).join(' · ');
 }
 
-function renderOutfitPanel(charName, name, entry, baseMoods, sceneAssets, icons, expressionNotes, resolveUrl, isOpen) {
+// 「清空立绘」多选时每格前面的勾选框；没图的格子不能选，占个空位让名字对齐。
+export function spriteClearPick(c, o, m, url, on) {
+    if (!String(url || '').trim()) return '<span class="igs-sprite-clear-pick is-empty" aria-hidden="true"></span>';
+    return `<button type="button" class="igs-sprite-clear-pick${on ? ' is-on' : ''}" data-action="sprite-clear-pick:${c}:${o}:${m}" role="checkbox" aria-checked="${on ? 'true' : 'false'}" title="${on ? '取消选中' : '选中清空'}">${on ? '✓' : ''}</button>`;
+}
+
+function renderOutfitPanel(charName, name, entry, baseMoods, sceneAssets, icons, expressionNotes, resolveUrl, isOpen, clearing = null) {
     const c = encSeg(charName);
     const o = encSeg(name);
     const moods = plain(entry.moods);
@@ -217,6 +223,7 @@ function renderOutfitPanel(charName, name, entry, baseMoods, sceneAssets, icons,
         ], `「${mood}」的操作`);
         // 生成图的格子不放编号地址输入框；自己填地址的格子才有输入框。
         return `<div class="igs-outfit-slot${filled ? '' : ' is-fallback'}" data-outfit-slot="${esc(mood)}">`
+            + (clearing ? spriteClearPick(c, o, encSeg(mood), raw, clearing.has(mood)) : '')
             + (filled ? thumb(url, mood, '', resolveUrl) : thumb(preview.url, mood, ' is-ghost', resolveUrl))
             + `<span class="igs-btn-mgr-label">${esc(mood)}</span>`
             + (imageId ? '' : `<input class="igs-scene-url-input" data-scene-outfit-char="${esc(charName)}" data-scene-outfit="${esc(name)}" data-scene-outfit-mood="${esc(mood)}" value="${esc(url || '')}" placeholder="URL或data:image/...">`)
@@ -240,7 +247,8 @@ function renderOutfitPanel(charName, name, entry, baseMoods, sceneAssets, icons,
 }
 
 // 角色卡的立绘区：「原装 · 服装…」标签切换。原装标签显示原有情绪槽；服装标签显示该服装的槽、词、场景、头像与缺图预览。
-export function renderCharacterSlotTabs({ charName, baseMoods, baseListHtml, baseMenuItems = [], outfits, activeOutfit, sceneAssets, icons, expressionNotes, resolveUrl, isOpen = () => false }) {
+// spriteClear：「清空立绘」多选状态 { character, outfit, moods: Set }，正好是这个角色这一套时显示勾选框和操作条。
+export function renderCharacterSlotTabs({ charName, baseMoods, baseListHtml, baseMenuItems = [], outfits, activeOutfit, sceneAssets, icons, expressionNotes, resolveUrl, isOpen = () => false, spriteClear = null }) {
     const map = plain(outfits);
     const names = Object.keys(map).filter((item) => !isBuiltinNudeOutfit(item));
     const active = names.includes(activeOutfit) ? activeOutfit : '';
@@ -270,21 +278,34 @@ export function renderCharacterSlotTabs({ charName, baseMoods, baseListHtml, bas
         + `<button type="button" class="igs-settings-action igs-outfit-quick-btn" data-action="${exprAction}">表情差分</button>`
         + (pending.length ? `<button type="button" class="igs-settings-action igs-outfit-quick-btn" data-action="${resumeAction}" title="词已经写好，直接出图，不重写">继续生图（${pending.length}）</button>` : '')
         + `</span>`;
+    // 清空立绘：只清这一套（当前标签）里选中的格子。
+    const clearItem = menuItem(`sprite-clear:${c}:${o}`, '清空立绘（多选）');
     const menu = active
         ? renderRowMenu([
             menuItem(`ui-toggle-open:${encSeg(metaKey)}`, isOpen(metaKey) ? '收起服装设置' : '服装设置（衣柜、服装词…）'),
+            clearItem,
             menuItem(`scene-rename-outfit:${c}:${o}`, '重命名这套'),
             menuItem(`scene-remove-outfit:${c}:${o}`, '删除这套', ' is-danger'),
         ], `「${active}」的操作`)
-        : renderRowMenu(baseMenuItems, '原装的操作');
+        : renderRowMenu([...baseMenuItems, clearItem], '原装的操作');
     const bar = `<div class="igs-outfit-tabs" role="tablist" data-outfit-tabs="${esc(charName)}">${tabs}`
         + `<button type="button" class="igs-outfit-tab igs-outfit-tab-add" data-action="scene-add-outfit:${c}" title="添加服装">+服装</button>`
         + `<button type="button" class="igs-outfit-tab igs-outfit-tab-add igs-outfit-tab-mood" data-action="${active ? `scene-add-outfit-mood:${c}:${o}` : `scene-add-mood:${c}`}" title="给${active ? `「${esc(active)}」` : '原装'}添加情绪">+情绪</button>`
         + `${quickButtons}${menu}</div>`;
+    const clearing = spriteClear && spriteClear.moods instanceof Set && spriteClear.character === charName && spriteClear.outfit === active
+        ? spriteClear.moods : null;
+    const slotUrls = active ? plain(plain(map[active]).moods) : plain(plain(plain(sceneAssets).characters)[charName]);
+    const filledCount = Object.values(slotUrls).filter((url) => String(url || '').trim()).length;
+    const clearBar = clearing
+        ? `<div class="igs-sprite-clear-bar"><span>勾选要清空的立绘（${active ? `「${esc(active)}」` : '原装'}，已选 ${clearing.size}/${filledCount}）</span>`
+            + `<button type="button" class="igs-settings-action" data-action="sprite-clear-all:${c}:${o}">${clearing.size && clearing.size === filledCount ? '全不选' : '全选'}</button>`
+            + `<button type="button" class="igs-settings-action is-danger" data-action="sprite-clear-apply:${c}:${o}"${clearing.size ? '' : ' disabled'}>清空选中</button>`
+            + `<button type="button" class="igs-settings-action" data-action="sprite-clear:${c}:${o}">取消</button></div>`
+        : '';
     const panel = active
-        ? renderOutfitPanel(charName, active, plain(map[active]) || { words: [], moods: {} }, baseMoods, sceneAssets, icons, expressionNotes, resolveUrl, isOpen)
+        ? renderOutfitPanel(charName, active, plain(map[active]) || { words: [], moods: {} }, baseMoods, sceneAssets, icons, expressionNotes, resolveUrl, isOpen, clearing)
         : baseListHtml;
-    return `<div class="igs-outfit-area" data-outfit-area="${esc(charName)}">${bar}${panel}</div>`;
+    return `<div class="igs-outfit-area" data-outfit-area="${esc(charName)}">${bar}${clearBar}${panel}</div>`;
 }
 
 // 规则页的衣柜提示词。focus 是从服装面板跳过来的那一条，高亮显示。
@@ -433,6 +454,11 @@ span.igs-char-dna-btn{display:inline-flex;color:var(--igs-settings-ink-3)}
 .igs-outfit-hint{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:var(--igs-settings-ink-4)}
 .igs-outfit-slot.is-fallback>.igs-btn-mgr-label{color:var(--igs-settings-ink-4)}
 .igs-outfit-fill-all{display:flex;justify-content:flex-end;margin-top:2px}
+.igs-sprite-clear-bar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:4px 0;padding:6px 8px;border-radius:8px;background:var(--igs-settings-highlight);font-size:12px;color:var(--igs-settings-ink-2)}
+.igs-sprite-clear-bar>span{flex:1;min-width:0}
+.igs-sprite-clear-pick{flex:0 0 18px;width:18px;height:18px;padding:0;border:1.5px solid var(--igs-settings-ink-4);border-radius:4px;background:transparent;color:var(--igs-settings-ink);font-size:12px;line-height:15px;text-align:center;cursor:pointer}
+.igs-sprite-clear-pick.is-on{border-color:var(--igs-settings-danger);background:var(--igs-settings-danger);color:#fff}
+.igs-sprite-clear-pick.is-empty{border-color:transparent;cursor:default}
 .igs-outfit-meta-body{display:flex;flex-direction:column;gap:6px;margin:2px 0 6px 6px;padding:2px 0 2px 12px;border-left:1px solid var(--igs-settings-line)}
 .igs-outfit-meta-row{display:flex;align-items:center;gap:8px;min-width:0}
 .igs-outfit-meta-row .igs-mood-word-list{flex:1;min-width:0}

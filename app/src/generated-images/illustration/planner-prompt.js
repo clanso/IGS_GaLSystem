@@ -81,7 +81,7 @@ export function buildPlannerUserPrompt({ numberedText, scenes, characters, previ
         `【出场角色】${characters && characters.length ? characters.join('、') : '未标注'}`,
         dnaBlock,
         sourceLines.length ? `【角色资料】下面是提到这些角色的节选，每段开头标了出处。长相和服装以 DNA 与正文为准，没写到的按资料补；资料里的剧情不要画进去。\n${sourceLines.join('\n')}` : '',
-        previousText ? `【前文摘要】\n${previousText}` : '',
+        previousText ? `【前文（原文，从早到近）】\n${previousText}` : '',
         `【本楼正文（已编号）】\n${numberedText}`,
         `【要求】${countLine}${isNsfw ? '本楼为 NSFW 场景，请选择最具代表性的画面。' : ''}`,
         '请直接按输出格式给出字段。',
