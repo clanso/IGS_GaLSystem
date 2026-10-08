@@ -92,7 +92,7 @@ const { createReaderImageService } = require("src/generated-images/reader-image-
 const { createPromptInjector } = require("src/host/prompt-injector.js");
 const { createIllustrationMessageHost } = require("src/host/illustration-message-host.js");
 const { createSecondaryLlm } = require("src/host/secondary-llm.js");
-const { formatCharacterSources, pickCharacterSources, pickSceneSources, readSourceMaterial } = require("src/host/character-sources.js");
+const { formatCharacterSources, pickCharacterSources, pickSceneSources, pickSettingMaterial, readSourceMaterial } = require("src/host/character-sources.js");
 const { createImageBackend, mergeLegacyNaiSettings } = require("src/generated-images/image-backend.js");
 const { createNaiOfficialClient } = require("src/generated-images/nai-official-client.js");
 const { createImageJobLog } = require("src/generated-images/image-job-log.js");
@@ -235,6 +235,8 @@ function bootstrapIGS(options = {}) {
         readCharacterSources: (names, options) => readPlannerSources(globalObject, names, pickCharacterSources, options),
         // 楼内补背景：同样按地点名挑角色卡描述 / 场景栏、世界书、数据库节选。
         readSceneSources: (names, options) => readPlannerSources(globalObject, names, pickSceneSources, options),
+        // 「读取上下文」加大预算时写词附的全部设定资料：整张角色卡、角色卡 / 聊天 / 全局世界书的全部条目、数据库。
+        readSettingMaterial: async (names, { limit = 0 } = {}) => pickSettingMaterial(await readSourceMaterial(globalObject, { withGlobal: true }), { names, limit }),
         events,
         report: reportImageJob,
     });
@@ -14590,6 +14592,7 @@ function createIgsReaderHost(options = {}) {
                 spriteHeight: { sceneAssets, reader },
                 resolveUrl: resolveGenerated,
                 expressionNotes: normalizeGeneratedLibrary(sceneAssets.generated).expressionNotes,
+                spriteClear: asyncState.spriteClear || null,
                 folderSelect: (name, opts) => renderAssetFolderSelect('characters', name, assetFolders.characters, opts),
                 scopeTag,
                 isOpen: (key) => Boolean(asyncState.advancedOpen && asyncState.advancedOpen[key]),
@@ -16775,7 +16778,13 @@ function outfitMetaSummary(entry, words, scenes, avatar) {
     ].filter(Boolean).join(' · ');
 }
 
-function renderOutfitPanel(charName, name, entry, baseMoods, sceneAssets, icons, expressionNotes, resolveUrl, isOpen) {
+// 「清空立绘」多选时每格前面的勾选框；没图的格子不能选，占个空位让名字对齐。
+function spriteClearPick(c, o, m, url, on) {
+    if (!String(url || '').trim()) return '<span class="igs-sprite-clear-pick is-empty" aria-hidden="true"></span>';
+    return `<button type="button" class="igs-sprite-clear-pick${on ? ' is-on' : ''}" data-action="sprite-clear-pick:${c}:${o}:${m}" role="checkbox" aria-checked="${on ? 'true' : 'false'}" title="${on ? '取消选中' : '选中清空'}">${on ? '✓' : ''}</button>`;
+}
+
+function renderOutfitPanel(charName, name, entry, baseMoods, sceneAssets, icons, expressionNotes, resolveUrl, isOpen, clearing = null) {
     const c = encSeg(charName);
     const o = encSeg(name);
     const moods = plain(entry.moods);
@@ -16812,6 +16821,7 @@ function renderOutfitPanel(charName, name, entry, baseMoods, sceneAssets, icons,
         ], `「${mood}」的操作`);
         // 生成图的格子不放编号地址输入框；自己填地址的格子才有输入框。
         return `<div class="igs-outfit-slot${filled ? '' : ' is-fallback'}" data-outfit-slot="${esc(mood)}">`
+            + (clearing ? spriteClearPick(c, o, encSeg(mood), raw, clearing.has(mood)) : '')
             + (filled ? thumb(url, mood, '', resolveUrl) : thumb(preview.url, mood, ' is-ghost', resolveUrl))
             + `<span class="igs-btn-mgr-label">${esc(mood)}</span>`
             + (imageId ? '' : `<input class="igs-scene-url-input" data-scene-outfit-char="${esc(charName)}" data-scene-outfit="${esc(name)}" data-scene-outfit-mood="${esc(mood)}" value="${esc(url || '')}" placeholder="URL或data:image/...">`)
@@ -16835,7 +16845,8 @@ function renderOutfitPanel(charName, name, entry, baseMoods, sceneAssets, icons,
 }
 
 // 角色卡的立绘区：「原装 · 服装…」标签切换。原装标签显示原有情绪槽；服装标签显示该服装的槽、词、场景、头像与缺图预览。
-function renderCharacterSlotTabs({ charName, baseMoods, baseListHtml, baseMenuItems = [], outfits, activeOutfit, sceneAssets, icons, expressionNotes, resolveUrl, isOpen = () => false }) {
+// spriteClear：「清空立绘」多选状态 { character, outfit, moods: Set }，正好是这个角色这一套时显示勾选框和操作条。
+function renderCharacterSlotTabs({ charName, baseMoods, baseListHtml, baseMenuItems = [], outfits, activeOutfit, sceneAssets, icons, expressionNotes, resolveUrl, isOpen = () => false, spriteClear = null }) {
     const map = plain(outfits);
     const names = Object.keys(map).filter((item) => !isBuiltinNudeOutfit(item));
     const active = names.includes(activeOutfit) ? activeOutfit : '';
@@ -16865,21 +16876,34 @@ function renderCharacterSlotTabs({ charName, baseMoods, baseListHtml, baseMenuIt
         + `<button type="button" class="igs-settings-action igs-outfit-quick-btn" data-action="${exprAction}">表情差分</button>`
         + (pending.length ? `<button type="button" class="igs-settings-action igs-outfit-quick-btn" data-action="${resumeAction}" title="词已经写好，直接出图，不重写">继续生图（${pending.length}）</button>` : '')
         + `</span>`;
+    // 清空立绘：只清这一套（当前标签）里选中的格子。
+    const clearItem = menuItem(`sprite-clear:${c}:${o}`, '清空立绘（多选）');
     const menu = active
         ? renderRowMenu([
             menuItem(`ui-toggle-open:${encSeg(metaKey)}`, isOpen(metaKey) ? '收起服装设置' : '服装设置（衣柜、服装词…）'),
+            clearItem,
             menuItem(`scene-rename-outfit:${c}:${o}`, '重命名这套'),
             menuItem(`scene-remove-outfit:${c}:${o}`, '删除这套', ' is-danger'),
         ], `「${active}」的操作`)
-        : renderRowMenu(baseMenuItems, '原装的操作');
+        : renderRowMenu([...baseMenuItems, clearItem], '原装的操作');
     const bar = `<div class="igs-outfit-tabs" role="tablist" data-outfit-tabs="${esc(charName)}">${tabs}`
         + `<button type="button" class="igs-outfit-tab igs-outfit-tab-add" data-action="scene-add-outfit:${c}" title="添加服装">+服装</button>`
         + `<button type="button" class="igs-outfit-tab igs-outfit-tab-add igs-outfit-tab-mood" data-action="${active ? `scene-add-outfit-mood:${c}:${o}` : `scene-add-mood:${c}`}" title="给${active ? `「${esc(active)}」` : '原装'}添加情绪">+情绪</button>`
         + `${quickButtons}${menu}</div>`;
+    const clearing = spriteClear && spriteClear.moods instanceof Set && spriteClear.character === charName && spriteClear.outfit === active
+        ? spriteClear.moods : null;
+    const slotUrls = active ? plain(plain(map[active]).moods) : plain(plain(plain(sceneAssets).characters)[charName]);
+    const filledCount = Object.values(slotUrls).filter((url) => String(url || '').trim()).length;
+    const clearBar = clearing
+        ? `<div class="igs-sprite-clear-bar"><span>勾选要清空的立绘（${active ? `「${esc(active)}」` : '原装'}，已选 ${clearing.size}/${filledCount}）</span>`
+            + `<button type="button" class="igs-settings-action" data-action="sprite-clear-all:${c}:${o}">${clearing.size && clearing.size === filledCount ? '全不选' : '全选'}</button>`
+            + `<button type="button" class="igs-settings-action is-danger" data-action="sprite-clear-apply:${c}:${o}"${clearing.size ? '' : ' disabled'}>清空选中</button>`
+            + `<button type="button" class="igs-settings-action" data-action="sprite-clear:${c}:${o}">取消</button></div>`
+        : '';
     const panel = active
-        ? renderOutfitPanel(charName, active, plain(map[active]) || { words: [], moods: {} }, baseMoods, sceneAssets, icons, expressionNotes, resolveUrl, isOpen)
+        ? renderOutfitPanel(charName, active, plain(map[active]) || { words: [], moods: {} }, baseMoods, sceneAssets, icons, expressionNotes, resolveUrl, isOpen, clearing)
         : baseListHtml;
-    return `<div class="igs-outfit-area" data-outfit-area="${esc(charName)}">${bar}${panel}</div>`;
+    return `<div class="igs-outfit-area" data-outfit-area="${esc(charName)}">${bar}${clearBar}${panel}</div>`;
 }
 
 // 规则页的衣柜提示词。focus 是从服装面板跳过来的那一条，高亮显示。
@@ -17027,6 +17051,11 @@ span.igs-char-dna-btn{display:inline-flex;color:var(--igs-settings-ink-3)}
 .igs-outfit-hint{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:var(--igs-settings-ink-4)}
 .igs-outfit-slot.is-fallback>.igs-btn-mgr-label{color:var(--igs-settings-ink-4)}
 .igs-outfit-fill-all{display:flex;justify-content:flex-end;margin-top:2px}
+.igs-sprite-clear-bar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:4px 0;padding:6px 8px;border-radius:8px;background:var(--igs-settings-highlight);font-size:12px;color:var(--igs-settings-ink-2)}
+.igs-sprite-clear-bar>span{flex:1;min-width:0}
+.igs-sprite-clear-pick{flex:0 0 18px;width:18px;height:18px;padding:0;border:1.5px solid var(--igs-settings-ink-4);border-radius:4px;background:transparent;color:var(--igs-settings-ink);font-size:12px;line-height:15px;text-align:center;cursor:pointer}
+.igs-sprite-clear-pick.is-on{border-color:var(--igs-settings-danger);background:var(--igs-settings-danger);color:#fff}
+.igs-sprite-clear-pick.is-empty{border-color:transparent;cursor:default}
 .igs-outfit-meta-body{display:flex;flex-direction:column;gap:6px;margin:2px 0 6px 6px;padding:2px 0 2px 12px;border-left:1px solid var(--igs-settings-line)}
 .igs-outfit-meta-row{display:flex;align-items:center;gap:8px;min-width:0}
 .igs-outfit-meta-row .igs-mood-word-list{flex:1;min-width:0}
@@ -17146,6 +17175,7 @@ __igsDefine(exports, "placeRowMenu", () => placeRowMenu);
 __igsDefine(exports, "pendingExpressionCaptions", () => pendingExpressionCaptions);
 __igsDefine(exports, "transferIcons", () => transferIcons);
 __igsDefine(exports, "slotActions", () => slotActions);
+__igsDefine(exports, "spriteClearPick", () => spriteClearPick);
 __igsDefine(exports, "renderCharacterSlotTabs", () => renderCharacterSlotTabs);
 __igsDefine(exports, "renderWardrobe", () => renderWardrobe);
 __igsDefine(exports, "renderReviewCard", () => renderReviewCard);
@@ -36048,7 +36078,7 @@ const { TOOLBAR_ACTIONS } = require("src/visual/igs-ui/reader-host-constants.js"
 const { STAGE_SHAKE_INTENSITIES } = require("src/visual/igs-ui/stage-shake-runtime.js");
 const { CHAT_SHOW_BUBBLE_RADIUS_LEVELS, CHAT_SHOW_DIM_LEVELS, CHAT_SHOW_PROMPT_RULE } = require("src/visual/igs-ui/chat-show-runtime.js");
 const { CHAT_SFX_PRESET_LABELS } = require("src/visual/igs-ui/chat-sfx.js");
-const { SLOT_ICONS, menuItem, transferIcons, renderCharacterSlotTabs, renderReviewCard, renderRowMenu, slotActions } = require("src/visual/igs-ui/settings-outfit-fields.js");
+const { SLOT_ICONS, menuItem, transferIcons, renderCharacterSlotTabs, renderReviewCard, renderRowMenu, slotActions, spriteClearPick } = require("src/visual/igs-ui/settings-outfit-fields.js");
 const { MAGIC_HOUSES, normalizeMagicHouse } = require("src/visual/igs-ui/dialog-theme-css-skins.js");
 const { resolveCharacterMagicHouse } = require("src/visual/igs-ui/magic-house.js");
 const { VOICE_PITCH_LIMIT, VOICE_SPEED_RANGE, normalizeCharacterVoice, resolveCharacterVoice, voicePackOptions } = require("src/visual/igs-ui/voice-bark.js");
@@ -36409,6 +36439,8 @@ function renderCharacterAssetList(characters, options = {}) {
     const outfitMap = options.characterOutfits && typeof options.characterOutfits === 'object' && !Array.isArray(options.characterOutfits)
         ? options.characterOutfits : {};
     const outfitTabs = options.outfitTabs && typeof options.outfitTabs === 'object' ? options.outfitTabs : {};
+    // 「清空立绘」多选：{ character, outfit, moods: Set }，不在多选时为 null。
+    const spriteClear = options.spriteClear && options.spriteClear.moods instanceof Set ? options.spriteClear : null;
     // 折叠区的展开状态由宿主按 data-advanced 记住，重渲染后不会收起。
     const isOpen = typeof options.isOpen === 'function' ? options.isOpen : () => false;
     // 魔法星夜才显示学院行；未指定时按 DNA 自动识别，识别不出用全局配色。
@@ -36466,7 +36498,9 @@ function renderCharacterAssetList(characters, options = {}) {
                 menuItem(`scene-rename-mood:${c}:${m}`, '重命名'),
                 menuItem(`scene-remove-mood:${c}:${m}`, '删除', ' is-danger'),
             ], `「${mood}」的操作`);
+            const clearing = spriteClear && spriteClear.character === charName && spriteClear.outfit === '';
             const collapsedRow = `<div class="igs-btn-mgr-row igs-scene-mood-row">`
+                + (clearing ? spriteClearPick(c, '', m, rawUrl, spriteClear.moods.has(mood)) : '')
                 + rowThumb
                 + `<span class="igs-btn-mgr-label">${esc(mood)}</span>`
                 + (imageId ? '' : `<input class="igs-scene-url-input" data-scene-char="${esc(charName)}" data-scene-mood="${esc(mood)}" value="${esc(url || '')}" placeholder="URL或data:image/...">`)
@@ -36490,6 +36524,7 @@ function renderCharacterAssetList(characters, options = {}) {
             sceneAssets: options.sceneAssets || { characters, characterAliases: aliasesByCharacter, characterOutfits: outfitMap, moodGroups },
             icons: { pencil, trash },
             isOpen,
+            spriteClear,
         });
         // 和场景一样，每个角色平时只有一行；点名字或右边箭头才展开服装和立绘。
         const openKey = `char-open:${charName}`;
@@ -41664,7 +41699,7 @@ function buildPlannerUserPrompt({ numberedText, scenes, characters, previousText
         `【出场角色】${characters && characters.length ? characters.join('、') : '未标注'}`,
         dnaBlock,
         sourceLines.length ? `【角色资料】下面是提到这些角色的节选，每段开头标了出处。长相和服装以 DNA 与正文为准，没写到的按资料补；资料里的剧情不要画进去。\n${sourceLines.join('\n')}` : '',
-        previousText ? `【前文摘要】\n${previousText}` : '',
+        previousText ? `【前文（原文，从早到近）】\n${previousText}` : '',
         `【本楼正文（已编号）】\n${numberedText}`,
         `【要求】${countLine}${isNsfw ? '本楼为 NSFW 场景，请选择最具代表性的画面。' : ''}`,
         '请直接按输出格式给出字段。',
@@ -42335,7 +42370,10 @@ function describeAssetNeed(need, index) {
     if (need.dna && flat(need.dna.defaultAppearance)) dnaNotes.push(`默认外观：${flat(need.dna.defaultAppearance)}`);
     return { id: `ch${index + 1}`, line: [`立绘｜角色：${need.name}`, ...dnaNotes].join('｜') };
 }
-function buildAssetPlannerUserPrompt({ needs = [], readableText = '', previousText = '', world = null } = {}) {
+
+// settingMaterial：「读取上下文」加大预算时的全部设定资料（整张角色卡、世界书、数据库），放在最前面；
+// 这时提示词很长，末尾再列一遍要写的素材。
+function buildAssetPlannerUserPrompt({ needs = [], readableText = '', previousText = '', settingMaterial = '', world = null } = {}) {
     const listed = needs.map((need, index) => {
         const { id, line } = describeAssetNeed(need, index);
         return `${id}｜${line}`;
@@ -42346,15 +42384,18 @@ function buildAssetPlannerUserPrompt({ needs = [], readableText = '', previousTe
         ? `${describeAssetNeed(need, index).id}「${need.name}」：\n${String(need.sources).trim()}` : '')).filter(Boolean);
     const sources = sourcesOf('sprite');
     const sceneSources = sourcesOf('background');
+    const material = String(settingMaterial || '').trim();
     return [
+        material ? `【设定资料】下面是角色卡、世界书和数据库的全部设定（每段开头标了出处），地点和角色的样子都以这些设定和正文为准。\n${material}` : '',
         `【需要生成的素材】\n${listed.join('\n')}`,
         worldLines.length ? `【世界观】\n${worldLines.join('\n')}` : '',
         needs.some((need) => need.type === 'sprite' && need.dna)
             ? '【角色 DNA】标注了固定身份或默认外观的立绘，tags 不得改变这些特征，只补充正文中额外交代的内容。' : '',
         sources.length ? `【角色资料】下面是提到这些角色的节选，每段开头标了出处（角色卡、世界书、数据库或前文）。长相和服装以 DNA 为准；DNA 没写到的按资料补，只取长相、穿着和身份气质，资料里的剧情不要画进去。\n${sources.join('\n')}` : '',
         sceneSources.length ? `【场景资料】下面是提到这些地点的节选，每段开头标了出处。背景 tags 要写出资料里地点的档次、规模、建筑风格、年代、陈设和氛围；资料里的人物和剧情不要画进去。\n${sceneSources.join('\n')}` : '',
-        previousText ? `【前文摘要】\n${previousText}` : '',
+        previousText ? `【前文（原文，从早到近）】\n${previousText}` : '',
         `【本楼正文】\n${readableText}`,
+        material ? `【再列一遍要写的素材】\n${listed.join('\n')}` : '',
         '请直接按输出格式给出字段。',
     ].filter(Boolean).join('\n\n');
 }
@@ -42600,7 +42641,9 @@ function previousMessages(messageHost, messageId, count) {
 }
 
 // 返回 { budget, floorChars, previousText }：floorChars 是本楼正文最多读几个字。
-function readPlannerContext(messageHost, messageId, llm, floorLength = 0) {
+// reserved：同一份提示词里另外带的资料（设定资料等）占掉的字数，前文相应少读。
+// 设置页写词没有「本楼」：messageId 传 Infinity，从最新一条往前读。
+function readPlannerContext(messageHost, messageId, llm, floorLength = 0, reserved = 0) {
     const budget = contextBudgetChars(llm);
     if (!budget) {
         const floors = llm.contextFloors > 0 && typeof messageHost.readPreviousAiTexts === 'function'
@@ -42609,7 +42652,7 @@ function readPlannerContext(messageHost, messageId, llm, floorLength = 0) {
     }
     // 本楼最多占一半；资料节选另外加，所以前文只用到预算的九成。
     const floorChars = Math.floor(budget / 2);
-    let left = Math.floor(budget * 0.9) - Math.min(floorLength, floorChars);
+    let left = Math.floor(budget * 0.9) - Math.min(floorLength, floorChars) - Math.max(0, reserved);
     const kept = [];
     const messages = previousMessages(messageHost, messageId, Number.MAX_SAFE_INTEGER);
     for (let i = messages.length - 1; i >= 0 && left > 0; i -= 1) {
@@ -45766,6 +45809,7 @@ const { findChatu8Host, requestChatu8Image } = require("src/generated-images/cha
 const { findBaibaiApi, requestBaibaiImage } = require("src/generated-images/baibai-client.js");
 const { waitFloorPromptTags } = require("src/generated-images/floor-prompt-tags.js");
 const { writeCaptionsWithLlm } = require("src/generated-images/illustration/caption-writer.js");
+const { plannerLlmSettings } = require("src/generated-images/illustration/planner-context.js");
 // 生图来源：nai = IGS 内置 NAI；dbgen = 数据库生图插件（window.NaiDbGen）；
 // extension = 智绘姬：剧情 CG、素材与物品图经智绘姬的出图事件生成，剧情 CG 优先用它写在楼层里的词；
 // baibai = 柏宝绘：经其公开接口 globalThis.STBaiBaiImage 出图，图不进柏宝绘图库与聊天记录；剧情 CG 优先用它写在楼层里的词。
@@ -45948,7 +45992,7 @@ function createImageBackend({ nai, getBridge, global: globalObject = globalThis,
     // 表情差分、头像、立绘与服装：数据库生图之外的来源由副 LLM 写词，返回形状与插件一致。
     async function writeDbgenPrompt(meta = {}) {
         if (describe().mode !== 'dbgen') {
-            return writeCaptionsWithLlm(llm, normalizeAutoIllustrationSettings(readBridge().autoIllustration).llm, meta.description);
+            return writeCaptionsWithLlm(llm, plannerLlmSettings(normalizeAutoIllustrationSettings(readBridge().autoIllustration).llm), meta.description);
         }
         const api = findDbgenApi(globalObject);
         if (!api) return { ok: false, error: `未检测到${DBGEN_LABEL}` };
@@ -61008,8 +61052,6 @@ const { assetOwnerKey, draftAssetLibrary, draftEffectiveAssets, effectiveSceneAs
 const { buildCharacterCardPack, buildImageZip, buildPresetArchive, mergeLabelGroups, parseCharacterCardPack, parsePresetArchive, parseSettingsArchive, spriteEntriesForNames } = require("src/scene/card-pack.js");
 const { getSillyTavernContext } = require("src/host/tavern-helper-adapter.js");
 const { collectCharacterSources, formatCharacterSources, pickCharacterSources, pickChatMentions, readSourceMaterial } = require("src/host/character-sources.js");
-const { normalizeAutoIllustrationSettings } = require("src/generated-images/illustration/auto-illustration-settings.js");
-const { contextBudgetChars } = require("src/generated-images/illustration/planner-context.js");
 const { extractWorldSummary, prepareWorldContext } = require("src/visual/igs-ui/world-context.js");
 const { localImageCacheFor } = require("src/media/tavern-image-cache.js");
 const { buildPageDiagnostic } = require("src/visual/igs-ui/page-diagnostic.js");
@@ -61083,7 +61125,7 @@ function assetFolderScope(settingsState, options) {
 
 const CHARACTER_FIELDS = ['characters', 'characterOutfits', 'characterDna', 'characterAliases', 'statusAvatars'];
 const SCENE_ACTION = /^scene-(?:(?:add|remove|rename|set|toggle|pick)-(?:bg|bg-word|bg-url|time|time-url|weather|weather-url)|variant-(?:set|retry))$/;
-const CHARACTER_ACTION = /^(?:scene-(?:add|remove|rename|set|toggle|pick)-(?:char|char-alias|mood|mood-url|dna-char|outfit-mood)|status-avatar-(?:pick|clear|set-url|generate)|char-generate-sprite|char-persona-extract|outfit-generate-nude|char-expression-(?:prompt|set|retry|resume)|outfit-expression-(?:prompt|set|retry|resume))$/;
+const CHARACTER_ACTION = /^(?:scene-(?:add|remove|rename|set|toggle|pick)-(?:char|char-alias|mood|mood-url|dna-char|outfit-mood)|status-avatar-(?:pick|clear|set-url|generate)|char-generate-sprite|char-persona-extract|outfit-generate-nude|char-expression-(?:prompt|set|retry|resume)|outfit-expression-(?:prompt|set|retry|resume)|sprite-clear(?:-pick|-all|-apply)?)$/;
 
 // 服装的适用场景可能指向另一边的场景：场景改名、删除时全局和本卡的服装都要跟上。
 function linkedCharacterOutfits(settingsState) {
@@ -61203,17 +61245,14 @@ async function extractCharacterPersona({ service, globalObj, sceneAssets, name }
 }
 
 // 画默认立绘、头像时给写词的角色资料节选：比提炼性格时短，只补 DNA 没写到的长相和穿着。
-// 「副 LLM → 读取上下文」加大了预算就给长的，正文里提到这个角色的段落也往前多翻。
+// 「副 LLM → 读取上下文」加大了预算时，素材服务另在说明前附上全部设定资料和正文原文。
 const SPRITE_SOURCE_LIMITS = Object.freeze({ card: 2000, worldbook: 2500, entry: 1000, database: 800 });
-const LARGE_SPRITE_SOURCE_LIMITS = Object.freeze({ card: 8000, worldbook: 20000, entry: 5000, database: 5000 });
 const characterAliasesOf = (sceneAssets, name) => (sceneAssets.characterAliases && Array.isArray(sceneAssets.characterAliases[name]) ? sceneAssets.characterAliases[name] : []);
 
 // 角色卡 / 世界书 / 数据库节选，加上正文里提到这个角色的段落（长相、穿着常写在剧情里）。
-function characterSourcesText(settingsState, material, sceneAssets, name) {
-    const bridge = settingsState && settingsState.draft && settingsState.draft.bridge ? settingsState.draft.bridge : {};
-    const large = contextBudgetChars(normalizeAutoIllustrationSettings(bridge.autoIllustration).llm) > 0;
-    const sources = pickCharacterSources(material, { name, aliases: characterAliasesOf(sceneAssets, name), limits: large ? LARGE_SPRITE_SOURCE_LIMITS : SPRITE_SOURCE_LIMITS });
-    const chat = pickChatMentions(material.chat, name, large ? { floors: 300, limit: 20000 } : { floors: 30, limit: 1500 });
+function characterSourcesText(material, sceneAssets, name) {
+    const sources = pickCharacterSources(material, { name, aliases: characterAliasesOf(sceneAssets, name), limits: SPRITE_SOURCE_LIMITS });
+    const chat = pickChatMentions(material.chat, name);
     return formatCharacterSources({ ...sources, chat: chat ? `【前文·提到「${name}」的段落】\n${chat}` : '' });
 }
 
@@ -61222,7 +61261,7 @@ async function spriteWritingBackground({ settingsState, service, globalObj, scen
     const material = await readSourceMaterial(globalObj);
     const prepared = await prepareWorldContext({ settingsState, service, globalObj, material, onProgress, persist });
     if (prepared.note) showGeneratedNotice(globalObj, prepared.note, prepared.tone);
-    return { world: prepared.world, sourcesText: characterSourcesText(settingsState, material, sceneAssets, name) };
+    return { world: prepared.world, sourcesText: characterSourcesText(material, sceneAssets, name) };
 }
 
 // 存进这个角色的 DNA（和 DNA 一起跟着角色走）；返回更新后的 DNA。
@@ -61808,6 +61847,53 @@ async function handleSettingsAction(action, ctx) {
             if (result && result.ok === false) return result;
         }
         asyncState.assetSelect = null;
+        return rerenderSettings();
+    }
+    // 清空一套服装（原装 outfit 为空）下选中的立绘：只清图和这格存下的写词注记，情绪格留着，之后可以重新生成。
+    // 多选只记在界面状态里（asyncState.spriteClear），清空时才改草稿并保存。
+    const clearMatch = /^sprite-clear(?:-(pick|all|apply))?:([^:]*):([^:]*)(?::(.*))?$/.exec(normalizedAction);
+    if (clearMatch) {
+        const [, op = 'toggle', c, o, m = ''] = clearMatch;
+        const character = decodeSeg(c);
+        const outfit = decodeSeg(o);
+        const asyncState = settingsState.asyncState;
+        const cur = asyncState.spriteClear && asyncState.spriteClear.character === character && asyncState.spriteClear.outfit === outfit
+            ? asyncState.spriteClear : null;
+        const liveAssets = draftAssetLibrary(settingsState, editTarget);
+        const outfitEntry = outfit ? ((liveAssets.characterOutfits || {})[character] || {})[outfit] : null;
+        const slots = outfit
+            ? (outfitEntry && outfitEntry.moods && typeof outfitEntry.moods === 'object' ? outfitEntry.moods : {})
+            : ((liveAssets.characters || {})[character] || {});
+        const filled = Object.keys(slots).filter((mood) => String(slots[mood] || '').trim());
+        if (op === 'toggle') {
+            asyncState.spriteClear = cur ? null : { character, outfit, moods: new Set() };
+            return rerenderSettings();
+        }
+        if (!cur) return rerenderSettings();
+        if (op === 'pick') {
+            const mood = decodeSeg(m);
+            if (cur.moods.has(mood)) cur.moods.delete(mood); else cur.moods.add(mood);
+            return rerenderSettings();
+        }
+        if (op === 'all') {
+            cur.moods = cur.moods.size === filled.length ? new Set() : new Set(filled);
+            return rerenderSettings();
+        }
+        const moods = [...cur.moods].filter((mood) => filled.includes(mood));
+        if (!moods.length) return rerenderSettings();
+        const where = `「${character}」${outfit ? `「${outfit}」` : '原装'}`;
+        const preview = moods.slice(0, 6).map((mood) => `「${mood}」`).join('') + (moods.length > 6 ? ` 等 ${moods.length} 张` : '');
+        if (typeof dialogs.confirm === 'function' && !(await dialogs.confirm(`清空${where}的 ${preview}立绘？情绪格会留着，可以重新生成；这几格存下的提示词也一起清掉。`))) return rerenderSettings();
+        let library = normalizeGeneratedLibrary(liveAssets.generated);
+        const noteKey = expressionNoteKey(character, outfit);
+        for (const mood of moods) {
+            slots[mood] = '';
+            library = clearExpressionNote(library, noteKey, mood);
+        }
+        liveAssets.generated = library;
+        asyncState.spriteClear = null;
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
         return rerenderSettings();
     }
     if (normalizedAction.startsWith('asset-filter:')) {
@@ -63215,7 +63301,7 @@ async function handleSettingsAction(action, ctx) {
         const progress = startExpressionProgress(globalObj, `${charName}·Q版头像`);
         try {
             // 头像只带现有的世界背景，不为它单独提炼世界设定；角色资料照默认立绘那样附上，DNA 空着时发色瞳色不靠猜。
-            const sourcesText = characterSourcesText(settingsState, await readSourceMaterial(globalObj), sceneAssets, charName);
+            const sourcesText = characterSourcesText(await readSourceMaterial(globalObj), sceneAssets, charName);
             result = await service.generateCharacterAvatar({ name: charName, dna: characterExpressionDna(sceneAssets, charName), world: worldContextOf(draftEffectiveAssets(settingsState)), sourcesText, onProgress: progress.onProgress });
         } catch (error) {
             result = { ok: false, error: errorText(error, '') };
@@ -65935,22 +66021,46 @@ async function readWorldbooks(helper, notes) {
     return books;
 }
 
+// 全局世界书（酒馆里勾选的全局条目，这个聊天也在用）：只给「读取上下文」加大预算时的全部资料用，按名字挑节选时不读。
+async function readGlobalWorldbooks(helper, notes, skip) {
+    if (typeof helper.getGlobalWorldbookNames !== 'function') return [];
+    let names = [];
+    try {
+        names = (helper.getGlobalWorldbookNames() || []).filter((name) => name && !skip.has(name));
+    } catch (error) {
+        notes.push('全局世界书读不到');
+        return [];
+    }
+    const books = [];
+    for (const name of names) {
+        try {
+            books.push({ name, entries: await helper.getWorldbook(name) });
+        } catch (error) {
+            notes.push(`世界书「${name}」读不到`);
+        }
+    }
+    return books;
+}
+
 // 角色卡、世界书、数据库一次读进来，再按名字挑：一层里补好几个角色立绘时不必每人重读世界书。
-async function readSourceMaterial(globalObject) {
+// withGlobal：连全局世界书一起读（globalBooks），给「读取上下文」加大预算时的全部资料用。
+async function readSourceMaterial(globalObject, { withGlobal = false } = {}) {
     const notes = [];
     const ctx = getSillyTavernContext(globalObject);
     const card = ctx && ctx.characters && ctx.characterId != null ? ctx.characters[ctx.characterId] : null;
     if (!card) notes.push('当前没有打开单人角色卡');
     const helper = getTavernHelper(globalObject);
     let books = [];
+    let globalBooks = [];
     if (helper && typeof helper.getWorldbook === 'function' && typeof helper.getCharWorldbookNames === 'function') {
         books = await readWorldbooks(helper, notes);
+        if (withGlobal) globalBooks = await readGlobalWorldbooks(helper, notes, new Set(books.map((book) => book.name)));
     } else {
         notes.push('没有找到酒馆助手的世界书接口');
     }
     const api = globalObject && (globalObject.AutoCardUpdaterAPI || (globalObject.top && globalObject.top.AutoCardUpdaterAPI));
     const tables = api ? createShujukuClient(api).readTables() : null;
-    return { card, books, tables, notes, chat: ctx && Array.isArray(ctx.chat) ? ctx.chat : [] };
+    return { card, books, globalBooks, tables, notes, chat: ctx && Array.isArray(ctx.chat) ? ctx.chat : [] };
 }
 function pickCharacterSources(material, { name, aliases = [], limits = CHARACTER_SOURCE_LIMITS } = {}) {
     const names = nameList(name, aliases);
@@ -65975,6 +66085,58 @@ function pickSceneSources(material, { name, limits = CHARACTER_SOURCE_LIMITS } =
         database: material.tables ? pickDatabaseText(material.tables, names, limits.database) : '',
         notes,
     };
+}
+
+// 「读取上下文」加大预算时写词用的全部设定资料：整张角色卡（描述、性格、场景、开场白、备选开场白、对话示例）、
+// 角色卡 / 聊天 / 全局世界书的所有已启用条目、数据库所有行。提到 names 的条目和行排前面，其余在后，按 limit 字截。
+function pickSettingMaterial(material, { names = [], limit = 0 } = {}) {
+    if (!material || !(limit > 0)) return '';
+    const keys = nameList(names[0], names.slice(1));
+    const parts = [];
+    const card = material.card && typeof material.card === 'object' ? material.card : null;
+    if (card) {
+        const data = card.data && typeof card.data === 'object' ? card.data : {};
+        const cardName = String(card.name || data.name || '').trim();
+        const greetings = card.alternate_greetings ?? data.alternate_greetings;
+        for (const [label, raw] of [
+            ['描述', card.description ?? data.description], ['性格', card.personality ?? data.personality],
+            ['场景', card.scenario ?? data.scenario], ['开场白', card.first_mes ?? data.first_mes],
+            ['备选开场白', Array.isArray(greetings) ? greetings.join('\n\n——\n\n') : ''], ['对话示例', card.mes_example ?? data.mes_example],
+        ]) {
+            const text = String(raw || '').trim();
+            if (text) parts.push({ first: true, text: `【角色卡${cardName ? `「${cardName}」` : ''}·${label}】\n${text}` });
+        }
+    }
+    for (const { name: book, entries } of [...(material.books || []), ...(material.globalBooks || [])]) {
+        for (const entry of Array.isArray(entries) ? entries : []) {
+            if (!entry || entry.enabled === false || !String(entry.content || '').trim()) continue;
+            const entryKeys = entry.strategy && Array.isArray(entry.strategy.keys) ? entry.strategy.keys.map((key) => String(key)) : [];
+            const hit = keys.some((key) => entryKeys.some((entryKey) => entryKey.includes(key) || (entryKey.length >= 2 && key.includes(entryKey)))) || mentions(entry.content, keys);
+            parts.push({ first: hit, text: `【世界书·${book}·${entry.name || '条目'}】\n${String(entry.content).trim()}` });
+        }
+    }
+    if (material.tables && material.tables.ok !== false) {
+        for (const table of parseTables(material.tables.data)) {
+            for (const row of table.rows) {
+                if (!Array.isArray(row)) continue;
+                const pairs = table.columns
+                    .map((column, index) => [String(column || '').trim(), String(row[index] ?? '').trim()])
+                    .filter(([column, value]) => column && value);
+                if (!pairs.length) continue;
+                const text = `【数据库·${table.name}】${pairs.map(([column, value]) => `${column}：${value}`).join('；')}`;
+                parts.push({ first: mentions(text, keys), text });
+            }
+        }
+    }
+    const ordered = [...parts.filter((part) => part.first), ...parts.filter((part) => !part.first)];
+    const out = [];
+    let used = 0;
+    for (const part of ordered) {
+        if (used + part.text.length > limit) continue;
+        out.push(part.text);
+        used += part.text.length + 2;
+    }
+    return out.join('\n\n');
 }
 async function collectCharacterSources(globalObject, { name, aliases = [], limits = CHARACTER_SOURCE_LIMITS } = {}) {
     if (!nameList(name, aliases).length) return { card: '', worldbook: '', database: '', notes: [] };
@@ -66032,6 +66194,7 @@ __igsDefine(exports, "pickDatabaseText", () => pickDatabaseText);
 __igsDefine(exports, "readSourceMaterial", () => readSourceMaterial);
 __igsDefine(exports, "pickCharacterSources", () => pickCharacterSources);
 __igsDefine(exports, "pickSceneSources", () => pickSceneSources);
+__igsDefine(exports, "pickSettingMaterial", () => pickSettingMaterial);
 __igsDefine(exports, "collectCharacterSources", () => collectCharacterSources);
 __igsDefine(exports, "pickWorldText", () => pickWorldText);
 __igsDefine(exports, "pickChatMentions", () => pickChatMentions);
@@ -76024,7 +76187,7 @@ function createIllustrationMessageHost(globalObject = globalThis) {
         const ctx = context();
         const chat = ctx && Array.isArray(ctx.chat) ? ctx.chat : [];
         const out = [];
-        for (let i = Number(messageId) - 1; i >= 0 && out.length < count; i -= 1) {
+        for (let i = Math.min(Number(messageId), chat.length) - 1; i >= 0 && out.length < count; i -= 1) {
             const msg = chat[i];
             if (msg && !msg.is_user && !msg.is_system && typeof msg.mes === 'string') out.unshift(msg.mes);
         }
@@ -76036,7 +76199,7 @@ function createIllustrationMessageHost(globalObject = globalThis) {
         const ctx = context();
         const chat = ctx && Array.isArray(ctx.chat) ? ctx.chat : [];
         const out = [];
-        for (let i = Number(messageId) - 1; i >= 0 && out.length < count; i -= 1) {
+        for (let i = Math.min(Number(messageId), chat.length) - 1; i >= 0 && out.length < count; i -= 1) {
             const msg = chat[i];
             if (msg && !msg.is_system && typeof msg.mes === 'string') out.unshift({ isUser: msg.is_user === true, text: msg.mes });
         }
@@ -76575,7 +76738,7 @@ __igsDefine(exports, "createIndexedDbCgIndexStore", () => createIndexedDbCgIndex
 });
 __igsRegister("src/generated-images/illustration/asset-generation-service.js", function(module, exports, require) {
 const { numberParagraphs } = require("src/generated-images/illustration/marker-placer.js");
-const { STANDARD_FLOOR_CHARS, plannerLlmSettings, readPlannerContext, readableText } = require("src/generated-images/illustration/planner-context.js");
+const { STANDARD_FLOOR_CHARS, contextBudgetChars, plannerLlmSettings, readPlannerContext, readableText } = require("src/generated-images/illustration/planner-context.js");
 const { buildAssetPlannerUserPrompt, parseAssetPlan, buildAssetSlot, buildDictionaryAssetItems } = require("src/generated-images/illustration/asset-prompt.js");
 const { requestWithSoftRetry } = require("src/generated-images/illustration/prompt-kit.js");
 const { writeCharacterPersona, writeWorldSummary } = require("src/generated-images/illustration/persona-writer.js");
@@ -77117,10 +77280,13 @@ function createAssetGenerationService(deps) {
         const needs = [...backgroundNeeds.filter((need) => !need.variantOf), ...spriteNeeds];
         attachCharacterDna(needs, s.sceneAssets);
         const floorText = numbered.paragraphs.map((p) => p.text).join('\n');
-        const context = needs.length ? plannerContextOf(messageId, s, floorText.length) : { budget: 0, floorChars: STANDARD_FLOOR_CHARS, previousText: '' };
+        // 「读取上下文」加大预算时，规划另附全部设定资料（三成预算），前文相应少读。
+        const budget = contextBudgetChars(s.auto.llm);
+        const settingMaterial = needs.length && budget ? await readSettingMaterial(needs.map((need) => need.name), Math.floor(budget * 0.3)) : '';
+        const context = needs.length ? plannerContextOf(messageId, s, floorText.length, settingMaterial.length) : { budget: 0, floorChars: STANDARD_FLOOR_CHARS, previousText: '' };
         await attachSources(needs, context.budget > 0);
         attachFloorExcerpts(needs, numbered);
-        // 前文里更早提到这些地点 / 角色的段落另挂进 need.sources：标准长度时只附【前文摘要】里没有的；
+        // 前文里更早提到这些地点 / 角色的段落另挂进 need.sources：标准长度时只附【前文（原文，从早到近）】里没有的；
         // 加大预算时前文整段都读了，照样附上，帮副 LLM 对准。
         attachMentions(needs, needs.length ? readHistory(messageId) : [], context.budget ? '' : context.previousText);
         if (!needs.length && !variantNeeds.length) {
@@ -77157,7 +77323,7 @@ function createAssetGenerationService(deps) {
                 plan = await requestWithSoftRetry(llm, {
                     system: s.auto.llm.prompts.asset,
                     softSystem: s.auto.llm.prompts.assetSoft,
-                    user: buildAssetPlannerUserPrompt({ needs, readableText: floorText.slice(0, context.floorChars), previousText: context.previousText, world: worldContextOf(s.sceneAssets) }),
+                    user: buildAssetPlannerUserPrompt({ needs, readableText: floorText.slice(0, context.floorChars), previousText: context.previousText, settingMaterial, world: worldContextOf(s.sceneAssets) }),
                     parse: (reply) => parseAssetPlan(reply, needs),
                 }, plannerLlmSettings(s.auto.llm));
             } catch (error) {
@@ -77277,13 +77443,45 @@ function createAssetGenerationService(deps) {
         }
     }
 
-    // 本楼正文读多少、前文读哪些（见 planner-context）；读不到前文就当没有。
-    function plannerContextOf(messageId, s, floorLength) {
+    // 本楼正文读多少、前文读哪些（见 planner-context）；读不到前文就当没有。reserved：同一份提示词里设定资料占的字数。
+    function plannerContextOf(messageId, s, floorLength, reserved = 0) {
         try {
-            return readPlannerContext(messageHost, messageId, s.auto.llm, floorLength);
+            return readPlannerContext(messageHost, messageId, s.auto.llm, floorLength, reserved);
         } catch (error) {
             return { budget: 0, floorChars: STANDARD_FLOOR_CHARS, previousText: '' };
         }
+    }
+
+    // 全部设定资料（宿主读：整张角色卡、所有世界书含全局、数据库），提到 names 的排前面，最多 limit 字。
+    async function readSettingMaterial(names, limit) {
+        if (!(limit > 0) || typeof deps.readSettingMaterial !== 'function') return '';
+        try {
+            return String((await deps.readSettingMaterial(names, { limit })) || '').trim();
+        } catch (error) {
+            return '';
+        }
+    }
+
+    const characterNamesOf = (name, s) => {
+        const aliases = s.sceneAssets.characterAliases && Array.isArray(s.sceneAssets.characterAliases[name]) ? s.sceneAssets.characterAliases[name] : [];
+        return [name, ...aliases];
+    };
+    const SPRITE_MATERIAL_GUIDE = (name) => `下面先给出这个故事的设定资料（角色卡、世界书、数据库）和正文原文，供你把「${name}」画准：长相、身材和固定特征以后面说明里的角色设定（DNA）为准；设定没写到的，按资料和正文里对「${name}」的描写补；穿着、发型、配饰后面说明指定了就照说明，没指定的按正文里最近的样子。资料和正文里的剧情、其他角色不要画进去。`;
+    const EXPRESSION_MATERIAL_GUIDE = (name) => `下面先给出这个故事的设定资料（角色卡、世界书、数据库）和正文原文：「${name}」每个表情的幅度和方式，照正文里这个角色说话做事的样子来定。长相和衣服按后面的说明，不要按正文改；资料和正文里的剧情、其他角色不要画进去。`;
+
+    // 设置页写立绘 / 头像 / 表情差分：「读取上下文」加大预算时，说明前面附上全部设定资料（四成预算）
+    // 和正文原文（连用户发言，从最新往前读满剩下的预算）。标准长度、或者走数据库生图插件（它自己读上下文）时原样返回。
+    async function writingMaterial(names, guide) {
+        const s = readSettings();
+        const budget = contextBudgetChars(s.auto.llm);
+        const backend = nai && typeof nai.describe === 'function' ? nai.describe() : {};
+        const unchanged = (description) => description;
+        if (!budget || backend.ownPrompts) return unchanged;
+        const setting = await readSettingMaterial(names, Math.floor(budget * 0.4));
+        const story = plannerContextOf(Number.POSITIVE_INFINITY, s, 0, setting.length).previousText;
+        if (!setting && !story) return unchanged;
+        const prefix = [guide, setting ? `【设定资料】\n${setting}` : '', story ? `【正文（原文，从早到近）】\n${story}` : ''].filter(Boolean).join('\n\n');
+        return (description) => `${prefix}\n\n【这次要写的】\n${description}`;
     }
 
     // 本楼之前最近 MENTION_FLOORS 层 AI 楼的正文（去掉标签），旧的在前。读不到就当没有前文。
@@ -77297,7 +77495,7 @@ function createAssetGenerationService(deps) {
     }
 
     // 长相、穿着、地点的样子常在好几层前写过：前文里提到这个名字的段落挂到 need.sources 末尾，
-    // 已经在【前文摘要】里的不重复，超长时留最近的。
+    // 已经在【前文（原文，从早到近）】里的不重复，超长时留最近的。
     function attachMentions(needs, history, shownText) {
         const paragraphs = history.flatMap((text) => text.split('\n')).map((line) => line.trim()).filter(Boolean);
         for (const need of needs) {
@@ -77477,6 +77675,8 @@ function createAssetGenerationService(deps) {
         };
         const paintDna = expressionPaintDna(dna, outfit);
         const stopped = () => Boolean(signal && signal.aborted);
+        // 资料和正文每批都一样，只读一次。
+        const withMaterial = await writingMaterial(characterNamesOf(name, readSettings()), EXPRESSION_MATERIAL_GUIDE(name));
         const items = [];
         let painted = 0;
         let writeError = '';
@@ -77494,7 +77694,7 @@ function createAssetGenerationService(deps) {
                 let written;
                 try {
                     written = await nai.writeDbgenPrompt({
-                        description: buildExpressionDiffDescription(name, basePrompt, pending, dna, outfit, { note, nsfw: paint.nsfw, world }),
+                        description: withMaterial(buildExpressionDiffDescription(name, basePrompt, pending, dna, outfit, { note, nsfw: paint.nsfw, world })),
                     });
                 } catch (error) {
                     const message = (error && error.message) || '写提示词失败';
@@ -77630,7 +77830,8 @@ function createAssetGenerationService(deps) {
         reportExpressionProgress(onProgress, { phase: 'write', done: 0, total: 1, mood: '头像' });
         let written;
         try {
-            written = await nai.writeDbgenPrompt({ description: buildCharacterAvatarDescription(who, dna, { world, sourcesText }) });
+            const withMaterial = await writingMaterial(characterNamesOf(who, readSettings()), SPRITE_MATERIAL_GUIDE(who));
+            written = await nai.writeDbgenPrompt({ description: withMaterial(buildCharacterAvatarDescription(who, dna, { world, sourcesText })) });
         } catch (error) {
             return { ok: false, error: (error && error.message) || '写提示词失败' };
         }
@@ -77663,7 +77864,8 @@ function createAssetGenerationService(deps) {
         reportExpressionProgress(onProgress, { phase: 'write', done: 0, total: 1, mood: '默认' });
         let written;
         try {
-            written = await nai.writeDbgenPrompt({ description: buildCharacterSpriteDescription(who, dna, { nude: nude === true, note, world, sourcesText }) });
+            const withMaterial = await writingMaterial(characterNamesOf(who, readSettings()), SPRITE_MATERIAL_GUIDE(who));
+            written = await nai.writeDbgenPrompt({ description: withMaterial(buildCharacterSpriteDescription(who, dna, { nude: nude === true, note, world, sourcesText })) });
         } catch (error) {
             return { ok: false, error: (error && error.message) || '写提示词失败' };
         }
