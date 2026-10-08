@@ -1,13 +1,13 @@
 // 素材补全（缺失背景 / 无名角色立绘）的 LLM 提示词与 NAI slot 组装。
 // 副 LLM 只写「内容」tag（地点陈设、外貌服装）；构图、底色、禁止项走可编辑模板，
-// 保证背景图里没有人、立绘始终是单人 3/4 身 + 可抠除的浅灰纯色底。
+// 保证背景图里没有人、立绘始终是单人 3/4 身 + 一种底色（透明底或可抠除的浅灰纯色底）。
 import {
     FICTION_FRAME, TAG_WRITING_RULES, SOFT_MODE_NOTE, DEFAULT_ASSET_TEMPLATES,
-    MATTE_BACKGROUND_TAGS, TRANSPARENT_BACKGROUND_TAGS, NSFW_NEGATIVE_GUARD, applyTemplate, dropMatteTagsWhenTransparent,
+    MATTE_BACKGROUND_TAGS, SPRITE_TRANSPARENT_BACKGROUND_TAG, NSFW_NEGATIVE_GUARD, applyTemplate,
     buildDictionaryBackgroundTags,
 } from './prompt-kit.js';
 import { buildCharacterDnaPromptParts, mergePromptTags } from '../../scene/character-dna.js';
-import { worldContextLines } from '../dbgen-prompt.js';
+import { dropMatchingTags, withOnlyBackground, worldContextLines } from '../dbgen-prompt.js';
 
 const ASSET_TASK = [
     '任务：阅读视觉小说正文，为「需要生成的素材」清单里的每一项写英文 tag。素材分两类：',
@@ -119,8 +119,10 @@ function joinTags(...parts) {
     return parts.map((p) => String(p || '').trim().replace(/^,+|,+$/g, '').trim()).filter(Boolean).join(', ');
 }
 
-// 生成可直接交给 buildNaiV4Request 的 slot；transparent 为 true 时走 V5 原生透明底。
-export function buildAssetSlot(item, { transparent = false, templates = {}, positiveContext = '' } = {}) {
+// 生成可直接交给 buildNaiV4Request 的 slot；transparent 为 true 时写透明底（V5 另走原生透明底参数）。
+// 立绘底色只留一种：透明底只用加权的 transparent background，浅灰底只用抠图的灰底词；
+// 副 LLM、DNA、模板里别的底色标签都去掉，底色接在末尾；负面里和这组底色相同的也去掉。
+export function buildAssetSlot(item, { transparent = false, templates = {} } = {}) {
     const t = { ...DEFAULT_ASSET_TEMPLATES, ...templates };
     if (item.need.type === 'background') {
         return {
@@ -132,9 +134,10 @@ export function buildAssetSlot(item, { transparent = false, templates = {}, posi
     // 立绘 DNA 固定顺序：triggerWords → identity → defaultAppearance → 副 LLM tag；无 DNA 时输出与旧版一致。
     const dnaParts = item.need.dna ? buildCharacterDnaPromptParts(item.need.dna, { includeDefaultAppearance: true }) : null;
     const tags = dnaParts && dnaParts.positive ? mergePromptTags(dnaParts.positive, item.tags) : item.tags;
+    const background = transparent ? SPRITE_TRANSPARENT_BACKGROUND_TAG : MATTE_BACKGROUND_TAGS;
     return {
-        scene: dropMatteTagsWhenTransparent(applyTemplate(t.sprite, { tags, matte: transparent ? TRANSPARENT_BACKGROUND_TAGS : MATTE_BACKGROUND_TAGS }), positiveContext),
-        sceneUc: joinTags(t.spriteNegative, dnaParts ? dnaParts.negative : '', NSFW_NEGATIVE_GUARD, item.uc),
+        scene: withOnlyBackground(applyTemplate(t.sprite, { tags, matte: '' }), background),
+        sceneUc: dropMatchingTags(joinTags(t.spriteNegative, dnaParts ? dnaParts.negative : '', NSFW_NEGATIVE_GUARD, item.uc), background),
         chars: [],
         transparent,
     };

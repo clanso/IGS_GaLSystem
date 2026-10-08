@@ -1388,6 +1388,7 @@ export function createIgsReaderHost(options = {}) {
                 state.activeSettings.tab = normalizeSettingsTab(entry.target.tab);
                 if (entry.target.readerSubTab) asyncState.readerSubTab = normalizeReaderSubTab(entry.target.readerSubTab);
                 if (entry.target.sceneSubTab) asyncState.sceneSubTab = normalizeSceneSubTab(entry.target.sceneSubTab);
+                if (entry.target.imageSubTab) asyncState.imageSubTab = normalizeImageSubTab(entry.target.imageSubTab);
                 asyncState.advancedOpen = { ...(asyncState.advancedOpen || {}) };
                 for (const key of entry.target.open) asyncState.advancedOpen[key] = true;
                 asyncState.settingsSearch = '';
@@ -3726,6 +3727,11 @@ export function createIgsReaderHost(options = {}) {
                 extension: '当前图像来源：智绘姬。',
                 baibai: '当前图像来源：柏宝绘。',
             };
+            const spriteBackgroundNotes = {
+                auto: '按图像来源：数据库生图和NAI V5用透明底，智绘姬、柏宝绘和其他NAI模型用浅灰底，出图后自动抠图。',
+                transparent: '底色只加 1.5::transparent background::，写词和模板里别的底色词都去掉。出图方没回透明图时照常自动抠图。',
+                matte: '底色只加 simple background, grey background, light grey background, flat color background，别的底色词都去掉，出图后自动抠图。',
+            };
             const openaiDisabled = auto.llm.source !== 'openai';
             const llmReady = describeLlmReady(auto.llm);
             const autoTextarea = (path, value, placeholder) => `<textarea data-path="${esc(path)}" placeholder="${esc(placeholder)}">${esc(value)}</textarea>`;
@@ -3742,6 +3748,8 @@ export function createIgsReaderHost(options = {}) {
                 imageSourceField: field('bridge.imageApi.mode', '图像来源', segmentedInput('bridge.imageApi.mode', sourceMode, [['nai', 'IGS内置NAI'], ['dbgen', '数据库生图插件'], ['extension', '智绘姬'], ['baibai', '柏宝绘']], '图像来源')),
                 imageSourceNote: esc(sourceNotes[sourceMode]),
                 imageContentNote: esc(contentNotes[sourceMode]),
+                spriteBackgroundField: field('bridge.autoIllustration.assets.spriteBackground', '立绘底色', segmentedInput('bridge.autoIllustration.assets.spriteBackground', auto.assets.spriteBackground, [['auto', '自动'], ['transparent', '透明底'], ['matte', '浅灰底']], '立绘底色')),
+                spriteBackgroundNote: esc(spriteBackgroundNotes[auto.assets.spriteBackground]),
                 sourceNaiHidden: hiddenAttr(sourceMode === 'dbgen'),
                 sourceExtensionHidden: hiddenAttr(sourceMode !== 'extension'),
                 sourceDbgenHidden: hiddenAttr(sourceMode !== 'dbgen'),

@@ -1,6 +1,6 @@
 import { normalizeAutoIllustrationSettings } from './illustration/auto-illustration-settings.js';
 import { resolveNaiNativeEndpoint } from './request-builders/nai-v4-builder.js';
-import { applyUserPromptsToCaption } from './dbgen-prompt.js';
+import { applyUserPromptsToCaption, dropBackgroundTags } from './dbgen-prompt.js';
 import { formatStoredPrompt, promptFromCaption, promptFromText } from './generation-prompt.js';
 import { findChatu8Host, requestChatu8Image } from './chatu8-client.js';
 import { findBaibaiApi, requestBaibaiImage } from './baibai-client.js';
@@ -316,8 +316,11 @@ export function createImageBackend({ nai, getBridge, global: globalObject = glob
                 return { tags: String((c && c.char_caption) || ''), uc: String((negChars[index] && negChars[index].char_caption) || ''), x: Number(center.x) || 0.5, y: Number(center.y) || 0.5 };
             }),
         };
+        const naiSettings = normalizeAutoIllustrationSettings(readBridge().autoIllustration).nai;
+        // 立绘（userPrompts.spriteBackground）的底色只用模板里那一组，内置 NAI 画师串里的底色标签也去掉。
         const settings = {
-            ...normalizeAutoIllustrationSettings(readBridge().autoIllustration).nai,
+            ...naiSettings,
+            ...(userPrompts && userPrompts.spriteBackground === true && { artistPrefix: dropBackgroundTags(naiSettings.artistPrefix) }),
             ...(meta.size && { size: meta.size }),
             ...(Number.isInteger(meta.seed) && meta.seed > 0 && { seed: meta.seed }),
         };

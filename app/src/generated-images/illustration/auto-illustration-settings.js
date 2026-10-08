@@ -13,6 +13,9 @@ export const DEFAULT_LLM_PROMPTS = Object.freeze({
 
 export const NSFW_COUNT_MAX = 16;
 
+// 立绘底色：auto 按图像来源（数据库生图、NAI V5 透明底，其余浅灰底）；transparent / matte 为用户指定透明底 / 浅灰底。
+export const SPRITE_BACKGROUND_MODES = Object.freeze(['auto', 'transparent', 'matte']);
+
 const clampInt = (v, min, max, d) => {
     const n = Math.round(Number(v));
     return v == null || v === '' || !Number.isFinite(n) ? d : Math.min(max, Math.max(min, n));
@@ -68,6 +71,7 @@ export function normalizeAutoIllustrationSettings(value) {
             maxPerFloor: clampInt(assets.maxPerFloor, 1, 16, 2),
             spriteSize: str(assets.spriteSize, '832x1216') || '832x1216',
             backgroundSize: str(assets.backgroundSize, '1216x832') || '1216x832',
+            spriteBackground: SPRITE_BACKGROUND_MODES.includes(assets.spriteBackground) ? assets.spriteBackground : 'auto',
             templates: normalizeTemplates(assets.templates),
         },
         llm: {
