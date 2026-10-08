@@ -1,4 +1,5 @@
 import { resolveCharacterKey } from './scene-directives.js';
+import { splitOutfitState } from './body-state.js';
 
 export const OUTFIT_RESET = '默认';
 export const BUILTIN_NUDE_OUTFIT = '裸体';
@@ -94,6 +95,17 @@ export function normalizeWardrobe(raw) {
         if (source.nsfwBoost === true) out[name].nsfwBoost = true;
     }
     return out;
+}
+
+// 「服装名-状态」（薄睡袍-孕晚期、裸体-孕晚期）新建时衣服跟前半段那套走：沿用它挂的衣柜，没挂就用它的名字；
+// 前半段是「裸体」就是裸体。不带状态的服装返回空串（照旧按同名衣柜）。
+export function stateOutfitWardrobe(outfits, name) {
+    const { base, state } = splitOutfitState(name);
+    if (!state) return '';
+    if (isBuiltinNudeOutfit(base)) return BUILTIN_NUDE_OUTFIT;
+    const entry = (plain(outfits) || {})[base];
+    const linked = entry && typeof entry.wardrobe === 'string' ? entry.wardrobe.trim() : '';
+    return isValidOutfitName(linked) ? linked : base;
 }
 
 export function resolveWardrobePrompt(wardrobe, outfitEntry, outfitName) {

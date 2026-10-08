@@ -1581,7 +1581,7 @@ export async function handleSettingsAction(action, ctx) {
         };
         const background = await spriteWritingBackground({ settingsState, service, globalObj, sceneAssets, name, onProgress: progress.onProgress, persist: persistSettingsDraft });
         try {
-            result = await service.generateCharacterSprite({ name, dna, nude: true, ...background, onProgress: progress.onProgress });
+            result = await service.generateCharacterSprite({ name, dna, nude: true, outfitName, ...background, onProgress: progress.onProgress });
         } catch (error) {
             return failed(error);
         }
