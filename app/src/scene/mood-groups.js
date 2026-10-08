@@ -46,7 +46,7 @@ const PRESET_SOURCE = [
         words: ['无奈', '苦笑', '叹气', '扶额', '头疼', '认命', '哭笑不得', '无可奈何', '尴尬', '窘迫', '难堪', '冷场', '局促', '拘谨', '不自在', '假笑'] },
     { label: '心虚', tier: 20, parent: '紧张', use: '说谎被戳穿、被问到不该问的、想蒙混过去的时候', tags: 'nervous smile, looking to the side, scratching own cheek',
         words: ['心虚', '理亏', '愧疚', '内疚', '装傻', '搪塞', '支吾', '含糊其辞'] },
-    { label: '委屈', tier: 20, parent: '悲伤', use: '被冤枉、被凶了想讨说法的时候', tags: 'pout, teary eyes, holding back tears, looking up, blush',
+    { label: '委屈', tier: 20, parent: '悲伤', use: '被冤枉、被凶了想讨说法，或者摔了、哪里碰疼了想撒娇求安慰的时候', tags: 'pout, teary eyes, holding back tears, looking up, blush',
         words: ['委屈', '憋屈', '冤枉', '受气', '不甘', '欲哭无泪'] },
     { label: '怀疑', tier: 20, parent: '紧张', use: '初次见面、对方来历不明、听到可疑的话的时候', tags: 'suspicious, narrowed eyes, wary, arm up',
         words: ['怀疑', '猜疑', '狐疑', '戒备', '警惕', '提防', '防备', '审视', '试探', '敌意'] },
