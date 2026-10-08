@@ -1,4 +1,4 @@
-import { moodPresetAct, moodPresetTags, moodPresetUse } from '../scene/mood-groups.js';
+import { moodPresetAct, moodPresetUse, resolveMoodExpressionTags } from '../scene/mood-groups.js';
 
 // 楼内补立绘一次最多写 8 份，超过则平分 2 批。
 export const EXPRESSION_WRITE_BATCH_MAX = 8;
@@ -94,6 +94,7 @@ export function splitExpressionWriteBatches(items) {
 // nsfw 为 true 时「动情」改用它在 NSFW 下的动作说明。
 export function buildExpressionDiffDescription(name, prompt, labels, dna, outfit, { note = '', nsfw = false } = {}) {
     const moods = (Array.isArray(labels) ? labels : []).map((item) => String(item || '').trim()).filter(Boolean);
+    const persona = String((dna && typeof dna === 'object' && dna.persona) || '').trim();
     const stored = prompt && typeof prompt === 'object' ? prompt : {};
     const caption = formatReturnedCaption(stored.caption);
     const clothes = outfit && typeof outfit === 'object' ? outfit : null;
@@ -128,6 +129,7 @@ export function buildExpressionDiffDescription(name, prompt, labels, dna, outfit
         clothes && clothes.nsfwBoost && !nude ? nsfwClothingBoostLine('character') : '',
         clothesPrompt ? `服装提示词：\n${clothesPrompt}` : '',
         '表情依据该角色的性格、脾气与行为习惯分别撰写，禁止套用统一表情模板。',
+        persona ? `「${name || ''}」的性格与表情习惯（据此决定每个表情的幅度和方式，优先于下面的动作基准；只管表情和动作，不要据此改长相和衣服）：\n${persona}` : '',
         '规格：大腿以上（cowboy shot）。朝向正面，直立，平视。禁止全身，禁止露出脚，禁止侧身，禁止倾斜构图。',
         '情绪须写入肢体：手势、肩线、重心随该情绪变化。禁止仅替换面部。',
         '各表情的动作按下面的说明写，不要把不同表情画成同一张脸。',
@@ -373,11 +375,29 @@ function isExpressionPoseTag(tag) {
 // 默认立绘被写成无表情时，差分照抄会带上这些词。
 const NEUTRAL_FACE_TAGS = new Set(['expressionless', 'emotionless', 'neutral expression', 'blank expression', 'blank stare', 'straight face', 'closed mouth', 'arms at sides'].map(tagKey));
 
-// 写词插件常常整份漏写表情（只写了长相和衣服）。预设组的英文表情标签放到角色 caption 最前，
-// 并去掉照抄来的无表情词；默认组和自建组不动。nsfw 为 true 时「动情」换成 NSFW 那套标签。
-export function applyMoodToCaption(caption, mood, { nsfw = false } = {}) {
+// 只认面部表情（不认姿势，也不认 blue eyes 这类外貌）：写词结果里有一个就算写了表情。
+// 整个 tag 是这些词才算（open mouth 这类单看是动作）；后一组表情词出现在 tag 任何位置都算（slight frown、light blush、teary eyes）。
+const EXPRESSION_FACE_RE = /^(?:serious|happy|sad|angry|annoyed|smug|shy|embarrassed|surprised|nervous|worried|scared|flustered|disgust|disdain|sobbing|scowl|sigh|sighing|open mouth|parted lips|clenched teeth|gritted teeth|biting (?:own )?lip|lip biting|closed eyes|half-closed eyes|wide-eyed|narrowed eyes|furrowed brows?|raised eyebrows?|looking (?:away|down|up|to the side)|sideways glance|:\)|:d|\^_\^)$|\b(?:smil(?:e|ing)|blush(?:ing)?|tear(?:s|ing)?|teary|expression|frown(?:ing)?|pout(?:ing)?|glar(?:e|ing)|smirk(?:ing)?|grin(?:ning)?|crying|laughing)\b/;
+
+export function captionHasExpression(caption) {
+    const pos = caption && caption.v4_prompt && caption.v4_prompt.caption;
+    if (!pos) return false;
+    const chars = Array.isArray(pos.char_captions) ? pos.char_captions : [];
+    const text = chars.length ? chars[0] && chars[0].char_caption : pos.base_caption;
+    return splitTags(text).some((tag) => {
+        const key = tagKey(tag);
+        return !NEUTRAL_FACE_TAGS.has(key) && EXPRESSION_FACE_RE.test(key);
+    });
+}
+
+// 表情组的英文表情 tag（用户改过的优先，没改用预设）放到角色 caption 最前，并去掉照抄来的无表情词。
+// 默认只兜底：写词结果（written，缺省看 caption 本身）里已经有表情就照它的来，免得把内敛角色叠成撒娇脸；
+// 组上打开「固定加上」（alwaysTags）时总是放。默认组不动；nsfw 为 true 时「动情」没改过就用 NSFW 那套预设。
+export function applyMoodToCaption(caption, mood, { nsfw = false, groups = null, written = null } = {}) {
     const label = String(mood || '').trim();
-    const tags = label === '默认' ? '' : moodPresetTags(label, { nsfw });
+    if (label === '默认') return caption;
+    const { tags, always } = resolveMoodExpressionTags(label, groups, { nsfw });
+    if (!tags || (!always && captionHasExpression(written || caption))) return caption;
     return prependCharTags(caption, tags, (tag) => !NEUTRAL_FACE_TAGS.has(tagKey(tag)));
 }
 

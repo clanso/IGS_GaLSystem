@@ -10,6 +10,7 @@ import { collectAssetZipEntries } from '../../scene/asset-zip.js';
 import { assetOwnerKey, draftAssetLibrary, draftEffectiveAssets, effectiveSceneAssets, ensureCardLibrary, libraryHasContent, moveLibraryEntry, rememberAssetScope, sceneAssetsForContext } from '../../scene/asset-scope.js';
 import { buildCharacterCardPack, buildImageZip, buildPresetArchive, mergeLabelGroups, parseCharacterCardPack, parsePresetArchive, parseSettingsArchive, spriteEntriesForNames } from '../../scene/card-pack.js';
 import { getSillyTavernContext } from '../../host/tavern-helper-adapter.js';
+import { collectCharacterSources, formatCharacterSources } from '../../host/character-sources.js';
 import { localImageCacheFor } from '../../media/tavern-image-cache.js';
 import { buildPageDiagnostic } from './page-diagnostic.js';
 import { clearMoodReview, loadMoodReview, removeMoodReview, saveMoodReview } from '../../scene/mood-review-store.js';
@@ -86,7 +87,7 @@ function assetFolderScope(settingsState, options) {
 
 const CHARACTER_FIELDS = ['characters', 'characterOutfits', 'characterDna', 'characterAliases', 'statusAvatars'];
 const SCENE_ACTION = /^scene-(?:(?:add|remove|rename|set|toggle|pick)-(?:bg|bg-word|bg-url|time|time-url|weather|weather-url)|variant-(?:set|retry))$/;
-const CHARACTER_ACTION = /^(?:scene-(?:add|remove|rename|set|toggle|pick)-(?:char|char-alias|mood|mood-url|dna-char|outfit-mood)|status-avatar-(?:pick|clear|set-url|generate)|char-generate-sprite|outfit-generate-nude|char-expression-(?:prompt|set|retry|resume)|outfit-expression-(?:prompt|set|retry|resume))$/;
+const CHARACTER_ACTION = /^(?:scene-(?:add|remove|rename|set|toggle|pick)-(?:char|char-alias|mood|mood-url|dna-char|outfit-mood)|status-avatar-(?:pick|clear|set-url|generate)|char-generate-sprite|char-persona-extract|outfit-generate-nude|char-expression-(?:prompt|set|retry|resume)|outfit-expression-(?:prompt|set|retry|resume))$/;
 
 // 服装的适用场景可能指向另一边的场景：场景改名、删除时全局和本卡的服装都要跟上。
 function linkedCharacterOutfits(settingsState) {
@@ -191,6 +192,29 @@ function characterExpressionDna(sceneAssets, name) {
     return hit ? hit.dna : null;
 }
 
+// 「性格与表情习惯」：从角色卡 / 世界书 / 数据库收集提到这个角色的资料，交给副 LLM 提炼。
+async function extractCharacterPersona({ service, globalObj, sceneAssets, name }) {
+    if (!service || typeof service.summarizeCharacterPersona !== 'function') return { ok: false, error: '当前不能提炼性格' };
+    const aliases = sceneAssets.characterAliases && Array.isArray(sceneAssets.characterAliases[name]) ? sceneAssets.characterAliases[name] : [];
+    const sources = await collectCharacterSources(globalObj, { name, aliases });
+    const sourcesText = formatCharacterSources(sources);
+    if (!sourcesText) {
+        return { ok: false, error: `角色卡、世界书和数据库里都没找到「${name}」的资料${sources.notes.length ? `（${sources.notes.join('，')}）` : ''}` };
+    }
+    const written = await service.summarizeCharacterPersona({ name, sourcesText });
+    if (!written || !written.ok) return { ok: false, error: (written && written.error) || '提炼失败' };
+    if (written.insufficient) return { ok: false, error: `资料里看不出「${name}」的性格` };
+    return { ok: true, persona: written.persona };
+}
+
+// 存进这个角色的 DNA（和 DNA 一起跟着角色走）；返回更新后的 DNA。
+function saveCharacterPersona(sceneAssets, name, persona) {
+    const map = sceneAssets.characterDna && typeof sceneAssets.characterDna === 'object' && !Array.isArray(sceneAssets.characterDna)
+        ? sceneAssets.characterDna : (sceneAssets.characterDna = {});
+    map[name] = normalizeCharacterDna({ ...normalizeCharacterDna(Object.hasOwn(map, name) ? map[name] : null), persona });
+    return map[name];
+}
+
 function expressionNoteKey(name, outfit) {
     return outfit ? `${name}\u0001${outfit}` : name;
 }
@@ -246,6 +270,7 @@ function settingsProgressHost(globalObj) {
 // 进度条写明在画谁：写词和出图分开说，一批多张带上第几张。
 function expressionProgressText(who, event) {
     if (event && event.phase === 'write') return `写提示词：${who}`;
+    if (event && event.phase === 'persona') return `提炼性格：${who}`;
     const total = Number(event && event.total) || 0;
     if (total > 1) return `生图中：${who}·${event.mood || ''} ${Number(event.done) || 0}/${total}`;
     return `生图中：${who}`;
@@ -502,11 +527,17 @@ function applyMoodPreset(groups) {
     for (const group of custom) {
         for (const word of Array.isArray(group.words) ? group.words : []) customWords.add(String(word || '').trim());
     }
+    // 套用预设只重置词；各组改过的表情 tag 和「固定加上」开关保留。
+    const tagSettings = (label) => {
+        const old = groups.find((group) => group && String(group.label || '').trim() === label) || {};
+        return { ...(old.tags && { tags: old.tags }), ...(old.alwaysTags === true && { alwaysTags: true }) };
+    };
     const built = MOOD_PRESET.map((entry) => ({
         label: entry.label,
         words: entry.words.filter((word) => !customWords.has(word)),
+        ...tagSettings(entry.label),
     }));
-    const next = [...built, ...custom.map((group) => ({ label: String(group.label).trim(), words: (group.words || []).slice() }))];
+    const next = [...built, ...custom.map((group) => ({ label: String(group.label).trim(), words: (group.words || []).slice(), ...tagSettings(String(group.label).trim()) }))];
     const before = JSON.stringify(groups.map((group) => ({ label: group.label, words: group.words })));
     const after = JSON.stringify(next.map((group) => ({ label: group.label, words: group.words })));
     groups.splice(0, groups.length, ...next);
@@ -1393,6 +1424,28 @@ export async function handleSettingsAction(action, ctx) {
         return rendered;
     }
 
+    // 角色设定里的「从资料提炼」：手动（重新）提炼性格与表情习惯，已有内容先问一句再覆盖。
+    if (normalizedAction.startsWith('char-persona-extract:')) {
+        const name = decodeSeg(normalizedAction.slice('char-persona-extract:'.length));
+        if (!name || ['__proto__', 'constructor', 'prototype'].includes(name)) return { ok: false, error: '角色名无效' };
+        const globalObj = options.global || globalThis;
+        const sceneAssets = draftAssetLibrary(settingsState, editTarget);
+        const existing = characterExpressionDna(sceneAssets, name);
+        if (existing && existing.persona && !(await dialogs.confirm(`「${name}」已经有性格与表情习惯，重新提炼会覆盖现在的内容。继续吗？`))) return rerenderSettings();
+        const task = beginSettingsProgress(() => settingsProgressHost(globalObj), `提炼性格：${name}`);
+        let extracted;
+        try {
+            extracted = await extractCharacterPersona({ service: options.generatedAssets, globalObj, sceneAssets, name });
+        } finally {
+            task.end();
+        }
+        if (!extracted.ok) return generationFailure(globalObj, dialogs, `没能提炼「${name}」的性格：${extracted.error}`, 'persona-extract-failed');
+        saveCharacterPersona(sceneAssets, name, extracted.persona);
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
     if (/^(?:char|outfit)-expression-(?:set|retry|resume):/.test(normalizedAction)) {
         const outfitMode = normalizedAction.startsWith('outfit-expression-');
         const retry = normalizedAction.includes('-expression-retry:');
@@ -1466,7 +1519,7 @@ export async function handleSettingsAction(action, ctx) {
                 } catch (error) { savedCaption = null; }
             }
         }
-        const dna = characterExpressionDna(sceneAssets, name);
+        let dna = characterExpressionDna(sceneAssets, name);
         const nude = outfitMode && isBuiltinNudeOutfit(outfitEntry.wardrobe);
         const clothes = outfitMode && !nude ? resolveWardrobePrompt(draftEffectiveAssets(settingsState).wardrobe || {}, outfitEntry, outfitName) : null;
         const outfit = outfitMode ? { name: outfitName, words: nude ? [] : outfitEntry.words, ownImage: Boolean(ownUrl), prompt: nude ? '' : (clothes ? clothes.prompt : ''), nude, nsfwBoost: Boolean(!nude && clothes && clothes.nsfwBoost) } : null;
@@ -1526,6 +1579,18 @@ export async function handleSettingsAction(action, ctx) {
         let result;
         if (!progress) progress = startExpressionProgress(globalObj, subject);
         const onProgress = progress.onProgress;
+        // 要写新词、角色还没有「性格与表情习惯」时，先从角色卡 / 世界书 / 数据库提炼一段存起来；提炼失败不挡生成。
+        if (!resume && (retry ? !savedCaption : writeLabels.length > 0) && !(dna && dna.persona)) {
+            onProgress({ phase: 'persona' });
+            const extracted = await extractCharacterPersona({ service, globalObj, sceneAssets, name });
+            if (extracted.ok) {
+                dna = saveCharacterPersona(sceneAssets, name, extracted.persona);
+                persistSettingsDraft();
+                showGeneratedNotice(globalObj, `已为「${name}」提炼性格与表情习惯，写表情时会参考；可在角色设定里查看和修改。`, 'info');
+            } else {
+                showGeneratedNotice(globalObj, `没能提炼「${name}」的性格：${extracted.error}。这次按默认写法写表情。`);
+            }
+        }
         // 单张重画的按钮由宿主按 settingsBusyLabel 锁住，这里只锁整套差分的按钮。
         const restoreBusy = retry ? () => {} : markExpressionActionBusy(globalObj, normalizedAction, '生图中');
         // 单张重画不接停止键：只有一张，按了也停不下来，别把「表情差分」按钮变成摆设。
@@ -3217,6 +3282,25 @@ export async function handleSettingsAction(action, ctx) {
             const persisted = persistSettingsDraft();
             if (persisted.ok === false) return persisted;
         }
+        return rerenderSettings();
+    }
+
+    // 情绪组的表情 tag：开关决定表情差分出图时是总是放到最前，还是只在写词漏写表情时兜底；tag 清空回到预设。
+    if (normalizedAction.startsWith('mood-group-always:') || normalizedAction.startsWith('mood-group-tags:')) {
+        const always = normalizedAction.startsWith('mood-group-always:');
+        const [rawLabel, rawValue] = normalizedAction.slice(always ? 'mood-group-always:'.length : 'mood-group-tags:'.length).split(':');
+        const group = ensureMoodGroups(settingsState).find((g) => g.label === decodeSeg(rawLabel));
+        if (!group) return { ok: false, error: '找不到这个情绪组' };
+        if (always) {
+            if (group.alwaysTags === true) delete group.alwaysTags;
+            else group.alwaysTags = true;
+        } else {
+            const tags = decodeSeg(rawValue).replace(/\s+/g, ' ').trim();
+            if (tags) group.tags = tags;
+            else delete group.tags;
+        }
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
         return rerenderSettings();
     }
 

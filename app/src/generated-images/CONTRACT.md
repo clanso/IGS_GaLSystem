@@ -27,6 +27,7 @@
 
 - 柏宝绘出图（`baibai-client.js`）：图像来源为 `baibai` 时，剧情 CG、素材、物品图与阅读器重画经柏宝绘公开接口 `globalThis.STBaiBaiImage`（apiVersion 1）出图，`save: false` 不进柏宝绘图库；后端支持多角色时分角色传，否则拼成一段 prompt；未检测到或失败时有 NAI Key 就退回内置 NAI。不保证透明底，立绘按浅灰底出图再抠图。
 - 副 LLM 写词（`illustration/caption-writer.js`）：图像来源不是数据库生图时，`writeDbgenPrompt` 改由副 LLM 按同一份描述写 NAI v4 caption，`generateDbgenCaption` 把 caption 拆回 slot 按当前来源出图；表情差分、头像、默认立绘与衣柜共用。副 LLM 选独立 API 却没填地址或模型时直接报「还没接副 LLM」，不发请求。副 LLM 设置单独在「生图 → 副 LLM」子页。
+- 表情差分的性格与表情 tag：角色 DNA 可带 `persona`（「性格与表情习惯」，只进写词说明 `buildExpressionDiffDescription`，排在动作基准之前；不进画图提示词，不算 DNA 已填）。要写新词而角色还没有 persona 时，设置层先用 `host/character-sources.js` 收集角色卡 / 世界书 / 数据库节选，再经 `illustration/persona-writer.js`（副 LLM，资料不足时回「资料不足」）提炼并存回 DNA；提炼失败只提示，不挡生成。角色设定里可手改或「重新从资料提炼」。出图前 `applyMoodToCaption` 的情绪组表情 tag（组上的 `tags` 优先于预设，NSFW「动情」没改过才用 NSFW 预设）默认只兜底：写词原文 `captionHasExpression` 为假时才放到最前；组上 `alwaysTags` 为真时总是放。情绪组在「场景 → 规则」里逐组设开关与 tag，「套用预设」与素材包合并都保留这两项。
 
 ## Provider 契约
 

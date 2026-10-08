@@ -5,6 +5,7 @@
 - 适配 TavernHelper、SillyTavern DOM 和酒馆魔法棒菜单。
 - 统一定位聊天楼层、当前楼层、输入框、发送按钮和消息图片。
 - 副 LLM 请求（`secondary-llm.js`）。
+- 角色资料收集（`character-sources.js`）：只读当前角色卡（卡名是该角色时整段，多角色卡只取提到主名或别名的段落）、角色卡主 / 附加与当前聊天绑定的世界书（`TavernHelper.getCharWorldbookNames('current')`、`getChatWorldbookName('current')`、`getWorldbook`；只取已启用、关键词或内容提到该角色的条目，关键词命中优先）和数据库表格（`AutoCardUpdaterAPI.exportTableAsJson`，有一格正好是该名字的行）。各来源限长，读不到的记进 `notes` 不抛错；不读全局世界书，不写任何东西。
 - 自动插图楼层读写、生成事件订阅及 `[igs-img]` 标记对外隐藏（`illustration-message-host.js`）。
 - 自动插图 `writeFloor(messageId, text, expectedFloor)` 写回前复核聊天、楼层、swipe、最新 AI 身份与原文；发生变化返回 `stale`，不写入。宿主 API 未提供原子条件写入，复核与实际调用之间的极窄竞态仍需真机验证。
 - 提供 `typeIntoInputAndSend(text)`，供阅读器输入框和选项浮窗调用。

@@ -12,10 +12,16 @@ function cleanText(value) {
     return typeof value === 'string' ? value.replace(/\r\n?/g, '\n').trim() : '';
 }
 
+// 性格与表情习惯：跟着 DNA 存（改名、删除、导入导出、本卡范围都一起走），只给表情差分写词用；
+// 不进画图提示词，也不算「DNA 已填」。空的不写这个键。
+export const CHARACTER_PERSONA_FIELD = 'persona';
+
 export function normalizeCharacterDna(raw) {
     const source = plainObject(raw) || {};
     const dna = {};
     for (const field of CHARACTER_DNA_FIELDS) dna[field] = cleanText(source[field]);
+    const persona = cleanText(source[CHARACTER_PERSONA_FIELD]);
+    if (persona) dna[CHARACTER_PERSONA_FIELD] = persona;
     return dna;
 }
 

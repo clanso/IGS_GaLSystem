@@ -175,9 +175,19 @@ export function normalizeMoodGroups(value) {
         const words = Array.isArray(item.words)
             ? item.words.map((w) => String(w || '').trim()).filter(Boolean)
             : [];
-        groups.push({ label, words });
+        // tags：用户改过的表情 tag（空 = 用预设）；alwaysTags：表情差分出图时总是放到最前，否则只在写词漏写表情时兜底。
+        const tags = typeof item.tags === 'string' ? item.tags.replace(/\s+/g, ' ').trim() : '';
+        groups.push({ label, words, ...(tags && { tags }), ...(item.alwaysTags === true && { alwaysTags: true }) });
     }
     return groups.length ? groups : cloneDefaultMoodGroups();
+}
+
+// 表情差分要用的表情 tag：组里改过就用改过的（NSFW 也用它），没改用预设；自建组没改就没有。
+export function resolveMoodExpressionTags(label, groups, { nsfw = false } = {}) {
+    const target = String(label || '').trim();
+    const group = (Array.isArray(groups) ? groups : []).find((item) => item && String(item.label || '').trim() === target);
+    const custom = group && typeof group.tags === 'string' ? group.tags.trim() : '';
+    return { tags: custom || moodPresetTags(target, { nsfw }), always: Boolean(group && group.alwaysTags === true) };
 }
 
 export function resolveMoodGroup(word, groups) {
