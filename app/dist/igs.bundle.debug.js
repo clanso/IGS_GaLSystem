@@ -36050,7 +36050,7 @@ __igsDefine(exports, "perfSubhead", () => perfSubhead);
 });
 __igsRegister("src/visual/igs-ui/settings-fields.js", function(module, exports, require) {
 const { esc } = require("src/visual/igs-ui/reader-value-utils.js");
-const { moodPresetTags, normalizeMoodGroups } = require("src/scene/mood-groups.js");
+const { MOOD_PRESET, moodPresetTags, normalizeMoodGroups } = require("src/scene/mood-groups.js");
 const { worldContextOf } = require("src/scene/worldview.js");
 const { TOOLBAR_ACTIONS } = require("src/visual/igs-ui/reader-host-constants.js");
 const { STAGE_SHAKE_INTENSITIES } = require("src/visual/igs-ui/stage-shake-runtime.js");
@@ -36721,10 +36721,18 @@ function renderMoodGroupList(groups, options = {}) {
             + `<button type="button" class="igs-btn-mgr-icon" data-action="${toggle}" title="${open ? '收起' : '展开这个组里的词'}" aria-expanded="${open}">${open ? chevronUp : chevronDown}</button>`
             + `</div>${wordsHtml}</div>`;
     }).join('');
+    // 旧版默认只有 8 组；表情差分按 20 档预设画，缺的组在这里提示并可一键补上（已有的组不重置）。
+    const have = new Set(list.map((group) => String(group.label || '').trim()));
+    const missing = MOOD_PRESET.map((entry) => entry.label).filter((label) => !have.has(label));
+    const missingHtml = missing.length
+        ? `<div class="igs-source-filter-note igs-mood-missing">表情差分最多画 20 种表情，这里还缺 ${missing.length} 组：${esc(missing.join('、'))}。缺的组在正文里认不出来，画了也用不上。`
+            + `<button type="button" class="igs-review-link" data-action="mood-fill-presets">补上缺的 ${missing.length} 组</button></div>`
+        : '';
     return `<div class="igs-mood-groups" data-mood-group-count="${list.length}">`
         + `<div class="igs-settings-section-head"><div class="igs-settings-subhead">情绪组 <span class="igs-mood-group-total">${list.length}</span></div>`
         + `<button type="button" class="igs-btn-mgr-icon" data-action="mood-add-group" title="新增情绪组" aria-label="新增情绪组">+</button></div>`
         + `<div class="igs-source-filter-note">组名对应表情槽，组里的词是正文里的叫法。</div>`
+        + missingHtml
         + `<div class="igs-btn-mgr-list">${rows || '<div class="igs-scene-empty">还没有情绪组</div>'}</div>`
         + `</div>`;
 }
@@ -61571,6 +61579,42 @@ function applyMoodPreset(groups) {
     return before !== after;
 }
 
+// 补上缺的预设组：旧版默认只有 8 组，表情差分却按 20 档预设画；正文里写「委屈」「哭泣」时找不到组，那几张立绘永远用不上。
+// 只加还没有的预设组（带预设词），已有的组不重置。新组的组名和预设词如果在别的预设组里，挪到新组
+// （不挪的话正文里的这个词还是先归到旧组）；用户自建组里的词不动，新组就不带这些词。返回 { added, moved }。
+function planMissingMoodPresets(groups) {
+    const list = Array.isArray(groups) ? groups : [];
+    const have = new Set(list.map((group) => String(group && group.label || '').trim()));
+    const presetLabels = new Set(MOOD_PRESET.map((entry) => entry.label));
+    const missing = MOOD_PRESET.filter((entry) => !have.has(entry.label));
+    const customWords = new Set(list
+        .filter((group) => group && !presetLabels.has(String(group.label || '').trim()))
+        .flatMap((group) => (Array.isArray(group.words) ? group.words : []).map((word) => String(word || '').trim())));
+    const added = missing.map((entry) => ({ label: entry.label, words: entry.words.filter((word) => !customWords.has(word)) }));
+    const moved = [];
+    for (const entry of added) {
+        const words = new Set([entry.label, ...entry.words]);
+        for (const group of list) {
+            const label = String(group && group.label || '').trim();
+            if (!presetLabels.has(label)) continue;
+            for (const word of Array.isArray(group.words) ? group.words : []) {
+                if (words.has(String(word || '').trim())) moved.push({ word: String(word).trim(), from: label, to: entry.label });
+            }
+        }
+    }
+    return { added, moved };
+}
+
+function applyMissingMoodPresets(groups, plan) {
+    for (const { word, from, to } of plan.moved) {
+        const group = groups.find((item) => item && String(item.label || '').trim() === from);
+        if (group && Array.isArray(group.words)) group.words = group.words.filter((item) => String(item || '').trim() !== word);
+        const target = plan.added.find((item) => item.label === to);
+        if (target && word !== to && !target.words.includes(word)) target.words.push(word);
+    }
+    groups.push(...plan.added.map((item) => ({ label: item.label, words: item.words.slice() })));
+}
+
 function generatedOperationFailure(globalObj, message, reason) {
     if (globalObj && typeof globalObj.alert === 'function') globalObj.alert(message);
     return { ok: false, reason };
@@ -64319,8 +64363,23 @@ async function handleSettingsAction(action, ctx) {
         const persisted = persistSettingsDraft();
         if (persisted.ok === false) return persisted;
         const looked = await dialogs.confirm(applyMoodPreset(groups)
-            ? '已按预设整理词库：缺的组补齐、词挪回它该在的组，你自己加的组和词都在。'
+            ? '已按预设整理词库：缺的组补齐，预设组里的词换成预设的；你自建的组和组里的词都在。'
             : '词库已经是预设的样子了。');
+        return rerenderSettings();
+    }
+
+    if (normalizedAction === 'mood-fill-presets') {
+        const groups = ensureMoodGroups(settingsState);
+        const plan = planMissingMoodPresets(groups);
+        if (!plan.added.length) return rerenderSettings();
+        const movedText = plan.moved.length
+            ? `\n这些词会从原来的组挪到新组（不挪的话正文里写这个词还是先归到旧组）：${plan.moved.map((item) => `「${item.word}」${item.from}→${item.to}`).join('、')}。`
+            : '';
+        const message = `补上 ${plan.added.length} 个预设情绪组：${plan.added.map((item) => item.label).join('、')}。\n已有的组和你加的词不重置。${movedText}`;
+        if (typeof dialogs.confirm === 'function' && !(await dialogs.confirm(message, { okLabel: '补上' }))) return rerenderSettings();
+        applyMissingMoodPresets(groups, plan);
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
         return rerenderSettings();
     }
 
@@ -65455,6 +65514,7 @@ function ensureCharacterAliases(settingsState, editTarget) {
 }
 
 __igsDefine(exports, "assetEditTarget", () => assetEditTarget);
+__igsDefine(exports, "planMissingMoodPresets", () => planMissingMoodPresets);
 __igsDefine(exports, "unreferencedGeneratedImageIds", () => unreferencedGeneratedImageIds);
 __igsDefine(exports, "releasedGeneratedImageIds", () => releasedGeneratedImageIds);
 __igsDefine(exports, "sanitizeDownloadName", () => sanitizeDownloadName);
