@@ -92,7 +92,7 @@ export function splitExpressionWriteBatches(items) {
 
 // note 是用户这次临时补的要求（性格、某个情绪的特别表现），只影响写词这一步；
 // nsfw 为 true 时「动情」改用它在 NSFW 下的动作说明。
-export function buildExpressionDiffDescription(name, prompt, labels, dna, outfit, { note = '', nsfw = false, transparent = true } = {}) {
+export function buildExpressionDiffDescription(name, prompt, labels, dna, outfit, { note = '', nsfw = false, transparent = true, world = null } = {}) {
     const moods = (Array.isArray(labels) ? labels : []).map((item) => String(item || '').trim()).filter(Boolean);
     const persona = String((dna && typeof dna === 'object' && dna.persona) || '').trim();
     const stored = prompt && typeof prompt === 'object' ? prompt : {};
@@ -128,6 +128,7 @@ export function buildExpressionDiffDescription(name, prompt, labels, dna, outfit
         clothesLine,
         clothes && clothes.nsfwBoost && !nude ? nsfwClothingBoostLine('character') : '',
         clothesPrompt ? `服装提示词：\n${clothesPrompt}` : '',
+        ...worldContextLines(world),
         '表情依据该角色的性格、脾气与行为习惯分别撰写，禁止套用统一表情模板。',
         persona ? `「${name || ''}」的性格与表情习惯（据此决定每个表情的幅度和方式，优先于下面的动作基准；只管表情和动作，不要据此改长相和衣服）：\n${persona}` : '',
         '规格：大腿以上（cowboy shot）。朝向正面，直立，平视。禁止全身，禁止露出脚，禁止侧身，禁止倾斜构图。',
@@ -220,6 +221,27 @@ function spriteGroundLine(transparent) {
 }
 
 // 设置页直接出一张角色立绘。没有正文，长相和衣服按角色设定写。
+// 生图写词的世界背景：世界观选项 + 世界设定提要；服装、发型、饰品和随身物品都要合这个世界。
+export function worldContextLines(world) {
+    const label = String((world && world.label) || '').trim();
+    const summary = String((world && world.summary) || '').trim();
+    if (!label && !summary) return [];
+    return [
+        `这个故事的世界观${label ? `是「${label}」` : '见下面的设定'}。服装、发型、饰品和随身物品都要符合这个世界，不要画出不属于这个世界的东西。`,
+        summary ? `世界设定提要：\n${summary}` : '',
+    ].filter(Boolean);
+}
+
+// 角色卡 / 世界书 / 数据库里这个角色的资料节选：只补角色设定（DNA）没写到的长相、穿着和身份气质。
+export function characterSourceLines(name, sourcesText) {
+    const text = String(sourcesText || '').trim();
+    if (!text) return [];
+    return [
+        `下面是「${name || ''}」在角色卡、世界书和数据库里的资料节选。长相和服装以角色设定（DNA）为准；设定没写到的按这些资料补，只取长相、穿着和身份气质，资料里的剧情不要画进去：`,
+        text,
+    ];
+}
+
 export function buildCharacterSpriteDescription(name, dna, options) {
     const nude = Boolean(options && options.nude);
     const note = String(options && options.note || '').trim();
@@ -228,19 +250,22 @@ export function buildCharacterSpriteDescription(name, dna, options) {
         nude
             ? '不要画任何衣服、内衣和配饰。长相按下面的角色设定，人还是这个角色。不要套用现成的服装提示词，按这个角色自己写裸体该怎么画。'
             : '外貌与服装按下面的角色设定来画。设定里没写到的，按这个角色补一个日常样子。',
+        ...worldContextLines(options && options.world),
         '规格：大腿以上（cowboy shot）。朝向正面，直立，平视。禁止全身，禁止露出脚，禁止侧身，禁止倾斜构图。',
         SPRITE_DAILY_POSE_LINE,
         note ? `这次额外的要求：\n${note}` : '',
         spriteGroundLine(options && options.transparent),
         ...characterDnaLines(name, dna),
+        ...characterSourceLines(name, options && options.sourcesText),
         '只写一份，slotid 为 1。',
     ].filter(Boolean).join('\n');
 }
 
 // 状态栏头像：Q 版圆脸，只画一颗头。长相按角色设定写。
-export function buildCharacterAvatarDescription(name, dna) {
+export function buildCharacterAvatarDescription(name, dna, { world = null } = {}) {
     return [
         `画角色「${name || ''}」的 Q 版头像（chibi）。`,
+        ...worldContextLines(world),
         '头像会裁成圆形：只画头、脖子和肩膀，脸放在画面正中，占画面的大半。脸圆、眼睛大，正面看向画面，带一点笑。',
         '肩膀以下绝对不要出现：不画胸口以下的身体，不画腰、腿、脚，也不要画手。',
         '发色、瞳色、发型和头上的饰品按下面的角色设定来画，不能改；肩颈处的衣领按角色日常服装画一点即可。',
@@ -258,11 +283,18 @@ export function nsfwClothingBoostLine(kind = 'clothes') {
 }
 
 // 待确认服装：只写这一套衣服的生图标签，不写出图。
-export function buildWardrobeClothingDescription(_character, outfitName, { nsfwBoost = false } = {}) {
+// 衣柜按服装名共用，这里只写衣服、不提角色名（_character 不用）。context 是正文里描写这套衣服的段落，
+// clues 是数据库里的穿着记录；两者都只取衣服的描写，款式风格靠世界观约束。
+export function buildWardrobeClothingDescription(_character, outfitName, { nsfwBoost = false, world = null, context = '', clues = '' } = {}) {
     const outfit = String(outfitName || '').trim();
+    const scene = String(context || '').trim();
+    const worn = String(clues || '').trim();
     return [
         `为服装「${outfit}」写一份生图用的服装提示词。`,
         '一定要注意：生成的是一套衣服，而不是角色，没有角色。',
+        ...worldContextLines(world),
+        scene ? `正文里对这套衣服的描写（只取衣服本身：款式、颜色、材质照着写；没写到的按世界观补；人物和剧情不要写进去）：\n${scene}` : '',
+        worn ? `数据库里的穿着记录（同样只取衣服本身）：\n${worn}` : '',
         '这是一整套穿着，从上到下写完整：头上、上身、下身、腿和脚，以及配套的饰品。不要只写其中一件。',
         '每件都写清款式、颜色和材质。',
         nsfwBoost ? nsfwClothingBoostLine('clothes') : '',
@@ -273,18 +305,20 @@ export function buildWardrobeClothingDescription(_character, outfitName, { nsfwB
 
 // 本楼还缺的立绘一次写完。名单里只有尚未生成的，已有的不进来。
 export function buildDbgenSpriteBatchDescription(needs = [], options = {}) {
+    const world = options.world || null;
     const items = Array.isArray(needs) ? needs : [];
     const list = items.map((need, index) => `${index + 1}. ${need && need.name ? need.name : ''}`);
     const count = list.length;
     const profiles = items
         .map((need, index) => {
-            const lines = characterDnaLines(need && need.name, need && need.dna);
+            const lines = [...characterDnaLines(need && need.name, need && need.dna), ...characterSourceLines(need && need.name, need && need.sources)];
             return lines.length ? [`第 ${index + 1} 份：`, ...lines].join('\n') : '';
         })
         .filter(Boolean);
     return [
         `写${count}张立绘的提示词，按下面的顺序各一份，slotid 从 1 数到 ${count}。`,
         list.join('\n'),
+        ...worldContextLines(world),
         profiles.length ? '角色外貌与服装依据正文补充；下面列了设定的角色，长相按设定写。' : '角色外貌与服装依据正文补充。',
         ...profiles,
         SPRITE_DAILY_POSE_LINE,

@@ -13,7 +13,8 @@ import { collectAssetZipEntries } from '../../scene/asset-zip.js';
 import { assetOwnerKey, draftAssetLibrary, draftEffectiveAssets, effectiveSceneAssets, ensureCardLibrary, libraryHasContent, moveLibraryEntry, rememberAssetScope, sceneAssetsForContext } from '../../scene/asset-scope.js';
 import { buildCharacterCardPack, buildImageZip, buildPresetArchive, mergeLabelGroups, parseCharacterCardPack, parsePresetArchive, parseSettingsArchive, spriteEntriesForNames } from '../../scene/card-pack.js';
 import { getSillyTavernContext } from '../../host/tavern-helper-adapter.js';
-import { collectCharacterSources, formatCharacterSources } from '../../host/character-sources.js';
+import { collectCharacterSources, formatCharacterSources, pickCharacterSources, readSourceMaterial } from '../../host/character-sources.js';
+import { extractWorldSummary, prepareWorldContext } from './world-context.js';
 import { localImageCacheFor } from '../../media/tavern-image-cache.js';
 import { createIndexedDbAssetThumbStore } from '../../media/asset-thumb-store.js';
 import { buildPageDiagnostic } from './page-diagnostic.js';
@@ -34,7 +35,7 @@ import { ROMANCE_ACTIONS_MAX, normalizeRomanceFxSettings } from './romance-setti
 import { META_GLOBAL_SCOPE, META_LINE_KINDS, META_LINES_MAX, normalizeMetaFxSettings } from './meta-settings.js';
 import { applyPerformancePreset, capturePerformancePreset, detectPerformancePreset, performancePresetLabel, restorePerformancePreset } from './performance-presets.js';
 import { applyPerformanceProfile, hasPerformanceProfile, profileDiff, profileFromReader } from './performance-profile.js';
-import { WORLDVIEWS, applyWorldview, resolveWorldview } from '../../scene/worldview.js';
+import { WORLDVIEWS, applyWorldview, resolveWorldview, worldContextOf } from '../../scene/worldview.js';
 import { normalizeHorrorGore, normalizeHorrorStyle } from '../../scene/horror.js';
 import { BGM_ACTION_RE, handleBgmSettingsAction } from './bgm-settings-actions.js';
 import { deleteTavernFont, loadCustomFonts, pickFontFile, saveCustomFonts, uploadFontFile } from '../../media/custom-fonts.js';
@@ -203,8 +204,7 @@ function characterExpressionDna(sceneAssets, name) {
 // 「性格与表情习惯」：从角色卡 / 世界书 / 数据库收集提到这个角色的资料，交给副 LLM 提炼。
 async function extractCharacterPersona({ service, globalObj, sceneAssets, name }) {
     if (!service || typeof service.summarizeCharacterPersona !== 'function') return { ok: false, error: '当前不能提炼性格' };
-    const aliases = sceneAssets.characterAliases && Array.isArray(sceneAssets.characterAliases[name]) ? sceneAssets.characterAliases[name] : [];
-    const sources = await collectCharacterSources(globalObj, { name, aliases });
+    const sources = await collectCharacterSources(globalObj, { name, aliases: characterAliasesOf(sceneAssets, name) });
     const sourcesText = formatCharacterSources(sources);
     if (!sourcesText) {
         return { ok: false, error: `角色卡、世界书和数据库里都没找到「${name}」的资料${sources.notes.length ? `（${sources.notes.join('，')}）` : ''}` };
@@ -213,6 +213,19 @@ async function extractCharacterPersona({ service, globalObj, sceneAssets, name }
     if (!written || !written.ok) return { ok: false, error: (written && written.error) || '提炼失败' };
     if (written.insufficient) return { ok: false, error: `资料里看不出「${name}」的性格` };
     return { ok: true, persona: written.persona };
+}
+
+// 画默认立绘时给写词的角色资料节选：比提炼性格时短，只补 DNA 没写到的长相和穿着。
+const SPRITE_SOURCE_LIMITS = Object.freeze({ card: 2000, worldbook: 2500, entry: 1000, database: 800 });
+const characterAliasesOf = (sceneAssets, name) => (sceneAssets.characterAliases && Array.isArray(sceneAssets.characterAliases[name]) ? sceneAssets.characterAliases[name] : []);
+
+// 画默认立绘前读一次角色卡 / 世界书 / 数据库：世界背景（还没有世界设定提要就先提炼）和这个角色的资料节选；DNA 不动。
+async function spriteWritingBackground({ settingsState, service, globalObj, sceneAssets, name, onProgress, persist }) {
+    const material = await readSourceMaterial(globalObj);
+    const prepared = await prepareWorldContext({ settingsState, service, globalObj, material, onProgress, persist });
+    if (prepared.note) showGeneratedNotice(globalObj, prepared.note, prepared.tone);
+    const sourcesText = formatCharacterSources(pickCharacterSources(material, { name, aliases: characterAliasesOf(sceneAssets, name), limits: SPRITE_SOURCE_LIMITS }));
+    return { world: prepared.world, sourcesText };
 }
 
 // 存进这个角色的 DNA（和 DNA 一起跟着角色走）；返回更新后的 DNA。
@@ -279,6 +292,7 @@ function settingsProgressHost(globalObj) {
 function expressionProgressText(who, event) {
     if (event && event.phase === 'write') return `写提示词：${who}`;
     if (event && event.phase === 'persona') return `提炼性格：${who}`;
+    if (event && event.phase === 'world') return `提炼世界设定：${who}`;
     const total = Number(event && event.total) || 0;
     if (total > 1) return `生图中：${who}·${event.mood || ''} ${Number(event.done) || 0}/${total}`;
     return `生图中：${who}`;
@@ -332,13 +346,13 @@ function generationFailure(globalObj, dialogs, message, reason) {
 }
 
 // 已有提示词的先补画，不重写；剩下没有词的再写再画。补画中途停下就不再写。
-async function paintThenWriteExpressions({ service, name, paintItems, writeLabels, basePrompt, dna, outfit, note, nsfw, onProgress, signal }) {
+async function paintThenWriteExpressions({ service, name, paintItems, writeLabels, basePrompt, dna, outfit, note, nsfw, world = null, onProgress, signal }) {
     const paint = paintItems.length && typeof service.paintExpressionCaptions === 'function'
         ? await service.paintExpressionCaptions({ name, items: paintItems, basePrompt, dna, outfit, nsfw, onProgress, signal })
         : null;
     if (paint && !paint.ok) return paint;
     if (paint && (paint.stopped || (signal && signal.aborted))) return paint;
-    const written = await service.generateExpressionSet({ name, basePrompt, moods: writeLabels, dna, outfit, note, nsfw, onProgress, signal });
+    const written = await service.generateExpressionSet({ name, basePrompt, moods: writeLabels, dna, outfit, note, nsfw, world, onProgress, signal });
     if (!paint) return written;
     const paintedItems = paint.items || [];
     const wroteItems = written && written.items;
@@ -1414,8 +1428,11 @@ export async function handleSettingsAction(action, ctx) {
             progress.end();
             return generationFailure(globalObj, dialogs, `「${name}」的默认立绘未能生成：${errorText(error, '未返回原因')}${current ? '\n原有图片保持不变。' : ''}`, 'sprite-generate-failed');
         };
+        // 拿已有词重画不写词，不用先读资料。
+        const background = redrawCaption ? {} : await spriteWritingBackground({ settingsState, service, globalObj, sceneAssets, name, onProgress: progress.onProgress, persist: persistSettingsDraft });
+        progress.onProgress({ phase: redrawCaption ? 'paint' : 'write' });
         try {
-            result = await service.generateCharacterSprite({ name, dna, note: spriteNote, caption: redrawCaption, exact: redrawExact, onProgress: progress.onProgress });
+            result = await service.generateCharacterSprite({ name, dna, note: spriteNote, caption: redrawCaption, exact: redrawExact, ...background, onProgress: progress.onProgress });
         } catch (error) {
             return failed(error);
         }
@@ -1472,8 +1489,9 @@ export async function handleSettingsAction(action, ctx) {
             restoreBusy();
             return generationFailure(globalObj, dialogs, `「${name}」的「${outfitName}」裸体立绘未能生成：${errorText(error, '未返回原因')}${current ? '\n原有图片保持不变。' : ''}`, 'sprite-generate-failed');
         };
+        const background = await spriteWritingBackground({ settingsState, service, globalObj, sceneAssets, name, onProgress: progress.onProgress, persist: persistSettingsDraft });
         try {
-            result = await service.generateCharacterSprite({ name, dna, nude: true, onProgress: progress.onProgress });
+            result = await service.generateCharacterSprite({ name, dna, nude: true, ...background, onProgress: progress.onProgress });
         } catch (error) {
             return failed(error);
         }
@@ -1678,6 +1696,13 @@ export async function handleSettingsAction(action, ctx) {
                 showGeneratedNotice(globalObj, `没能提炼「${name}」的性格：${extracted.error}。这次按默认写法写表情。`);
             }
         }
+        // 世界背景：要写新词时还没有世界设定提要就先提炼；只补画存好的词时直接用现有的。
+        let world = worldContextOf(draftEffectiveAssets(settingsState));
+        if (!resume && (retry ? !savedCaption : writeLabels.length > 0)) {
+            const prepared = await prepareWorldContext({ settingsState, service, globalObj, onProgress, persist: persistSettingsDraft });
+            world = prepared.world;
+            if (prepared.note) showGeneratedNotice(globalObj, prepared.note, prepared.tone);
+        }
         // 单张重画的按钮由宿主按 settingsBusyLabel 锁住，这里只锁整套差分的按钮。
         const restoreBusy = retry ? () => {} : markExpressionActionBusy(globalObj, normalizedAction, '生图中');
         // 单张重画不接停止键：只有一张，按了也停不下来，别把「表情差分」按钮变成摆设。
@@ -1696,11 +1721,11 @@ export async function handleSettingsAction(action, ctx) {
             result = resume || paintOnly
                 ? await service.paintExpressionCaptions({ name, items: resumeItems, basePrompt, dna, outfit, nsfw, onProgress, signal: stopControl.signal })
                 : retry && savedCaption && typeof service.generateExpressionImage === 'function'
-                ? await service.generateExpressionImage({ name, mood, caption: savedCaption, exact: savedExact, basePrompt, dna, outfit, nsfw, onProgress, signal: stopControl.signal })
+                ? await service.generateExpressionImage({ name, mood, caption: savedCaption, exact: savedExact, basePrompt, dna, outfit, nsfw, world, onProgress, signal: stopControl.signal })
                 : retry
-                    ? await service.generateExpressionImage({ name, mood, basePrompt, dna, outfit, nsfw, onProgress, signal: stopControl.signal })
+                    ? await service.generateExpressionImage({ name, mood, basePrompt, dna, outfit, nsfw, world, onProgress, signal: stopControl.signal })
                     : await paintThenWriteExpressions({
-                        service, name, paintItems, writeLabels, basePrompt, dna, outfit, note: moodNote, nsfw, onProgress, signal: stopControl.signal,
+                        service, name, paintItems, writeLabels, basePrompt, dna, outfit, note: moodNote, nsfw, world, onProgress, signal: stopControl.signal,
                     });
         } catch (error) {
             stopControl.done();
@@ -2006,6 +2031,24 @@ export async function handleSettingsAction(action, ctx) {
         return rerenderSettings();
     }
 
+    // 「场景 → 规则」的世界设定提要：从角色卡场景栏和世界书常驻条目（重新）提炼，已有内容先问一句再覆盖。
+    if (normalizedAction === 'world-summary-extract') {
+        const globalObj = options.global || globalThis;
+        if (worldContextOf(draftEffectiveAssets(settingsState)).summary
+            && !(await dialogs.confirm('已经有世界设定提要，重新提炼会覆盖现在的内容。继续吗？'))) return rerenderSettings();
+        const task = beginSettingsProgress(() => settingsProgressHost(globalObj), '提炼世界设定');
+        let extracted;
+        try {
+            extracted = await extractWorldSummary({ settingsState, service: options.generatedAssets, globalObj });
+        } finally {
+            task.end();
+        }
+        if (!extracted.ok) return generationFailure(globalObj, dialogs, `没能提炼世界设定提要：${extracted.error}`, 'world-summary-failed');
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
     const worldviewAction = normalizedAction.match(/^worldview:([a-z-]+)$/);
     if (worldviewAction) {
         const bridgeDraft = settingsState.draft.bridge = settingsState.draft.bridge || {};
@@ -2306,7 +2349,8 @@ export async function handleSettingsAction(action, ctx) {
         let result;
         const progress = startExpressionProgress(globalObj, `${charName}·Q版头像`);
         try {
-            result = await service.generateCharacterAvatar({ name: charName, dna: characterExpressionDna(sceneAssets, charName), onProgress: progress.onProgress });
+            // 头像只带现有的世界背景，不为它单独提炼世界设定。
+            result = await service.generateCharacterAvatar({ name: charName, dna: characterExpressionDna(sceneAssets, charName), world: worldContextOf(draftEffectiveAssets(settingsState)), onProgress: progress.onProgress });
         } catch (error) {
             result = { ok: false, error: errorText(error, '') };
         }

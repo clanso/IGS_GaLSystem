@@ -29,6 +29,7 @@
 - 柏宝绘出图（`baibai-client.js`）：图像来源为 `baibai` 时，剧情 CG、素材、物品图与阅读器重画经柏宝绘公开接口 `globalThis.STBaiBaiImage`（apiVersion 1）出图，`save: false` 不进柏宝绘图库；后端支持多角色时分角色传，否则拼成一段 prompt；未检测到或失败时有 NAI Key 就退回内置 NAI。不保证透明底，立绘按浅灰底出图再抠图。
 - 副 LLM 写词（`illustration/caption-writer.js`）：图像来源不是数据库生图时，`writeDbgenPrompt` 改由副 LLM 按同一份描述写 NAI v4 caption，`generateDbgenCaption` 把 caption 拆回 slot 按当前来源出图；表情差分、头像、默认立绘与衣柜共用。副 LLM 选独立 API 却没填地址或模型时直接报「还没接副 LLM」，不发请求。副 LLM 设置单独在「生图 → 副 LLM」子页。
 - 表情差分的性格与表情 tag：角色 DNA 可带 `persona`（「性格与表情习惯」，只进写词说明 `buildExpressionDiffDescription`，排在动作基准之前；不进画图提示词，不算 DNA 已填）。要写新词而角色还没有 persona 时，设置层先用 `host/character-sources.js` 收集角色卡 / 世界书 / 数据库节选，再经 `illustration/persona-writer.js`（副 LLM，资料不足时回「资料不足」）提炼并存回 DNA；提炼失败只提示，不挡生成。角色设定里可手改或「重新从资料提炼」。出图前 `applyMoodToCaption` 的情绪组表情 tag（组上的 `tags` 优先于预设，NSFW「动情」没改过才用 NSFW 预设）默认只兜底：写词原文 `captionHasExpression` 为假时才放到最前；组上 `alwaysTags` 为真时总是放。情绪组在「场景 → 规则」里逐组设开关与 tag，「套用预设」与素材包合并都保留这两项。
+- 立绘与服装写词的世界背景：`worldContextLines(world)` 把世界观选项（`worldContextOf`：id、中文名、`worldSummary`）写成「服装、发型、饰品和随身物品都要符合这个世界」加「世界设定提要」，默认立绘、裸体立绘、Q 版头像、表情差分（含换装）、衣柜服装提示词、楼内补立绘（副 LLM 规划【世界观】一节与数据库生图批量说明）都带上。`worldSummary` 存在当前角色卡的素材里（和世界观同一处，卡里没写就用全局），在「场景 → 规则」里可改；要写新词而它是空的时，设置层（`visual/igs-ui/world-context.js`）先从角色卡场景栏和世界书常驻（蓝灯）条目经 `persona-writer.js` 的 `writeWorldSummary` 提炼并保存，失败只提示、只带世界观。默认立绘另附角色卡 / 世界书 / 数据库里该角色的节选（`characterSourceLines`，排在 DNA 之后，只补 DNA 没写到的长相、穿着和身份气质，不改 DNA）；楼内补立绘由宿主注入的 `readCharacterSources(names)` 按名字给 `need.sources`，读不到不附。衣柜按服装名共用，说明里不点名穿着者；附正文最近 30 层里提到服装名的段落（`pickOutfitContext`）与数据库里提到该服装名的穿着记录。
 
 ## Provider 契约
 

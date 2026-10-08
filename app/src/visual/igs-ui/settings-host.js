@@ -583,6 +583,13 @@ export function createSettingsHost(deps) {
                 }
                 return;
             }
+            // 世界设定提要：只更新草稿（和世界观存在同一处），关闭设置时统一保存；不重绘，避免丢焦点。
+            if (target.getAttribute('data-world-summary') !== null) {
+                rememberAssetScope(state.activeSettings, getSillyTavernContext(options.global || globalThis));
+                draftAssetLibrary(state.activeSettings, null).worldSummary = target.value;
+                state.activeSettings.snapshot.draft = state.activeSettings.draft;
+                return;
+            }
             const wardrobeName = target.getAttribute('data-wardrobe-name');
             if (wardrobeName) {
                 if (['__proto__', 'constructor', 'prototype'].includes(wardrobeName)) return;
