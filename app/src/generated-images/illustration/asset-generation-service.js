@@ -281,6 +281,7 @@ export function createAssetGenerationService(deps) {
             messageId: floor.messageId, size, description: buildDbgenAssetDescription(item.need), userPrompts,
             skipRecall: true,
             ...(isSprite && plannedVia === 'dbgen' && { transparent: true }),
+            ...(!isSprite && { background: true }),
         };
         let result;
         try { result = await nai.generate(slot, { ...s.auto.nai, size }, meta); } catch (error) { result = { ok: false, error: `NAI 生成失败：${(error && error.message) || error}` }; }
@@ -328,7 +329,7 @@ export function createAssetGenerationService(deps) {
         } else {
             let result;
             try {
-                result = await nai.generateDbgenCaption({ caption, size: backgroundSize(s), seed: randomSeed() });
+                result = await nai.generateDbgenCaption({ caption, size: backgroundSize(s), seed: randomSeed(), background: true });
             } catch (error) {
                 result = { ok: false, error: `出图失败：${(error && error.message) || error}` };
             }
@@ -881,7 +882,7 @@ export function createAssetGenerationService(deps) {
             }
             let painted;
             try {
-                painted = await nai.generateDbgenCaption({ caption, size: backgroundSize(s), seed });
+                painted = await nai.generateDbgenCaption({ caption, size: backgroundSize(s), seed, background: true });
             } catch (error) {
                 painted = { ok: false, error: (error && error.message) || '出图失败' };
             }

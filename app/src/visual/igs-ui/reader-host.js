@@ -3715,7 +3715,7 @@ export function createIgsReaderHost(options = {}) {
             const sourceNotes = {
                 nai: '使用你的NAI Key直接生成剧情CG、素材和重画。',
                 dbgen: '提示词、画师串和NAI Key在数据库生图插件里设置。',
-                extension: '画风沿用智绘姬；填了NAI Key时失败会改用NAI。',
+                extension: '画风和尺寸沿用智绘姬，场景背景按IGS的背景尺寸出图；填了NAI Key时失败会改用NAI。',
                 baibai: '后端与画风沿用柏宝绘；填了NAI Key时失败会改用NAI。',
             };
             const contentNotes = {
