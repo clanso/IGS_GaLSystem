@@ -102,6 +102,9 @@ function moodSceneLines(moods, nsfw) {
     return lines.length ? ['各份表情用在什么场面（只说场面，怎么做按这个角色来）：', ...lines] : [];
 }
 
+const EXPRESSION_BY_PERSONALITY_LINE = '怎么表现由这个角色的性格决定，上面的场面只说什么时候用。场面里的「讨说法」「撒娇」「崩溃」是心情，不是动作清单：克制、端庄、成熟的人，多数情绪只落在眼神、眉间、嘴角和呼吸的细微变化上，不一定会哭、噘嘴或伸手；外放、孩子气的人才会有大动作和眼泪。';
+const STOCK_EXPRESSION_LINE = '动漫立绘最常见的套路画法：含泪、眼泪打转（tearing up, teary eyes）、噘嘴（pout）、抬下巴（chin raised）、歪头（head tilt）、手按胸口（hand on own chest）、伸手（reaching）、捂嘴、双手握拳放在胸前。只有这个角色的性格和这份情绪真的会这样时才写，不要拿来凑情绪。';
+
 // 立绘会在很多场合反复用：只画长期的身体状态，一会儿就过去的不画。
 const LASTING_STATE_TEXT = '怀孕，或者烧伤、大片伤疤、打着石膏、缠着绷带的重伤、截肢这类严重的伤';
 const TRANSIENT_STATE_TEXT = '出汗、湿身、湿发贴在身上、头发凌乱、脸红、泪痕、喘气、身上沾的污渍';
@@ -203,17 +206,21 @@ export function buildExpressionDiffDescription(name, prompt, labels, dna, outfit
         `${TRANSIENT_STATE_TEXT}这类一会儿就过去的状态不要当成身体状态每份都写；某个表情本身要的（哭泣的眼泪、害羞的脸红、紧张的汗珠）只写在那一份里。`,
         ...outfitStateLines(outfitName),
         ...worldContextLines(world),
-        '每个表情都按这个角色自己的性格、脾气和说话做事的习惯来写，不要套统一的表情模板。',
-        persona ? `「${name || ''}」的性格与表情习惯（据此决定每个表情怎么做、做到多大；只管表情和动作，不要据此改长相和衣服）：\n${persona}` : '',
         '规格：大腿以上（cowboy shot），身体朝正面站着（各张差分要叠在同一个位置）。头的角度、视线方向、手和肩膀可以随情绪动。禁止全身，禁止露出脚，禁止整个身体侧过去，禁止倾斜构图。',
-        '写每一份之前，先想这个角色在那种场面里真实会怎么反应，再落到脸上（眉、眼、嘴、视线），需要时带到手和肩膀；动多少按这个角色来，内敛的人可以只有眼神和嘴角的变化。',
-        '同一种情绪，不同的人做法可以完全不同：比如委屈，有人噘嘴含泪，有人眼泪汪汪地凑过来要人哄，有人别过头一声不吭，有人反而笑着说没事。不要套最常见的动漫画法，除非这个角色本来就是这样；也不要为了表现情绪把一串同类标签堆在一起，只写这个角色这一刻真会有的那几个。',
-        '每一份要一眼看得出是哪种情绪，彼此不要撞脸，但都要像同一个人。',
-        String(note || '').trim() ? `这次额外的要求：\n${String(note).trim()}` : '',
         caption ? '上面那份立绘的表情和动作不要沿用，每份的表情、嘴型、眼神和手势都按各自的情绪重写。' : '',
         spriteGroundLine(transparent),
         ...characterDnaLines(name, dna),
         ...moodSceneLines(moods, nsfw),
+        // 怎么表现放在最后：写词模型最看重最后读到的，性格和用户的要求要压过场面里「撒娇」「崩溃」这类字眼。
+        // 这里不举具体情绪的做法：举了「委屈就噘嘴含泪」，模型写委屈时就照抄。
+        EXPRESSION_BY_PERSONALITY_LINE,
+        persona
+            ? `「${name || ''}」的性格与表情习惯（据此决定每个表情怎么做、做到多大；只管表情和动作，不要据此改长相和衣服）：\n${persona}`
+            : '每个表情都按这个角色自己的性格、脾气和说话做事的习惯来写，不要套统一的表情模板。',
+        String(note || '').trim() ? `这次额外的要求：\n${String(note).trim()}` : '',
+        STOCK_EXPRESSION_LINE,
+        '写每一份之前，先想这个角色在那种场面里真实会怎么反应，再落到脸上（眉、眼、嘴、视线），需要时带到手和肩膀；只写这个角色这一刻真会有的那几个标签，不要为了表现情绪把一串同类标签堆在一起。',
+        '每一份要一眼看得出是哪种情绪，彼此不要撞脸，但都要像同一个人。',
         `按 slotid 1 到 ${moods.length} 的顺序另写 ${moods.length} 份：${moods.map((label, index) => `${index + 1} ${label}`).join('、')}。`,
     ].filter(Boolean).join('\n');
 }
