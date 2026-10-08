@@ -1,5 +1,5 @@
 import { esc } from './reader-value-utils.js';
-import { moodPresetTags, normalizeMoodGroups } from '../../scene/mood-groups.js';
+import { MOOD_PRESET, moodPresetTags, normalizeMoodGroups } from '../../scene/mood-groups.js';
 import { worldContextOf } from '../../scene/worldview.js';
 import { TOOLBAR_ACTIONS } from './reader-host-constants.js';
 import { STAGE_SHAKE_INTENSITIES } from './stage-shake-runtime.js';
@@ -692,10 +692,18 @@ export function renderMoodGroupList(groups, options = {}) {
             + `<button type="button" class="igs-btn-mgr-icon" data-action="${toggle}" title="${open ? '收起' : '展开这个组里的词'}" aria-expanded="${open}">${open ? chevronUp : chevronDown}</button>`
             + `</div>${wordsHtml}</div>`;
     }).join('');
+    // 旧版默认只有 8 组；表情差分按 20 档预设画，缺的组在这里提示并可一键补上（已有的组不重置）。
+    const have = new Set(list.map((group) => String(group.label || '').trim()));
+    const missing = MOOD_PRESET.map((entry) => entry.label).filter((label) => !have.has(label));
+    const missingHtml = missing.length
+        ? `<div class="igs-source-filter-note igs-mood-missing">表情差分最多画 20 种表情，这里还缺 ${missing.length} 组：${esc(missing.join('、'))}。缺的组在正文里认不出来，画了也用不上。`
+            + `<button type="button" class="igs-review-link" data-action="mood-fill-presets">补上缺的 ${missing.length} 组</button></div>`
+        : '';
     return `<div class="igs-mood-groups" data-mood-group-count="${list.length}">`
         + `<div class="igs-settings-section-head"><div class="igs-settings-subhead">情绪组 <span class="igs-mood-group-total">${list.length}</span></div>`
         + `<button type="button" class="igs-btn-mgr-icon" data-action="mood-add-group" title="新增情绪组" aria-label="新增情绪组">+</button></div>`
         + `<div class="igs-source-filter-note">组名对应表情槽，组里的词是正文里的叫法。</div>`
+        + missingHtml
         + `<div class="igs-btn-mgr-list">${rows || '<div class="igs-scene-empty">还没有情绪组</div>'}</div>`
         + `</div>`;
 }
