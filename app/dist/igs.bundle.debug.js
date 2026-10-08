@@ -20504,6 +20504,9 @@ function moodSceneLines(moods, nsfw) {
     return lines.length ? ['各份表情用在什么场面（只说场面，怎么做按这个角色来）：', ...lines] : [];
 }
 
+const EXPRESSION_BY_PERSONALITY_LINE = '怎么表现由这个角色的性格决定，上面的场面只说什么时候用。场面里的「讨说法」「撒娇」「崩溃」是心情，不是动作清单：克制、端庄、成熟的人，多数情绪只落在眼神、眉间、嘴角和呼吸的细微变化上，不一定会哭、噘嘴或伸手；外放、孩子气的人才会有大动作和眼泪。';
+const STOCK_EXPRESSION_LINE = '动漫立绘最常见的套路画法：含泪、眼泪打转（tearing up, teary eyes）、噘嘴（pout）、抬下巴（chin raised）、歪头（head tilt）、手按胸口（hand on own chest）、伸手（reaching）、捂嘴、双手握拳放在胸前。只有这个角色的性格和这份情绪真的会这样时才写，不要拿来凑情绪。';
+
 // 立绘会在很多场合反复用：只画长期的身体状态，一会儿就过去的不画。
 const LASTING_STATE_TEXT = '怀孕，或者烧伤、大片伤疤、打着石膏、缠着绷带的重伤、截肢这类严重的伤';
 const TRANSIENT_STATE_TEXT = '出汗、湿身、湿发贴在身上、头发凌乱、脸红、泪痕、喘气、身上沾的污渍';
@@ -20525,7 +20528,7 @@ function outfitStateLines(outfitName) {
 // 给写词看的样板（已有立绘、分批的第一份）去掉临时状态；这一套由程序按孕期加肚子时，怀孕的词也去掉。
 function lastingStateCaption(caption, enforcedPregnancy) {
     const enforced = enforcedPregnancy > 0;
-    return filterCaptionTags(caption, (key) => !TRANSIENT_STATE_TAG_RE.test(key) && !(enforced && PREGNANCY_TAG_RE.test(key)));
+    return filterCaptionTags(caption, (key) => !TRANSIENT_STATE_TAG_RE.test(key) && !isMoodDetailTag(key) && !(enforced && PREGNANCY_TAG_RE.test(key)));
 }
 
 // 按标签键过滤正面 caption（base 和各角色块），负面不动。
@@ -20600,22 +20603,26 @@ function buildExpressionDiffDescription(name, prompt, labels, dna, outfit, { not
         clothesLine,
         clothes && clothes.nsfwBoost && !nude ? nsfwClothingBoostLine('character') : '',
         clothesPrompt ? `服装提示词：\n${clothesPrompt}` : '',
-        anchored ? `这一组表情分几次写，下面是前面已经写好的一份。外貌、服装和长期身体状态要和它完全一致，只有表情和动作按各自的情绪重写：\n${anchored}` : '',
+        anchored ? `这一组表情分几次写，下面是前面已经写好的几份共有的外貌、服装和长期身体状态（表情和动作已经去掉）。这几项要和它完全一致，表情和动作按各自的情绪写，不要照搬别的份：\n${anchored}` : '',
         `正文和资料里写着的长期身体状态（${LASTING_STATE_TEXT}），每一份都要写上，各份写法一致；这不算改长相。${statedMonth ? '' : `怀孕按孕期写肚子大小：${pregnancyGuideText()}。`}`,
         `${TRANSIENT_STATE_TEXT}这类一会儿就过去的状态不要当成身体状态每份都写；某个表情本身要的（哭泣的眼泪、害羞的脸红、紧张的汗珠）只写在那一份里。`,
         ...outfitStateLines(outfitName),
         ...worldContextLines(world),
-        '每个表情都按这个角色自己的性格、脾气和说话做事的习惯来写，不要套统一的表情模板。',
-        persona ? `「${name || ''}」的性格与表情习惯（据此决定每个表情怎么做、做到多大；只管表情和动作，不要据此改长相和衣服）：\n${persona}` : '',
         '规格：大腿以上（cowboy shot），身体朝正面站着（各张差分要叠在同一个位置）。头的角度、视线方向、手和肩膀可以随情绪动。禁止全身，禁止露出脚，禁止整个身体侧过去，禁止倾斜构图。',
-        '写每一份之前，先想这个角色在那种场面里真实会怎么反应，再落到脸上（眉、眼、嘴、视线），需要时带到手和肩膀；动多少按这个角色来，内敛的人可以只有眼神和嘴角的变化。',
-        '同一种情绪，不同的人做法可以完全不同：比如委屈，有人噘嘴含泪，有人眼泪汪汪地凑过来要人哄，有人别过头一声不吭，有人反而笑着说没事。不要套最常见的动漫画法，除非这个角色本来就是这样；也不要为了表现情绪把一串同类标签堆在一起，只写这个角色这一刻真会有的那几个。',
-        '每一份要一眼看得出是哪种情绪，彼此不要撞脸，但都要像同一个人。',
-        String(note || '').trim() ? `这次额外的要求：\n${String(note).trim()}` : '',
         caption ? '上面那份立绘的表情和动作不要沿用，每份的表情、嘴型、眼神和手势都按各自的情绪重写。' : '',
         SPRITE_NO_BACKGROUND_LINE,
         ...characterDnaLines(name, dna),
         ...moodSceneLines(moods, nsfw),
+        // 怎么表现放在最后：写词模型最看重最后读到的，性格和用户的要求要压过场面里「撒娇」「崩溃」这类字眼。
+        // 这里不举具体情绪的做法：举了「委屈就噘嘴含泪」，模型写委屈时就照抄。
+        EXPRESSION_BY_PERSONALITY_LINE,
+        persona
+            ? `「${name || ''}」的性格与表情习惯（据此决定每个表情怎么做、做到多大；只管表情和动作，不要据此改长相和衣服）：\n${persona}`
+            : '每个表情都按这个角色自己的性格、脾气和说话做事的习惯来写，不要套统一的表情模板。',
+        String(note || '').trim() ? `这次额外的要求：\n${String(note).trim()}` : '',
+        STOCK_EXPRESSION_LINE,
+        '写每一份之前，先想这个角色在那种场面里真实会怎么反应，再落到脸上（眉、眼、嘴、视线），需要时带到手和肩膀；只写这个角色这一刻真会有的那几个标签，不要为了表现情绪把一串同类标签堆在一起。',
+        '每一份要一眼看得出是哪种情绪，彼此不要撞脸，但都要像同一个人。',
         `按 slotid 1 到 ${moods.length} 的顺序另写 ${moods.length} 份：${moods.map((label, index) => `${index + 1} ${label}`).join('、')}。`,
     ].filter(Boolean).join('\n');
 }
@@ -20906,6 +20913,52 @@ function isExpressionPoseTag(tag) {
     return EXPRESSION_POSE_RE.test(tagKey(tag));
 }
 
+// 某一张差分自己的神态和动作：眉毛、眼神、嘴、头的角度、手和手臂、肩膀、身体姿势。
+// 从别的图拿长相（原装那张、分批写词的样板）时去掉，不然平和那张的「眉头放松、双手交叠」会叠到委屈上。
+// 只认带姿态词的写法：瞳色（green eyes）、裸肩（bare shoulders）、袖套（arm warmers）、痣这类长相和衣服不动。
+const MOOD_DETAIL_RE = new RegExp(`^(?!mole\\b)(?:${[
+    '.*\\b(?:eyebrows?|brows?)\\b.*',
+    '.*\\b(?:gaze|glance|stare|staring|looking|wink|winking)\\b.*',
+    '.*\\blooks? (?:at|away|down|up)\\b.*',
+    '(?:.* )?(?:closed|half-closed|narrowed|downcast|averted|teary|wet|upturned|sleepy|tired|shining|sparkling|glaring|squinting|wide|watery|empty|dull) eyes?',
+    'eyes? (?:closed|half-closed|narrowed|wide|averted|downcast|shut).*',
+    'one eye closed',
+    '.*\\b(?:pout|pouting|lips|mouth|smile|smiling|grin|grinning|smirk|frown|frowning|laugh|laughing|sneer|scowl)\\b.*',
+    '.*\\bhead (?:tilt|tilted|down|lowered|up|raised|turned|back|bowed)\\b.*',
+    '.*\\btilt(?:ed|ing)? head\\b.*',
+    'chin (?:.* )?(?:up|down|raised|lowered|tucked).*',
+    '.*\\b(?:tearing|sobbing|crying|sniffling|trembling lips)\\b.*',
+    '.*\\b(?:own )?hands? (?:on|in|together|behind|up|raised|clasped|resting|reaching|holding|over|near|to|at|covering|in front)\\b.*',
+    '.*\\b(?:hands|fingers) (?:together|interlocked|intertwined|clasped)\\b.*',
+    '.*\\bclasped hands\\b.*',
+    '.*\\bfingers? (?:to|on|touching)\\b.*',
+    '(?:other|one|another) (?:hand|arm)\\b.*',
+    '.*\\b(?:reaching|holding|gripping|grabbing|clutching)\\b.*',
+    '.*\\barms? (?:crossed|folded|behind|at sides|up|raised|outstretched|around|on|across|resting|down)\\b.*',
+    'crossed arms',
+    '(?:relaxed|raised|tense|tensed|slumped|hunched|drooping|stiff|squared) shoulders',
+    '.*\\b(?:shrug|shrugging|leaning|posture|bowing|slouching)\\b.*',
+].join('|')})$`);
+function isMoodDetailTag(tag) {
+    return isExpressionPoseTag(tag) || MOOD_DETAIL_RE.test(tagKey(tag));
+}
+
+// 分批写词的样板：取第一批里过半数份都有的 tag。长相、衣服、长期身体状态每份都写，留得下；
+// 表情和动作每份不同，自然筛掉。结构照第一份，返回 null 表示第一批没有可用的。
+function sharedLookCaption(captions) {
+    const list = (Array.isArray(captions) ? captions : []).filter((item) => item && item.v4_prompt && item.v4_prompt.caption);
+    if (!list.length) return null;
+    const keysOf = (caption) => {
+        const pos = caption.v4_prompt.caption;
+        const chars = Array.isArray(pos.char_captions) ? pos.char_captions : [];
+        return new Set(splitTags([pos.base_caption, chars[0] && chars[0].char_caption].filter(Boolean).join(', ')).map(tagKey));
+    };
+    const counts = new Map();
+    for (const keys of list.map(keysOf)) for (const key of keys) counts.set(key, (counts.get(key) || 0) + 1);
+    const half = list.length / 2;
+    return filterCaptionTags(list[0], (key) => list.length === 1 || (counts.get(key) || 0) > half);
+}
+
 // 默认立绘被写成无表情时，差分照抄会带上这些词。
 const NEUTRAL_FACE_TAGS = new Set(['expressionless', 'emotionless', 'neutral expression', 'blank expression', 'blank stare', 'straight face', 'closed mouth', 'arms at sides'].map(tagKey));
 
@@ -20938,9 +20991,9 @@ function expressionLookTags(basePrompt, outfit) {
     const clothesPrompt = clothes ? String(clothes.prompt || '').trim() : '';
     if (clothesPrompt) return dnaEnglishTags(clothesPrompt).join(', ');
     if (clothes && !clothes.ownImage) return '';
-    // 原装那张画的时候出汗、湿身之类的临时状态不跟到别的表情里。
+    // 原装那张自己的神态、手势，和画的时候出汗、湿身之类的临时状态，都不跟到别的表情里。
     return splitTags(storedCharTags(basePrompt))
-        .filter((tag) => !isExpressionPoseTag(tag) && !LOOK_SKIP_TAGS.has(tagKey(tag)) && !isBackgroundTag(tag) && !TRANSIENT_STATE_TAG_RE.test(tagKey(tag)))
+        .filter((tag) => !isMoodDetailTag(tag) && !LOOK_SKIP_TAGS.has(tagKey(tag)) && !isBackgroundTag(tag) && !TRANSIENT_STATE_TAG_RE.test(tagKey(tag)))
         .join(', ');
 }
 
@@ -21042,6 +21095,8 @@ __igsDefine(exports, "buildDbgenSpriteBatchDescription", () => buildDbgenSpriteB
 __igsDefine(exports, "buildDbgenBackgroundBatchDescription", () => buildDbgenBackgroundBatchDescription);
 __igsDefine(exports, "buildDbgenAssetDescription", () => buildDbgenAssetDescription);
 __igsDefine(exports, "applyUserPromptsToCaption", () => applyUserPromptsToCaption);
+__igsDefine(exports, "isMoodDetailTag", () => isMoodDetailTag);
+__igsDefine(exports, "sharedLookCaption", () => sharedLookCaption);
 __igsDefine(exports, "applyMoodToCaption", () => applyMoodToCaption);
 __igsDefine(exports, "expressionLookTags", () => expressionLookTags);
 __igsDefine(exports, "expressionPaintDna", () => expressionPaintDna);
@@ -85849,7 +85904,7 @@ const { supportsNaiTransparentBackground } = require("src/generated-images/reque
 const { collectAssetNeeds, tempAssetKeyOf, GENERATED_ASSET_URL_PREFIX, generatedAssetIdOf, isGeneratedAssetUrl } = require("src/scene/asset-match.js");
 const { floorKeyOf } = require("src/media/illustration-store.js");
 const { GENERATED_IMAGE_SCHEMA_VERSION, isLegacyGeneratedImage, isQuotaError, normalizeGeneratedImageRecord } = require("src/media/generated-asset-store.js");
-const { dropBackgroundTags, buildCharacterAvatarDescription, buildCharacterSpriteDescription, buildDbgenAssetDescription, buildDbgenBackgroundBatchDescription, buildDbgenSpriteBatchDescription, buildExpressionDiffDescription, buildWardrobeClothingDescription, nsfwClothingBoostLine, applyCharacterDnaToCaption, applyLookToCaption, applyMoodToCaption, expressionLookTags, expressionPaintDna, expressionSpritePrompts, splitExpressionWriteBatches, splitWriteBatches, uprightSpriteCaption, applyPregnancyToCaption, outfitPregnancyMonth } = require("src/generated-images/dbgen-prompt.js");
+const { dropBackgroundTags, buildCharacterAvatarDescription, buildCharacterSpriteDescription, buildDbgenAssetDescription, buildDbgenBackgroundBatchDescription, buildDbgenSpriteBatchDescription, buildExpressionDiffDescription, buildWardrobeClothingDescription, nsfwClothingBoostLine, applyCharacterDnaToCaption, applyLookToCaption, applyMoodToCaption, expressionLookTags, expressionPaintDna, expressionSpritePrompts, splitExpressionWriteBatches, splitWriteBatches, uprightSpriteCaption, applyPregnancyToCaption, outfitPregnancyMonth, sharedLookCaption } = require("src/generated-images/dbgen-prompt.js");
 const { normalizeStoredPrompt, promptFromCaption } = require("src/generated-images/generation-prompt.js");
 const { promptTimeBucket, sceneVariantCaption, sceneVariantTags } = require("src/generated-images/scene-variant-tags.js");
 const { sceneTimeBucket } = require("src/scene/time-bucket.js");
@@ -86883,7 +86938,7 @@ function createAssetGenerationService(deps) {
         let painted = 0;
         let writeError = '';
         // 分批写时每批是一次独立的写词：外貌、身体状态（怀孕之类只写在正文里的）容易一批有一批没有。
-        // 后面的批次照第一批写好的第一份来。
+        // 后面的批次照第一批的样板来：只取第一批过半数份共有的 tag，表情和动作不进样板（见 sharedLookCaption）。
         let anchor = null;
         for (const batch of splitExpressionWriteBatches(labels)) {
             if (stopped()) break;
@@ -86916,10 +86971,7 @@ function createAssetGenerationService(deps) {
                     break;
                 }
                 const captions = Array.isArray(written.captions) ? written.captions : [];
-                if (!anchor) {
-                    const first = captions.find((item) => item && item.caption);
-                    if (first) anchor = first.caption;
-                }
+                if (!anchor) anchor = sharedLookCaption(captions.map((item) => item && item.caption));
                 const missing = [];
                 for (let i = 0; i < pending.length; i += 1) {
                     if (stopped()) {
