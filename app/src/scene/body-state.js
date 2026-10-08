@@ -32,17 +32,18 @@ export function pregnancyMonthOf(state) {
     return 0;
 }
 
-// 孕月 → 肚子的 tag，用 NovelAI 的权重写法控制大小。孕 1–3 月外表看不出来，不加。
-// 这些是起始值：没有逐档实测过，出图偏大偏小就改这里。
+// 孕月 → 肚子的 tag。不用权重：只写 pregnant 时每张差分各画各的大小，要把大小写具体，每份原样加同一组。
+// Danbooru 里管大小的只有 pregnant 和 big belly（large belly 是它的别名）；更细的大小用英文短语描述，
+// 靠 NAI V4.5 / V5 读懂自然语言。孕 1–3 月外表看不出来，不加。这些是起始值：没有逐档实测过，出图偏大偏小就改这里。
 export const PREGNANCY_MONTH_TAGS = Object.freeze([
     '', '', '', '',
-    '0.6::pregnant::',
-    '0.8::pregnant::',
-    'pregnant',
-    '1.1::pregnant::, big belly',
-    '1.2::pregnant::, big belly',
-    '1.3::pregnant::, 1.1::big belly::',
-    '1.4::pregnant::, huge belly',
+    'pregnant, small baby bump, lower belly slightly rounded',
+    'pregnant, small round baby bump, belly slightly sticking out',
+    'pregnant, medium round belly, belly clearly sticking out',
+    'pregnant, big belly, round belly sticking out',
+    'pregnant, big belly, large round belly sticking out far',
+    'pregnant, big belly, very large round belly, heavily pregnant',
+    'pregnant, big belly, very large round belly, heavily pregnant, full-term pregnancy',
 ]);
 
 export function pregnancyTagsOf(month) {
@@ -58,8 +59,9 @@ export function pregnancyGuideText() {
 }
 
 // 以下按比较用的标签键（小写、去掉权重写法）判断。
-// 怀孕和肚子的词：程序按孕期统一加 tag 时，写词结果和旧立绘里带的都去掉，免得两种大小打架。
-export const PREGNANCY_TAG_RE = /^(?:pregnant|pregnancy|(?:early|late) pregnancy|baby bump|(?:pregnant|big|huge|large|round|rounded|swollen|bulging|small|slightly swollen) belly)$/;
+// 怀孕和肚子大小的词：程序按孕期统一加 tag 时，写词结果和旧立绘里带的都去掉，免得两种大小打架。
+// 带 pregnan、baby bump 或 belly 的都算；肚脐、腹链、露腹之类和大小无关的不动。
+export const PREGNANCY_TAG_RE = /^(?!.*\bbelly (?:button|chain|dance|dancing|piercing)\b)(?!bare belly$)(?:.*pregnan.*|.*\bbaby bump\b.*|.*\bbelly\b.*)$/;
 // 一会儿就过去的身体状态：从原装立绘取长相、给分批写词当样板时去掉，不让它跟着每一份走。
 // 某个表情自己要的眼泪、脸红、汗珠由写词结果单独带，不经过这里。
 export const TRANSIENT_STATE_TAG_RE = /^(?:sweat|sweating|sweaty|sweatdrop|.*\bsweat\b.*|damp.*|wet|wet .*|.* wet|soaked|drenched|steam|steaming(?: body)?|body steam|hair stuck to .*|messy hair|disheveled(?: hair| clothes)?|tousled hair|bed hair|heavy breathing|panting|out of breath|tears|teary eyes|.*\btears?\b.*|.*blush|dirty(?: face| clothes)?|.*\bstain(?:s|ed)?\b.*|mud|muddy|trembling|shaking)$/;

@@ -42,7 +42,7 @@ test('gate:expression-consistency:later-batches-follow-the-first-written-look-an
     for (const text of descriptions) {
         assert.match(text, /正文和资料里写着的长期身体状态（怀孕，或者烧伤[^）]*），每一份都要写上/);
         assert.match(text, /出汗、湿身[^\n]*这类一会儿就过去的状态不要当成身体状态每份都写/);
-        assert.match(text, /怀孕按孕期写肚子大小：孕1–3月外表看不出来，不写怀孕的词；孕4月 0\.6::pregnant::/);
+        assert.match(text, /怀孕按孕期写肚子大小：孕1–3月外表看不出来，不写怀孕的词；孕4月 pregnant, small baby bump/);
     }
     assert.doesNotMatch(descriptions[0], /前面已经写好的一份/, '第一批没有可对齐的');
     for (const text of descriptions.slice(1)) {

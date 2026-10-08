@@ -30,9 +30,15 @@ test('gate:body-state:pregnancy-month-from-stage-words-months-and-weeks', () => 
         ['孕5月', 5], ['怀孕五个月', 5], ['孕20周', 5], ['孕36周', 9], ['孕50周', 10], ['左臂烧伤', 0], ['怀孕', 0], ['', 0]];
     for (const [state, month] of cases) assert.equal(pregnancyMonthOf(state), month, state);
     assert.equal(pregnancyTagsOf(2), '', '孕早期看不出来，不加');
-    assert.equal(pregnancyTagsOf(8), '1.2::pregnant::, big belly');
+    assert.equal(pregnancyTagsOf(5), 'pregnant, small round baby bump, belly slightly sticking out');
+    assert.equal(pregnancyTagsOf(8), 'pregnant, big belly, large round belly sticking out far');
     assert.equal(pregnancyTagsOf(0), '');
     assert.equal(PREGNANCY_MONTH_TAGS.length, 11);
+    // 大小靠描述写死，不用权重；每档都以 pregnant 开头。
+    for (const tags of PREGNANCY_MONTH_TAGS.slice(4)) {
+        assert.doesNotMatch(tags, /::/);
+        assert.ok(tags.startsWith('pregnant, '), tags);
+    }
 });
 
 test('gate:body-state:outfit-field-accepts-name-dash-state-and-shows-the-base-meanwhile', () => {
@@ -57,7 +63,7 @@ test('gate:body-state:new-state-outfit-wears-the-base-outfit-clothes', () => {
 
 test('gate:body-state:writer-is-told-the-outfit-state-and-pregnancy-is-left-to-the-program', () => {
     const late = buildExpressionDiffDescription('阿黛尔', null, ['平和'], null, { name: '薄睡袍-孕晚期' });
-    assert.match(late, /这一套是「孕晚期」（约孕8月）：肚子由程序按孕期统一加上（1\.2::pregnant::, big belly），你不要再写 pregnant、belly 这类词。/);
+    assert.ok(late.includes(`这一套是「孕晚期」（约孕8月）：肚子由程序按孕期统一加上（${pregnancyTagsOf(8)}），你不要再写 pregnant、belly 这类词。`));
     assert.doesNotMatch(late, /怀孕按孕期写肚子大小/, '孕期已定时不再给对照表');
     const early = buildExpressionDiffDescription('阿黛尔', null, ['平和'], null, { name: '薄睡袍-孕早期' });
     assert.match(early, /这一套是「孕早期」（约孕2月）：肚子还看不出来，不要写 pregnant、belly 这类词。/);
@@ -71,9 +77,10 @@ test('gate:body-state:writer-is-told-the-outfit-state-and-pregnancy-is-left-to-t
 });
 
 test('gate:body-state:pregnancy-tags-replace-whatever-the-writer-wrote', () => {
-    const written = cap('silver hair, pregnant, huge belly, 1.5::pregnant::, smile');
-    assert.equal(charOf(applyPregnancyToCaption(written, 8)), '1.2::pregnant::, big belly, silver hair, smile');
-    assert.equal(charOf(applyPregnancyToCaption(written, 2)), 'silver hair, smile', '孕早期只去不加');
+    // 写词自带的怀孕、肚子大小词都换掉；肚脐、露腹这类和大小无关的留着。
+    const written = cap('silver hair, pregnant, huge belly, 1.5::pregnant::, small baby bump, hand on belly, navel, belly button, smile');
+    assert.equal(charOf(applyPregnancyToCaption(written, 8)), `${pregnancyTagsOf(8)}, silver hair, navel, belly button, smile`);
+    assert.equal(charOf(applyPregnancyToCaption(written, 2)), 'silver hair, navel, belly button, smile', '孕早期只去不加');
     assert.equal(applyPregnancyToCaption(written, 0), written, '没定孕期不动');
 });
 
@@ -111,8 +118,9 @@ test('gate:body-state:expression-set-paints-the-stage-belly-on-every-diff', asyn
     const result = await service.generateExpressionSet({ name: '阿黛尔', moods: ['喜悦', '不满'], basePrompt: null, outfit: { name: '薄睡袍-孕晚期', words: [] } });
     assert.equal(result.ok, true);
     assert.equal(paints.length, 2);
+    // 每张差分的肚子描述一字不差，写词自带的 huge belly 不留。
     for (const text of paints) {
-        assert.ok(text.startsWith('1.2::pregnant::, big belly'), text);
+        assert.ok(text.startsWith(pregnancyTagsOf(8)), text);
         assert.doesNotMatch(text, /huge belly/);
     }
 });
