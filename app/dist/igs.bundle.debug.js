@@ -92,6 +92,7 @@ const { createReaderImageService } = require("src/generated-images/reader-image-
 const { createPromptInjector } = require("src/host/prompt-injector.js");
 const { createIllustrationMessageHost } = require("src/host/illustration-message-host.js");
 const { createSecondaryLlm } = require("src/host/secondary-llm.js");
+const { formatCharacterSources, pickCharacterSources, pickSceneSources, pickSettingMaterial, readSourceMaterial } = require("src/host/character-sources.js");
 const { createImageBackend, mergeLegacyNaiSettings } = require("src/generated-images/image-backend.js");
 const { IMAGE_ACTIVITY_EVENT, trackImageActivity } = require("src/generated-images/generation-activity.js");
 const { createNaiOfficialClient } = require("src/generated-images/nai-official-client.js");
@@ -113,6 +114,22 @@ const IGS_VERSION = '0.35.3';
 const SCENE_ASSETS_INJECTION_INITIAL_DELAY_MS = 3000;
 const SCENE_ASSETS_INJECTION_RETRY_MS = 1500;
 const SCENE_ASSETS_INJECTION_MAX_ATTEMPTS = 5;
+// 副 LLM 规划（楼内补立绘 / 背景、剧情 CG）的资料节选：标准长度时每项限得比手动生成时短；
+// 「读取上下文」加大预算时（large）给长的，世界书相关条目尽量整条带上。
+const PLANNER_SOURCE_LIMITS = Object.freeze({ card: 800, worldbook: 1200, entry: 600, database: 500 });
+const LARGE_PLANNER_SOURCE_LIMITS = Object.freeze({ card: 8000, worldbook: 20000, entry: 5000, database: 5000 });
+
+// 一次读角色卡 / 世界书 / 数据库，再按名字挑节选。
+async function readPlannerSources(globalObject, names, pick, { large = false } = {}) {
+    const material = await readSourceMaterial(globalObject);
+    const limits = large ? LARGE_PLANNER_SOURCE_LIMITS : PLANNER_SOURCE_LIMITS;
+    const out = {};
+    for (const name of names) {
+        const text = formatCharacterSources(pick(material, { name, limits }));
+        if (text) out[name] = text;
+    }
+    return out;
+}
 
 // 自动插图 / 素材补全的进度与失败原因：始终写控制台；阅读器开着时交给对话框顶边的生成细线，
 // 没开时失败与成功再按「显示提示弹窗」弹酒馆 toastr。
@@ -207,6 +224,8 @@ function bootstrapIGS(options = {}) {
         getViewport: () => readCgViewport(globalObject, readerModeNow()),
         getSceneAssets: () => sceneAssetsNow(readImageBridge().sceneAssets),
         getSourceFilter: () => readImageBridge().sourceFilter,
+        // 剧情 CG 规划：出场角色的角色卡 / 世界书 / 数据库节选。
+        readCharacterSources: (names, sourceOptions) => readPlannerSources(globalObject, names, pickCharacterSources, sourceOptions),
         events,
         random: options.random,
         report: reportImageJob,
@@ -226,6 +245,12 @@ function bootstrapIGS(options = {}) {
         getReaderMode: readerModeNow,
         getViewport: () => readCgViewport(globalObject, readerModeNow()),
         getSourceFilter: () => readImageBridge().sourceFilter,
+        // 楼内补立绘：按角色名挑节选。
+        readCharacterSources: (names, options) => readPlannerSources(globalObject, names, pickCharacterSources, options),
+        // 楼内补背景：同样按地点名挑角色卡描述 / 场景栏、世界书、数据库节选。
+        readSceneSources: (names, options) => readPlannerSources(globalObject, names, pickSceneSources, options),
+        // 「读取上下文」加大预算时写词附的全部设定资料：整张角色卡、角色卡 / 聊天 / 全局世界书的全部条目、数据库。
+        readSettingMaterial: async (names, { limit = 0 } = {}) => pickSettingMaterial(await readSourceMaterial(globalObject, { withGlobal: true }), { names, limit }),
         events,
         report: reportImageJob,
         thumbStore: options.assetThumbStore !== undefined ? options.assetThumbStore : createIndexedDbAssetThumbStore(globalObject),
@@ -3475,76 +3500,55 @@ const WEATHER_GROUPS_PLACEHOLDER = '{{weather_groups}}';
 
 // 表情分组预设：按「这张脸在台上起什么作用」分——8 档打底（每个大方向一张），
 // 12 档补关系互动，16 档补情绪大档，20 档补性格细节。默认是底图。
-// 动情进 20 档：不开 NSFW 时是全年龄版（含情注视），开了 NSFW 换成 actNsfw / tagsNsfw。
+// 动情进 20 档：不开 NSFW 时是全年龄版（含情注视），开了 NSFW 写词说明改成画 NSFW 版，tag 换成 tagsNsfw。
 // tier 是这一组从哪一档开始出现（0 为兜底，8/12/16/20 为档位）。
 // parent 是同方向的另一档，档位不够时按它回退；回退链最后都落到 8 档的组，垫底是不进档位的默认。
-// act 是这组的招牌动作，use 是这组该用在什么场面，两者都写进生图描述，避免组间混用和撞脸。
-// tags 是这组的英文表情标签，出图前硬合进 caption：写词插件常常漏写表情。
-// 汗滴、怒筋、心形这些是插件的漫画特效，立绘里不画，tags 和 act 都不要带。
+// use 是这组该用在什么场面，写进生图描述，避免组间混用；不给固定的招牌动作，怎么做由写词模型按角色来定。
+// tags 是这组的英文表情标签，只有组上打开「固定加上」才在出图前合进 caption。
+// 汗滴、怒筋、心形这些是插件的漫画特效，立绘里不画，tags 不要带。
 const PRESET_SOURCE = [
-    { label: '平和', tier: 8, parent: '', act: '表情放松，嘴角轻轻上扬，眉眼舒展，姿态自然',
-        use: '日常对话的底色，心情没有起伏的时候', tags: 'light smile, calm, relaxed',
+    { label: '平和', tier: 8, parent: '', use: '日常对话的底色，心情没有起伏的时候', tags: 'light smile, calm, relaxed',
         words: ['平静', '淡然', '冷静', '沉稳', '从容', '坦然', '淡定', '放松', '安心', '惬意', '温和', '温馨', '温暖', '欣慰', '释然'] },
-    { label: '喜悦', tier: 8, parent: '平和', act: '微笑，眼睛弯起，肩膀放松',
-        use: '高兴、被逗乐、收到好意的时候', tags: 'smile, happy',
+    { label: '喜悦', tier: 8, parent: '平和', use: '高兴、被逗乐、收到好意的时候', tags: 'smile, happy',
         words: ['开心', '高兴', '愉快', '欢喜', '欣喜', '愉悦', '微笑', '轻松', '甜蜜', '期待', '满足', '幸福', '享受', '感动', '陶醉', '沉醉'] },
-    { label: '愤怒', tier: 8, parent: '不满', act: '皱紧眉头，瞪眼，声音拔高',
-        use: '真的发火、吵架、被触到底线的时候', tags: 'angry, furrowed brow, v-shaped eyebrows, open mouth, clenched hand',
+    { label: '愤怒', tier: 8, parent: '不满', use: '真的发火、吵架、被触到底线的时候', tags: 'angry, furrowed brow, v-shaped eyebrows, open mouth, clenched hand',
         words: ['愤怒', '暴怒', '气愤', '愤慨', '暴躁', '怒吼', '震怒', '火大', '发火', '生气', '怒喝', '怒斥', '呵斥', '喝斥', '厉声', '咆哮', '吼叫'] },
-    { label: '悲伤', tier: 8, parent: '哭泣', act: '低头，眼神暗下来，嘴角下压',
-        use: '失落、被拒绝、听到坏消息的时候', tags: 'sad, frown, downcast eyes, looking down',
+    { label: '悲伤', tier: 8, parent: '哭泣', use: '失落、被拒绝、听到坏消息的时候', tags: 'sad, frown, downcast eyes, looking down',
         words: ['难过', '伤心', '失落', '低落', '沮丧', '惆怅', '忧伤', '心酸', '孤独', '寂寞', '失望'] },
-    { label: '惊讶', tier: 8, parent: '紧张', act: '眼睛睁大，嘴微张，手抬到胸前',
-        use: '突然听到意外消息、事情超出预料的时候', tags: 'surprised, wide-eyed, open mouth, hand up',
+    { label: '惊讶', tier: 8, parent: '紧张', use: '突然听到意外消息、事情超出预料的时候', tags: 'surprised, wide-eyed, open mouth, hand up',
         words: ['惊讶', '吃惊', '震惊', '错愕', '愣住', '意外', '诧异', '惊愕', '目瞪口呆'] },
-    { label: '害羞', tier: 8, parent: '爱恋', act: '脸颊泛红，视线躲开，手无意识地碰到脸或衣角',
-        use: '被夸、被表白、说漏嘴的时候', tags: 'blush, embarrassed, looking away, hand on own cheek',
+    { label: '害羞', tier: 8, parent: '爱恋', use: '被夸、被表白、说漏嘴的时候', tags: 'blush, embarrassed, looking away, hand on own cheek',
         words: ['害羞', '羞涩', '脸红', '羞耻', '扭捏', '不好意思'] },
-    { label: '紧张', tier: 8, parent: '怀疑', act: '身体绷紧，眉头皱起，手不知往哪放',
-        use: '怕做错事、等待结果、面对强势的人的时候', tags: 'nervous, worried, furrowed brow',
+    { label: '紧张', tier: 8, parent: '怀疑', use: '怕做错事、等待结果、面对强势的人的时候', tags: 'nervous, worried, furrowed brow',
         words: ['紧张', '焦虑', '不安', '忐忑', '担忧', '慌张', '害怕', '恐惧', '惊恐', '畏惧', '胆怯'] },
-    { label: '思考', tier: 8, parent: '平和', act: '手托下巴，视线偏到一边，眉头轻蹙',
-        use: '想事情、犹豫不决、回想过去的时候', tags: 'thinking, hand on own chin, looking to the side',
+    { label: '思考', tier: 8, parent: '平和', use: '想事情、犹豫不决、回想过去的时候', tags: 'thinking, hand on own chin, looking to the side',
         words: ['思考', '沉思', '琢磨', '回忆', '疑惑', '困惑', '迷茫', '纠结', '犹豫', '若有所思'] },
-    { label: '爱恋', tier: 12, parent: '害羞', act: '眼神柔软地看向对方，嘴角带笑，身体微微凑近',
-        use: '喜欢对方、撒娇、想被哄、求亲近的时候', tags: 'blush, gentle smile, half-closed eyes, leaning forward',
+    { label: '爱恋', tier: 12, parent: '害羞', use: '喜欢对方、撒娇、想被哄、求亲近的时候', tags: 'blush, gentle smile, half-closed eyes, leaning forward',
         words: ['喜欢', '爱慕', '心动', '倾慕', '迷恋', '宠溺', '温柔', '深情', '怜爱', '撒娇', '依恋', '黏人', '讨好', '央求', '卖萌', '求抱抱'] },
-    { label: '嫌弃', tier: 12, parents: ['愤怒', '冷淡'], act: '眉头轻皱，嘴角撇下，视线带刺',
-        use: '看不上对方、被恶心到、当面给脸色的时候', tags: 'disgust, frown, narrowed eyes, sideways glance',
+    { label: '嫌弃', tier: 12, parents: ['愤怒', '冷淡'], use: '看不上对方、被恶心到、当面给脸色的时候', tags: 'disgust, frown, narrowed eyes, sideways glance',
         words: ['嫌弃', '厌恶', '反感', '排斥', '鄙视', '鄙夷', '不屑', '白眼', '冷哼'] },
-    { label: '得意', tier: 12, parent: '喜悦', act: '抬起下巴，嘴角单边上扬，双手叉腰',
-        use: '赢了、占了上风、逗到对方的时候', tags: 'smug, smirk, hands on own hips',
+    { label: '得意', tier: 12, parent: '喜悦', use: '赢了、占了上风、逗到对方的时候', tags: 'smug, smirk, hands on own hips',
         words: ['得意', '骄傲', '自豪', '自信', '傲慢', '炫耀', '嚣张', '挑衅', '坏笑', '捉弄', '狡黠', '嘲讽', '讥讽', '讽刺', '嗤笑', '讥笑', '冷笑', '揶揄', '戏谑', '阴阳怪气'] },
-    { label: '冷淡', tier: 12, parents: ['平和', '嫌弃'], act: '视线移开不看对方，半垂着眼，面无表情',
-        use: '好感度低、在生气不想理人、懒得回应的时候', tags: 'looking away, half-closed eyes, expressionless, cold',
+    { label: '冷淡', tier: 12, parents: ['平和', '嫌弃'], use: '好感度低、在生气不想理人、懒得回应的时候', tags: 'looking away, half-closed eyes, expressionless, cold',
         words: ['冷淡', '冷漠', '疏离', '无视', '敷衍', '爱答不理', '懒得理'] },
-    { label: '大笑', tier: 16, parent: '喜悦', act: '张嘴大笑，眼睛眯成缝，身体前倾',
-        use: '笑到失控、气氛最热的时候', tags: 'laughing, open mouth, closed eyes, leaning forward',
+    { label: '大笑', tier: 16, parent: '喜悦', use: '笑到失控、气氛最热的时候', tags: 'laughing, open mouth, closed eyes, leaning forward',
         words: ['大笑', '狂喜', '兴奋', '雀跃', '激动', '欢呼', '畅快', '捧腹'] },
-    { label: '哭泣', tier: 16, parent: '悲伤', act: '落泪，眼角和鼻尖发红，手抹眼泪',
-        use: '忍不住哭出来、情绪崩溃的时候', tags: 'crying, tears, streaming tears, wiping tears, blush',
+    { label: '哭泣', tier: 16, parent: '悲伤', use: '忍不住哭出来、情绪崩溃的时候', tags: 'crying, tears, streaming tears, wiping tears, blush',
         words: ['哭泣', '落泪', '流泪', '哽咽', '大哭', '痛哭', '心痛', '悲痛', '痛苦', '崩溃'] },
-    { label: '不满', tier: 16, parent: '愤怒', act: '鼓脸噘嘴，抱臂，斜眼瞟对方',
-        use: '闹小脾气、吃醋、故意不理你的时候', tags: 'pout, annoyed, crossed arms, glaring sideways',
+    { label: '不满', tier: 16, parent: '愤怒', use: '闹小脾气、吃醋、故意不理你的时候', tags: 'pout, annoyed, crossed arms, glaring sideways',
         words: ['不满', '恼火', '窝火', '烦躁', '烦闷', '抱怨', '不服', '赌气', '闹别扭', '不悦', '吃醋', '嫉妒', '醋意', '眼红', '争宠'] },
-    { label: '无奈', tier: 16, parent: '平和', act: '嘴角僵着勉强笑，眼神发飘，肩膀垮下来',
-        use: '社交场合撑场面、被为难只能硬接、装没事的时候', tags: 'wry smile, strained smile, looking to the side, shrugging',
+    { label: '无奈', tier: 16, parent: '平和', use: '社交场合撑场面、被为难只能硬接、装没事的时候', tags: 'wry smile, strained smile, looking to the side, shrugging',
         words: ['无奈', '苦笑', '叹气', '扶额', '头疼', '认命', '哭笑不得', '无可奈何', '尴尬', '窘迫', '难堪', '冷场', '局促', '拘谨', '不自在', '假笑'] },
-    { label: '心虚', tier: 20, parent: '紧张', act: '干笑，眼神飘开不敢看对方，手指挠脸颊',
-        use: '说谎被戳穿、被问到不该问的、想蒙混过去的时候', tags: 'nervous smile, looking to the side, scratching own cheek',
+    { label: '心虚', tier: 20, parent: '紧张', use: '说谎被戳穿、被问到不该问的、想蒙混过去的时候', tags: 'nervous smile, looking to the side, scratching own cheek',
         words: ['心虚', '理亏', '愧疚', '内疚', '装傻', '搪塞', '支吾', '含糊其辞'] },
-    { label: '委屈', tier: 20, parent: '悲伤', act: '噘嘴，眼眶含泪忍着不掉，抬眼看人',
-        use: '被冤枉、被凶了想讨说法的时候', tags: 'pout, teary eyes, holding back tears, looking up, blush',
+    { label: '委屈', tier: 20, parent: '悲伤', use: '被冤枉、被凶了想讨说法，或者摔了、哪里碰疼了想撒娇求安慰的时候', tags: 'pout, teary eyes, holding back tears, looking up, blush',
         words: ['委屈', '憋屈', '冤枉', '受气', '不甘', '欲哭无泪'] },
-    { label: '怀疑', tier: 20, parent: '紧张', act: '眯眼盯着对方，身体半侧，手挡在身前',
-        use: '初次见面、对方来历不明、听到可疑的话的时候', tags: 'suspicious, narrowed eyes, wary, arm up',
+    { label: '怀疑', tier: 20, parent: '紧张', use: '初次见面、对方来历不明、听到可疑的话的时候', tags: 'suspicious, narrowed eyes, wary, arm up',
         words: ['怀疑', '猜疑', '狐疑', '戒备', '警惕', '提防', '防备', '审视', '试探', '敌意'] },
-    { label: '动情', tier: 20, parent: '爱恋', act: '眼神湿润地注视对方，嘴唇微张，脸颊泛红，呼吸变浅',
-        use: '告白前后、接吻前、距离一下子拉近的时候', tags: 'blush, half-closed eyes, parted lips, looking at viewer',
-        actNsfw: '眼神迷离，呼吸略急，身体贴向对方', tagsNsfw: 'blush, half-closed eyes, parted lips, heavy breathing',
+    { label: '动情', tier: 20, parent: '爱恋', use: '告白前后、接吻前、距离一下子拉近的时候', tags: 'blush, half-closed eyes, parted lips, looking at viewer',
+        tagsNsfw: 'blush, half-closed eyes, parted lips, heavy breathing',
         words: ['动情', '情动', '迷离', '意乱情迷', '渴求', '燥热'] },
-    { label: '默认', tier: 0, act: '无表情，面无表情，闭嘴，眼神平视，带一个轻量的日常小动作，身体放松',
-        use: '没有明确情绪、刚出场、当背景的时候', tags: 'expressionless, closed mouth',
+    { label: '默认', tier: 0, use: '没有明确情绪、刚出场、当背景的时候', tags: 'expressionless, closed mouth',
         words: ['无表情', '面无表情', '无语', '木然', '沉默', '默然', '麻木', '认真', '严肃', '发呆', '愣神', '呆滞'] },
 ];
 const MOOD_PRESET = PRESET_SOURCE.map((entry) => ({
@@ -3552,9 +3556,7 @@ const MOOD_PRESET = PRESET_SOURCE.map((entry) => ({
     tier: entry.tier,
     parent: String(entry.parent || ''),
     parents: Array.isArray(entry.parents) ? entry.parents.slice() : [],
-    act: String(entry.act || ''),
     use: String(entry.use || ''),
-    actNsfw: String(entry.actNsfw || ''),
     tags: String(entry.tags || ''),
     tagsNsfw: String(entry.tagsNsfw || ''),
     words: entry.words.slice(),
@@ -3599,10 +3601,11 @@ function moodPresetWords(label) {
     const entry = MOOD_PRESET_BY_LABEL.get(String(label || '').trim());
     return entry ? entry.words.slice() : [];
 }
-function moodPresetAct(label, { nsfw = false } = {}) {
+
+// 这组开了 NSFW 时有另一种画法（目前只有「动情」）。
+function moodHasNsfwVariant(label) {
     const entry = MOOD_PRESET_BY_LABEL.get(String(label || '').trim());
-    if (!entry) return '';
-    return (nsfw && entry.actNsfw) || entry.act;
+    return Boolean(entry && entry.tagsNsfw);
 }
 
 // 这组该用在什么场面。写词模型靠它把力度和眼神选对，避免和相邻的组混用。
@@ -3637,9 +3640,19 @@ function normalizeMoodGroups(value) {
         const words = Array.isArray(item.words)
             ? item.words.map((w) => String(w || '').trim()).filter(Boolean)
             : [];
-        groups.push({ label, words });
+        // tags：用户改过的表情 tag（空 = 用预设）；alwaysTags：表情差分出图时放到最前，关着就不加（不兜底）。
+        const tags = typeof item.tags === 'string' ? item.tags.replace(/\s+/g, ' ').trim() : '';
+        groups.push({ label, words, ...(tags && { tags }), ...(item.alwaysTags === true && { alwaysTags: true }) });
     }
     return groups.length ? groups : cloneDefaultMoodGroups();
+}
+
+// 表情差分要用的表情 tag：组里改过就用改过的（NSFW 也用它），没改用预设；自建组没改就没有。
+function resolveMoodExpressionTags(label, groups, { nsfw = false } = {}) {
+    const target = String(label || '').trim();
+    const group = (Array.isArray(groups) ? groups : []).find((item) => item && String(item.label || '').trim() === target);
+    const custom = group && typeof group.tags === 'string' ? group.tags.trim() : '';
+    return { tags: custom || moodPresetTags(target, { nsfw }), always: Boolean(group && group.alwaysTags === true) };
 }
 function resolveMoodGroup(word, groups) {
     const target = String(word || '').trim();
@@ -3785,11 +3798,12 @@ __igsDefine(exports, "moodPresetEntry", () => moodPresetEntry);
 __igsDefine(exports, "moodTierLabels", () => moodTierLabels);
 __igsDefine(exports, "moodFallbackChain", () => moodFallbackChain);
 __igsDefine(exports, "moodPresetWords", () => moodPresetWords);
-__igsDefine(exports, "moodPresetAct", () => moodPresetAct);
+__igsDefine(exports, "moodHasNsfwVariant", () => moodHasNsfwVariant);
 __igsDefine(exports, "moodPresetUse", () => moodPresetUse);
 __igsDefine(exports, "moodPresetTags", () => moodPresetTags);
 __igsDefine(exports, "resolvePresetGroup", () => resolvePresetGroup);
 __igsDefine(exports, "normalizeMoodGroups", () => normalizeMoodGroups);
+__igsDefine(exports, "resolveMoodExpressionTags", () => resolveMoodExpressionTags);
 __igsDefine(exports, "resolveMoodGroup", () => resolveMoodGroup);
 __igsDefine(exports, "fuzzyResolveMoodGroup", () => fuzzyResolveMoodGroup);
 __igsDefine(exports, "buildMoodGroupsText", () => buildMoodGroupsText);
@@ -4706,6 +4720,14 @@ function normalizeWorldview(id) {
     return isReadyWorldview(id) ? id : DEFAULT_WORLDVIEW;
 }
 
+// 生图写词用的世界背景：当前世界观的中文名，加上用户的世界设定提要（可以为空）。
+function worldContextOf(sceneAssets) {
+    const id = resolveWorldview(sceneAssets);
+    const found = WORLDVIEWS.find((item) => item.id === id);
+    const summary = sceneAssets && typeof sceneAssets.worldSummary === 'string' ? sceneAssets.worldSummary.trim() : '';
+    return { id, label: found ? found.label : '', summary };
+}
+
 // 从场景素材设置读出当前世界观 id。
 function resolveWorldview(sceneAssets) {
     if (isAncientEra(sceneAssets)) return 'ancient';
@@ -4728,6 +4750,7 @@ __igsDefine(exports, "worldSkinOf", () => worldSkinOf);
 __igsDefine(exports, "isKnownWorldview", () => isKnownWorldview);
 __igsDefine(exports, "isReadyWorldview", () => isReadyWorldview);
 __igsDefine(exports, "normalizeWorldview", () => normalizeWorldview);
+__igsDefine(exports, "worldContextOf", () => worldContextOf);
 __igsDefine(exports, "resolveWorldview", () => resolveWorldview);
 __igsDefine(exports, "applyWorldview", () => applyWorldview);
 __igsDefine(exports, "WORLDVIEWS", () => WORLDVIEWS);
@@ -4936,8 +4959,11 @@ function ownedWorldview(card) {
     if (!card || typeof card !== 'object' || Array.isArray(card)) return null;
     const hasWorldview = Object.prototype.hasOwnProperty.call(card, 'worldview');
     const hasAncient = Object.prototype.hasOwnProperty.call(card, 'ancient');
-    if (!hasWorldview && !hasAncient) return null;
-    const patch = {};
+    // 生图用的世界设定提要跟着角色卡走；只写了提要、没选世界观的卡也要留住它。
+    const summary = typeof card.worldSummary === 'string' ? card.worldSummary.trim() : '';
+    if (!hasWorldview && !hasAncient && !summary) return null;
+    const patch = summary ? { worldSummary: summary } : {};
+    if (!hasWorldview && !hasAncient) return patch;
     if (hasWorldview) patch.worldview = card.worldview;
     if (hasAncient) patch.ancient = card.ancient === true;
     else if (hasWorldview) patch.ancient = card.worldview === 'ancient';
@@ -10447,6 +10473,8 @@ const READER_REQUIRED_SETTINGS_PATHS = Object.freeze([
     'readerSettings.spriteGenderScale.female',
     'readerSettings.spriteGenderScale.male',
     'readerSettings.spriteGenderScale.other',
+    'readerSettings.spriteGenderScale.elderShorter',
+    'readerSettings.spriteGenderScale.childShorter',
     'readerSettings.spriteDisplayScale',
     'readerSettings.spriteHeads',
     'readerSettings.vnTheme.preset',
@@ -10511,6 +10539,7 @@ const SETTINGS_PANEL_TAB_CONTRACT = Object.freeze({
             'bridge.autoIllustration.assets.backgroundEnabled',
             'bridge.autoIllustration.assets.maxPerFloor',
             'bridge.autoIllustration.assets.spriteSize',
+            'bridge.autoIllustration.assets.spriteBackground',
             'bridge.itemImages.enabled',
             'bridge.itemImages.inventoryIcon',
             'bridge.autoIllustration.assets.backgroundSize',
@@ -10524,6 +10553,7 @@ const SETTINGS_PANEL_TAB_CONTRACT = Object.freeze({
             'bridge.autoIllustration.llm.apiKey',
             'bridge.autoIllustration.llm.model',
             'bridge.autoIllustration.llm.contextFloors',
+            'bridge.autoIllustration.llm.contextBudget',
             'bridge.autoIllustration.llm.prompts.illustration',
             'bridge.autoIllustration.llm.prompts.illustrationSoft',
             'bridge.autoIllustration.llm.prompts.asset',
@@ -11074,7 +11104,7 @@ const { pickFxAccent } = require("src/visual/igs-ui/fx-symbols.js");
 const { prefersReducedMotion } = require("src/visual/igs-ui/reduced-motion.js");
 const { applyImageCountOverride, buildImageActionContext, buildProgressText, countBoundImageSlots, normalizePollAttempts, normalizePollInterval, normalizeSnapshotImageState, resolveSegmentImageIndex, shouldPollReaderImages, waitForReaderImagePoll } = require("src/visual/igs-ui/reader-image-state.js");
 const { attachSettingsViewportEvents, clearChildren, detachSettingsViewportEvents, ensureImageLoadingSpinner, ensureStyleTag, getOwnerWindow, getRootDocument, removeImageLoadingSpinner, syncSettingsViewportVars, unmountNode } = require("src/visual/igs-ui/reader-dom-utils.js");
-const { buildTextSegments, getPath, normalizeBtnOrder, normalizeHiddenButtons, normalizePerformanceSettings, normalizePinnedButtons, normalizeReaderMode, normalizeSettingsTab, normalizeSettingsValue, normalizeSpriteDefaultScale, normalizeSpriteDisplayScale, normalizeSpriteGenderScale, normalizeSpriteLayouts, setPath, SPRITE_HEIGHT_RANGE } = require("src/visual/igs-ui/settings-normalize.js");
+const { buildTextSegments, getPath, normalizeBtnOrder, normalizeHiddenButtons, normalizePerformanceSettings, normalizePinnedButtons, normalizeReaderMode, normalizeSettingsTab, normalizeSettingsValue, normalizeSpriteDefaultScale, normalizeSpriteDisplayScale, normalizeSpriteGenderScale, normalizeSpriteLayouts, setPath, SPRITE_HEIGHT_RANGE, SPRITE_SHORTER_RANGE } = require("src/visual/igs-ui/settings-normalize.js");
 const { clearReaderModeRuntime, exitDocumentFullscreen } = require("src/visual/igs-ui/reader-runtime.js");
 const { enterSpriteEditMode } = require("src/visual/igs-ui/sprite-edit.js");
 const { enterCgPortraitEdit } = require("src/visual/igs-ui/cg-portrait.js");
@@ -15061,6 +15091,10 @@ function createIgsReaderHost(options = {}) {
         readerSettings._ancientEra = worldview === 'ancient';
         readerSettings._worldview = worldview;
         readerSettings._sceneAssets = sceneAssets;
+        // 还没入库的生成立绘的 tag：立绘默认高度据此判断没有 DNA 的角色性别。
+        const generatedService = options.generatedAssets;
+        readerSettings._tempSpriteTags = generatedService && typeof generatedService.tempSpriteTags === 'function'
+            ? generatedService.tempSpriteTags() : {};
         readerSettings._sentencePaging = Boolean(bridge.sentencePaging);
         const bilingualOverride = state.bilingualDisplay;
         readerSettings._bilingualDisplay = bilingualOverride && bilingualOverride.base === normalizeBilingualSettings(readerSettings.bilingual).display ? bilingualOverride.value : '';
@@ -15279,7 +15313,7 @@ const { placeRowMenu } = require("src/visual/igs-ui/settings-outfit-fields.js");
 const { cgReasonText } = require("src/media/cg-library.js");
 const { setStagePauseReason } = require("src/visual/igs-ui/stage-pause.js");
 const { fileGeneratedHoldings, normalizeGeneratedLibrary, collectGeneratedImageIds } = require("src/scene/asset-match.js");
-const { CHARACTER_DNA_FIELDS, resolveCharacterDna } = require("src/scene/character-dna.js");
+const { CHARACTER_DNA_FIELDS, CHARACTER_PERSONA_FIELD, resolveCharacterDna } = require("src/scene/character-dna.js");
 const { loadMatteEditor } = require("src/visual/igs-ui/sprite-matte-editor.js");
 const { mountMatteEditor } = require("src/visual/igs-ui/sprite-matte-editor-mount.js");
 const { createCanvasImageCodec } = require("src/visual/igs-ui/sprite-matte-editor-view.js");
@@ -15855,6 +15889,13 @@ function createSettingsHost(deps) {
                 }
                 return;
             }
+            // 世界设定提要：只更新草稿（和世界观存在同一处），关闭设置时统一保存；不重绘，避免丢焦点。
+            if (target.getAttribute('data-world-summary') !== null) {
+                rememberAssetScope(state.activeSettings, getSillyTavernContext(options.global || globalThis));
+                draftAssetLibrary(state.activeSettings, null).worldSummary = target.value;
+                state.activeSettings.snapshot.draft = state.activeSettings.draft;
+                return;
+            }
             const wardrobeName = target.getAttribute('data-wardrobe-name');
             if (wardrobeName) {
                 if (['__proto__', 'constructor', 'prototype'].includes(wardrobeName)) return;
@@ -15872,7 +15913,7 @@ function createSettingsHost(deps) {
             const dnaField = target.getAttribute('data-dna-field');
             if (dnaChar && dnaField) {
                 // 角色 DNA 输入只更新草稿，关闭设置时统一保存；不重绘，避免丢焦点。
-                if (!CHARACTER_DNA_FIELDS.includes(dnaField) || ['__proto__', 'constructor', 'prototype'].includes(dnaChar)) return;
+                if (!(CHARACTER_DNA_FIELDS.includes(dnaField) || dnaField === CHARACTER_PERSONA_FIELD) || ['__proto__', 'constructor', 'prototype'].includes(dnaChar)) return;
                 rememberAssetScope(state.activeSettings, getSillyTavernContext(options.global || globalThis));
                 const assets = draftAssetLibrary(state.activeSettings, { collections: ASSET_CHARACTER_FIELDS, name: dnaChar });
                 const dnaMap = assets.characterDna && typeof assets.characterDna === 'object' && !Array.isArray(assets.characterDna)
@@ -15928,6 +15969,12 @@ function createSettingsHost(deps) {
             }
             // 角色学院 / 声线下拉：交给动作层写草稿并保存（input 监听不处理 SELECT）。
             const charSelect = event.target && event.target.getAttribute ? event.target : null;
+            // 情绪组的表情 tag：输完（失焦或回车）才保存。
+            const moodTagsGroup = charSelect ? charSelect.getAttribute('data-mood-group-tags') : null;
+            if (moodTagsGroup) {
+                controller.invoke(`mood-group-tags:${encodeURIComponent(moodTagsGroup)}:${encodeURIComponent(charSelect.value || '')}`);
+                return;
+            }
             const charHouse = charSelect ? charSelect.getAttribute('data-char-house') : null;
             if (charHouse) {
                 controller.invoke(`char-house:${encodeURIComponent(charHouse)}:${encodeURIComponent(charSelect.value || '')}`);
@@ -16376,7 +16423,13 @@ function wardrobeChoices(charName, outfitName, entry, wardrobe) {
         + `<div class="igs-add-menu-list" role="listbox">${options.join('')}</div></details>${edit}`;
 }
 
-function renderOutfitPanel(charName, name, entry, baseMoods, sceneAssets, icons, expressionNotes, resolveUrl, isOpen) {
+// 「清空立绘」多选时每格前面的勾选框；没图的格子不能选，占个空位让名字对齐。
+function spriteClearPick(c, o, m, url, on) {
+    if (!String(url || '').trim()) return '<span class="igs-sprite-clear-pick is-empty" aria-hidden="true"></span>';
+    return `<button type="button" class="igs-sprite-clear-pick${on ? ' is-on' : ''}" data-action="sprite-clear-pick:${c}:${o}:${m}" role="checkbox" aria-checked="${on ? 'true' : 'false'}" title="${on ? '取消选中' : '选中清空'}">${on ? '✓' : ''}</button>`;
+}
+
+function renderOutfitPanel(charName, name, entry, baseMoods, sceneAssets, icons, expressionNotes, resolveUrl, isOpen, clearing = null) {
     const c = encSeg(charName);
     const o = encSeg(name);
     const moods = plain(entry.moods);
@@ -16414,6 +16467,7 @@ function renderOutfitPanel(charName, name, entry, baseMoods, sceneAssets, icons,
         const status = filled ? null : expressionSlotStatus(note);
         // 生成图的格子不放编号地址输入框（差分没画出来的也算）；自己填地址的格子才有输入框。
         return `<div class="igs-outfit-slot${filled ? '' : ' is-fallback'}${status && status.failed ? ' is-failed' : ''}" data-outfit-slot="${esc(mood)}">`
+            + (clearing ? spriteClearPick(c, o, encSeg(mood), raw, clearing.has(mood)) : '')
             + (filled ? thumb(url, mood, '', resolveUrl) : thumb(preview.url, mood, ' is-ghost', resolveUrl, ghostNote(mood, preview, status)))
             + `<span class="igs-btn-mgr-label">${esc(mood)}</span>`
             + (imageId || status ? '' : `<input class="igs-scene-url-input" data-scene-outfit-char="${esc(charName)}" data-scene-outfit="${esc(name)}" data-scene-outfit-mood="${esc(mood)}" value="${esc(url || '')}" placeholder="URL或data:image/...">`)
@@ -16438,7 +16492,8 @@ function renderOutfitPanel(charName, name, entry, baseMoods, sceneAssets, icons,
 }
 
 // 角色卡的立绘区：「原装 · 服装…」标签切换。原装标签显示原有情绪槽；服装标签显示该服装的槽、词、场景、头像与缺图预览。
-function renderCharacterSlotTabs({ charName, baseMoods, baseListHtml, baseMenuItems = [], outfits, activeOutfit, sceneAssets, icons, expressionNotes, resolveUrl, isOpen = () => false }) {
+// spriteClear：「清空立绘」多选状态 { character, outfit, moods: Set }，正好是这个角色这一套时显示勾选框和操作条。
+function renderCharacterSlotTabs({ charName, baseMoods, baseListHtml, baseMenuItems = [], outfits, activeOutfit, sceneAssets, icons, expressionNotes, resolveUrl, isOpen = () => false, spriteClear = null }) {
     const map = plain(outfits);
     const names = Object.keys(map).filter((item) => !isBuiltinNudeOutfit(item));
     const active = names.includes(activeOutfit) ? activeOutfit : '';
@@ -16468,21 +16523,34 @@ function renderCharacterSlotTabs({ charName, baseMoods, baseListHtml, baseMenuIt
         + `<button type="button" class="igs-settings-action igs-outfit-quick-btn" data-action="${exprAction}">表情差分</button>`
         + (pending.length ? `<button type="button" class="igs-settings-action igs-outfit-quick-btn" data-action="${resumeAction}" title="提示词已写好，将直接出图，不重写">继续生图（${pending.length}）</button>` : '')
         + `</span>`;
+    // 清空立绘：只清这一套（当前标签）里选中的格子。
+    const clearItem = menuItem(`sprite-clear:${c}:${o}`, '清空立绘（多选）');
     const menu = active
         ? renderRowMenu([
             menuItem(`ui-toggle-open:${encSeg(metaKey)}`, isOpen(metaKey) ? '收起服装设置' : '服装设置（衣柜、别名…）'),
+            clearItem,
             menuItem(`scene-rename-outfit:${c}:${o}`, '重命名这套'),
             menuItem(`scene-remove-outfit:${c}:${o}`, '删除这套', ' is-danger'),
         ], `「${active}」的操作`)
-        : renderRowMenu(baseMenuItems, '原装的操作');
+        : renderRowMenu([...baseMenuItems, clearItem], '原装的操作');
     const bar = `<div class="igs-outfit-tabs" role="tablist" data-outfit-tabs="${esc(charName)}">${tabs}`
         + `<button type="button" class="igs-outfit-tab igs-outfit-tab-add" data-action="scene-add-outfit:${c}" title="添加服装">+服装</button>`
         + `<button type="button" class="igs-outfit-tab igs-outfit-tab-add igs-outfit-tab-mood" data-action="${active ? `scene-add-outfit-mood:${c}:${o}` : `scene-add-mood:${c}`}" title="给${active ? `「${esc(active)}」` : '原装'}添加情绪">+情绪</button>`
         + `${quickButtons}${menu}</div>`;
+    const clearing = spriteClear && spriteClear.moods instanceof Set && spriteClear.character === charName && spriteClear.outfit === active
+        ? spriteClear.moods : null;
+    const slotUrls = active ? plain(plain(map[active]).moods) : plain(plain(plain(sceneAssets).characters)[charName]);
+    const filledCount = Object.values(slotUrls).filter((url) => String(url || '').trim()).length;
+    const clearBar = clearing
+        ? `<div class="igs-sprite-clear-bar"><span>勾选要清空的立绘（${active ? `「${esc(active)}」` : '原装'}，已选 ${clearing.size}/${filledCount}）</span>`
+            + `<button type="button" class="igs-settings-action" data-action="sprite-clear-all:${c}:${o}">${clearing.size && clearing.size === filledCount ? '全不选' : '全选'}</button>`
+            + `<button type="button" class="igs-settings-action is-danger" data-action="sprite-clear-apply:${c}:${o}"${clearing.size ? '' : ' disabled'}>清空选中</button>`
+            + `<button type="button" class="igs-settings-action" data-action="sprite-clear:${c}:${o}">取消</button></div>`
+        : '';
     const panel = active
-        ? renderOutfitPanel(charName, active, plain(map[active]) || { words: [], moods: {} }, baseMoods, sceneAssets, icons, expressionNotes, resolveUrl, isOpen)
+        ? renderOutfitPanel(charName, active, plain(map[active]) || { words: [], moods: {} }, baseMoods, sceneAssets, icons, expressionNotes, resolveUrl, isOpen, clearing)
         : baseListHtml;
-    return `<div class="igs-outfit-area" data-outfit-area="${esc(charName)}">${bar}${panel}</div>`;
+    return `<div class="igs-outfit-area" data-outfit-area="${esc(charName)}">${bar}${clearBar}${panel}</div>`;
 }
 
 // 规则页的衣柜提示词。focus 是从服装面板跳过来的那一条，高亮显示。
@@ -16639,6 +16707,11 @@ span.igs-char-dna-btn{display:inline-flex;color:var(--igs-settings-ink-3)}
 .igs-scene-char-group .igs-outfit-slot.is-failed .igs-add-menu-list .igs-slot-act-menu{display:none}
 .igs-outfit-slot.is-fallback>.igs-btn-mgr-label{color:var(--igs-settings-ink-4)}
 .igs-outfit-fill-all{display:flex;justify-content:flex-end;margin-top:2px}
+.igs-sprite-clear-bar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:4px 0;padding:6px 8px;border-radius:8px;background:var(--igs-settings-highlight);font-size:12px;color:var(--igs-settings-ink-2)}
+.igs-sprite-clear-bar>span{flex:1;min-width:0}
+.igs-sprite-clear-pick{flex:0 0 18px;width:18px;height:18px;padding:0;border:1.5px solid var(--igs-settings-ink-4);border-radius:4px;background:transparent;color:var(--igs-settings-ink);font-size:12px;line-height:15px;text-align:center;cursor:pointer}
+.igs-sprite-clear-pick.is-on{border-color:var(--igs-settings-danger);background:var(--igs-settings-danger);color:#fff}
+.igs-sprite-clear-pick.is-empty{border-color:transparent;cursor:default}
 .igs-outfit-meta-body{display:flex;flex-direction:column;gap:6px;margin:2px 0 6px 6px;padding:2px 0 2px 12px;border-left:1px solid var(--igs-settings-line)}
 .igs-outfit-meta-row{display:flex;align-items:center;gap:8px;min-width:0}
 .igs-outfit-meta-row .igs-mood-word-list{flex:1;min-width:0}
@@ -16759,6 +16832,7 @@ __igsDefine(exports, "pendingExpressionCaptions", () => pendingExpressionCaption
 __igsDefine(exports, "transferIcons", () => transferIcons);
 __igsDefine(exports, "slotActions", () => slotActions);
 __igsDefine(exports, "expressionSlotStatus", () => expressionSlotStatus);
+__igsDefine(exports, "spriteClearPick", () => spriteClearPick);
 __igsDefine(exports, "renderCharacterSlotTabs", () => renderCharacterSlotTabs);
 __igsDefine(exports, "renderWardrobe", () => renderWardrobe);
 __igsDefine(exports, "renderReviewCard", () => renderReviewCard);
@@ -18145,10 +18219,16 @@ const plainObject = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v 
 function cleanText(value) {
     return typeof value === 'string' ? value.replace(/\r\n?/g, '\n').trim() : '';
 }
+
+// 性格与表情习惯：跟着 DNA 存（改名、删除、导入导出、本卡范围都一起走），只给表情差分写词用；
+// 不进画图提示词，也不算「DNA 已填」。空的不写这个键。
+const CHARACTER_PERSONA_FIELD = 'persona';
 function normalizeCharacterDna(raw) {
     const source = plainObject(raw) || {};
     const dna = {};
     for (const field of CHARACTER_DNA_FIELDS) dna[field] = cleanText(source[field]);
+    const persona = cleanText(source[CHARACTER_PERSONA_FIELD]);
+    if (persona) dna[CHARACTER_PERSONA_FIELD] = persona;
     return dna;
 }
 function isCharacterDnaEmpty(dna) {
@@ -18252,6 +18332,7 @@ __igsDefine(exports, "splitPromptTags", () => splitPromptTags);
 __igsDefine(exports, "mergePromptTags", () => mergePromptTags);
 __igsDefine(exports, "buildCharacterDnaPromptParts", () => buildCharacterDnaPromptParts);
 __igsDefine(exports, "CHARACTER_DNA_FIELDS", () => CHARACTER_DNA_FIELDS);
+__igsDefine(exports, "CHARACTER_PERSONA_FIELD", () => CHARACTER_PERSONA_FIELD);
 });
 __igsRegister("src/visual/igs-ui/sprite-matte-editor.js", function(module, exports, require) {
 // 遮罩修复编辑器控制层：加载可编辑立绘、驱动编辑会话并按 revision 保存；不直接操作存储。
@@ -18521,6 +18602,22 @@ function matteSolidBackground(imageData) {
     }
     return imageData;
 }
+
+// 出图方不一定照计划给纯色底：智绘姬 / 柏宝绘接 NAI V5 时常直接回透明底，调用方的 alreadyTransparent 只是预期。
+// 四边大半已经透明就当已抠好、只裁边；否则洪泛会把透明像素的 RGB（多为黑色）当底色，连深色描线和黑发一起抠掉。
+function hasTransparentBorder(imageData, alphaThreshold = 8) {
+    const { data, width, height } = imageData;
+    const step = Math.max(1, Math.floor(Math.min(width, height) / 32));
+    let total = 0;
+    let clear = 0;
+    const check = (x, y) => {
+        total += 1;
+        if (data[(y * width + x) * 4 + 3] <= alphaThreshold) clear += 1;
+    };
+    for (let x = 0; x < width; x += step) { check(x, 0); check(x, height - 1); }
+    for (let y = 0; y < height; y += step) { check(0, y); check(width - 1, y); }
+    return total > 0 && clear * 2 >= total;
+}
 function findOpaqueBounds(imageData, alphaThreshold = 8) {
     const { data, width, height } = imageData;
     let top = height; let left = width; let right = -1; let bottom = -1;
@@ -18666,7 +18763,8 @@ function createAlphaMatte(globalObject = globalThis) {
             if (!ctx || !canvas.width || !canvas.height) return passthrough(dataUrl, 'no-context');
             ctx.drawImage(img, 0, 0);
             const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-            if (!alreadyTransparent) {
+            const detectedTransparent = !alreadyTransparent && hasTransparentBorder(imageData);
+            if (!alreadyTransparent && !detectedTransparent) {
                 matteSolidBackground(imageData);
                 ctx.putImageData(imageData, 0, 0);
             }
@@ -18680,7 +18778,7 @@ function createAlphaMatte(globalObject = globalThis) {
             return {
                 dataUrl: preservePngTextChunks(dataUrl, out.toDataURL('image/png'), globalObject),
                 alphaMaskDataUrl: buildAlphaMaskDataUrl(doc, outCtx, bounds.width, bounds.height),
-                diagnostics: { sourceWidth: canvas.width, sourceHeight: canvas.height, crop: bounds, alreadyTransparent },
+                diagnostics: { sourceWidth: canvas.width, sourceHeight: canvas.height, crop: bounds, alreadyTransparent, detectedTransparent },
             };
         } catch (error) {
             return passthrough(dataUrl, 'error');
@@ -18693,6 +18791,7 @@ function createAlphaMatte(globalObject = globalThis) {
 }
 
 __igsDefine(exports, "matteSolidBackground", () => matteSolidBackground);
+__igsDefine(exports, "hasTransparentBorder", () => hasTransparentBorder);
 __igsDefine(exports, "findOpaqueBounds", () => findOpaqueBounds);
 __igsDefine(exports, "extractPngTextChunks", () => extractPngTextChunks);
 __igsDefine(exports, "injectPngChunks", () => injectPngChunks);
@@ -19565,6 +19664,7 @@ const { NAI_DEFAULT_SETTINGS } = require("src/generated-images/request-builders/
 const { DEFAULT_ASSET_TEMPLATES } = require("src/generated-images/illustration/prompt-kit.js");
 const { PLANNER_SYSTEM_PROMPT, PLANNER_SOFT_SYSTEM_PROMPT } = require("src/generated-images/illustration/planner-prompt.js");
 const { ASSET_PLANNER_SYSTEM_PROMPT, ASSET_PLANNER_SOFT_SYSTEM_PROMPT } = require("src/generated-images/illustration/asset-prompt.js");
+const { CONTEXT_BUDGETS } = require("src/generated-images/illustration/planner-context.js");
 // 副 LLM 系统提示词：留空即使用内置版本，保证内置提示词升级后未改动的用户能跟着更新。
 const DEFAULT_LLM_PROMPTS = Object.freeze({
     illustration: PLANNER_SYSTEM_PROMPT,
@@ -19573,6 +19673,9 @@ const DEFAULT_LLM_PROMPTS = Object.freeze({
     assetSoft: ASSET_PLANNER_SOFT_SYSTEM_PROMPT,
 });
 const NSFW_COUNT_MAX = 16;
+
+// 立绘底色：auto 按图像来源（数据库生图、NAI V5 透明底，其余浅灰底）；transparent / matte 为用户指定透明底 / 浅灰底。
+const SPRITE_BACKGROUND_MODES = Object.freeze(['auto', 'transparent', 'matte']);
 
 const clampInt = (v, min, max, d) => {
     const n = Math.round(Number(v));
@@ -19628,12 +19731,14 @@ function normalizeAutoIllustrationSettings(value) {
             maxPerFloor: clampInt(assets.maxPerFloor, 1, 16, 2),
             spriteSize: str(assets.spriteSize, '832x1216') || '832x1216',
             backgroundSize: str(assets.backgroundSize, '1216x832') || '1216x832',
+            spriteBackground: SPRITE_BACKGROUND_MODES.includes(assets.spriteBackground) ? assets.spriteBackground : 'auto',
             templates: normalizeTemplates(assets.templates),
         },
         llm: {
             source: llm.source === 'openai' ? 'openai' : 'tavern',
             endpoint: str(llm.endpoint), apiKey: str(llm.apiKey), model: str(llm.model),
             contextFloors: clampInt(llm.contextFloors, 0, 3, 1),
+            contextBudget: Object.keys(CONTEXT_BUDGETS).includes(llm.contextBudget) ? llm.contextBudget : 'standard',
             timeoutMs: clampInt(llm.timeoutMs, 10000, 300000, 90000),
             prompts: normalizePrompts(llm.prompts),
             jailbreakHead: str(llm.jailbreakHead),
@@ -19666,6 +19771,7 @@ __igsDefine(exports, "normalizeAutoIllustrationSettings", () => normalizeAutoIll
 __igsDefine(exports, "isStrictBackgroundMatch", () => isStrictBackgroundMatch);
 __igsDefine(exports, "DEFAULT_LLM_PROMPTS", () => DEFAULT_LLM_PROMPTS);
 __igsDefine(exports, "NSFW_COUNT_MAX", () => NSFW_COUNT_MAX);
+__igsDefine(exports, "SPRITE_BACKGROUND_MODES", () => SPRITE_BACKGROUND_MODES);
 });
 __igsRegister("src/generated-images/request-builders/nai-v4-builder.js", function(module, exports, require) {
 const { clampPixelPair } = require("src/generated-images/illustration/cg-pixel-cap.js");
@@ -19984,17 +20090,14 @@ const DEFAULT_ASSET_TEMPLATES = Object.freeze({
 const MATTE_BACKGROUND_TAGS = 'simple background, grey background, light grey background, flat color background';
 const WHITE_BACKGROUND_TAGS = 'simple background, white background, flat color background';
 const TRANSPARENT_BACKGROUND_TAGS = 'transparent background';
+// 立绘透明底只用这一个加权标签，其余底色标签一律去掉（见 asset-prompt 的 buildAssetSlot）。
+const SPRITE_TRANSPARENT_BACKGROUND_TAG = '1.5::transparent background::';
 
 // 用户在模板 / 画师串里已经要透明底（含加权写法）时，摘掉自动补的灰底词，免得正向词里两种底色打架。
 const MATTE_TAG_KEYS = new Set(MATTE_BACKGROUND_TAGS.split(',').map((t) => t.trim()));
 function dropMatteTagsWhenTransparent(prompt, context = '') {
     if (!/transparent background/i.test(`${prompt} ${context}`)) return prompt;
     return String(prompt || '').split(',').map((t) => t.trim()).filter((t) => t && !MATTE_TAG_KEYS.has(t.toLowerCase())).join(', ');
-}
-
-// 要白底时，负面里的 white background 会和正向对着干，摘掉。
-function dropWhiteBackgroundNegative(prompt) {
-    return String(prompt || '').split(',').map((t) => t.trim()).filter((t) => t && t.toLowerCase() !== 'white background').join(', ');
 }
 function applyTemplate(template, vars = {}) {
     const filled = String(template || '').replace(/\{(\w+)\}/g, (_, key) => String(vars[key] == null ? '' : vars[key]));
@@ -20066,7 +20169,6 @@ function buildDictionaryBackgroundTags({ name, time, weather } = {}) {
 __igsDefine(exports, "looksLikeRefusal", () => looksLikeRefusal);
 __igsDefine(exports, "requestWithSoftRetry", () => requestWithSoftRetry);
 __igsDefine(exports, "dropMatteTagsWhenTransparent", () => dropMatteTagsWhenTransparent);
-__igsDefine(exports, "dropWhiteBackgroundNegative", () => dropWhiteBackgroundNegative);
 __igsDefine(exports, "applyTemplate", () => applyTemplate);
 __igsDefine(exports, "buildDictionaryBackgroundTags", () => buildDictionaryBackgroundTags);
 __igsDefine(exports, "TAG_WRITING_RULES", () => TAG_WRITING_RULES);
@@ -20078,9 +20180,11 @@ __igsDefine(exports, "DEFAULT_ASSET_TEMPLATES", () => DEFAULT_ASSET_TEMPLATES);
 __igsDefine(exports, "MATTE_BACKGROUND_TAGS", () => MATTE_BACKGROUND_TAGS);
 __igsDefine(exports, "WHITE_BACKGROUND_TAGS", () => WHITE_BACKGROUND_TAGS);
 __igsDefine(exports, "TRANSPARENT_BACKGROUND_TAGS", () => TRANSPARENT_BACKGROUND_TAGS);
+__igsDefine(exports, "SPRITE_TRANSPARENT_BACKGROUND_TAG", () => SPRITE_TRANSPARENT_BACKGROUND_TAG);
 });
 __igsRegister("src/generated-images/illustration/planner-prompt.js", function(module, exports, require) {
 const { FICTION_FRAME, CG_COMPOSITION_GUIDE, TAG_WRITING_RULES, SOFT_MODE_NOTE } = require("src/generated-images/illustration/prompt-kit.js");
+const { worldContextLines } = require("src/generated-images/dbgen-prompt.js");
 const PLANNER_OUTPUT_FORMAT = [
     '【输出格式】不要输出 JSON、不要代码块、不要解释。每张图按以下字段一行一个输出，多张图依次排列：',
     'slot: 图序号（从 1 开始）',
@@ -20131,8 +20235,11 @@ const PLANNER_SOFT_SYSTEM_PROMPT = [
 ].join('\n');
 
 // characterDna：[{ name, identity, defaultAppearance }]，由调用方按别名归约后提供；为空时输出与旧版一致。
-function buildPlannerUserPrompt({ numberedText, scenes, characters, previousText, want, exact, isNsfw, characterDna = [], frame = '' }) {
-    const lastScene = scenes && scenes.length ? scenes[scenes.length - 1] : null;
+// characterSources：[{ name, text }] 角色卡 / 世界书 / 数据库节选；world：世界观与世界设定提要。
+function buildPlannerUserPrompt({ numberedText, scenes, characters, previousText, want, exact, isNsfw, characterDna = [], characterSources = [], world = null, frame = '' }) {
+    const sceneLabel = (scene) => `${scene.scene}｜${scene.time}｜${scene.weather}${scene.nsfw ? '｜NSFW' : ''}`;
+    // 一楼常有好几个场景：按出现顺序列全（去掉连续重复），插图要画在对应场景的段落里。
+    const sceneList = (Array.isArray(scenes) ? scenes : []).map(sceneLabel).filter((label, index, list) => label !== list[index - 1]);
     const flat = (text) => String(text || '').replace(/\s*\n\s*/g, ' ').trim();
     const dnaLines = (Array.isArray(characterDna) ? characterDna : [])
         .filter((d) => d && d.name && (flat(d.identity) || flat(d.defaultAppearance)))
@@ -20140,18 +20247,24 @@ function buildPlannerUserPrompt({ numberedText, scenes, characters, previousText
     const dnaBlock = dnaLines.length
         ? `【角色 DNA】固定身份任何时候都不得改变；默认外观只在正文未交代换装时使用，正文明确换装时按正文写：\n${dnaLines.join('\n')}`
         : '';
-    const sceneLine = lastScene
-        ? `${lastScene.scene}｜${lastScene.time}｜${lastScene.weather}${lastScene.nsfw ? '｜NSFW' : ''}`
-        : '未标注';
+    const sceneLine = !sceneList.length ? '未标注'
+        : sceneList.length === 1 ? sceneList[0]
+            : `本楼按顺序经过：${sceneList.join(' → ')}`;
     const countLine = exact
         ? `本楼需要恰好 ${want} 张插图。`
         : `本楼需要 1 到 ${want} 张插图，按剧情判断，画面感不足时只出 1 张。`;
+    const worldLines = worldContextLines(world);
+    const sourceLines = (Array.isArray(characterSources) ? characterSources : [])
+        .filter((item) => item && item.name && String(item.text || '').trim())
+        .map((item) => `「${item.name}」：\n${String(item.text).trim()}`);
     return [
         frame ? `【画面】${frame}` : '',
+        worldLines.length ? `【世界观】\n${worldLines.join('\n')}` : '',
         `【场景】${sceneLine}`,
         `【出场角色】${characters && characters.length ? characters.join('、') : '未标注'}`,
         dnaBlock,
-        previousText ? `【前文摘要】\n${previousText}` : '',
+        sourceLines.length ? `【角色资料】下面是提到这些角色的节选，每段开头标了出处。长相和服装以 DNA 与正文为准，没写到的按资料补；资料里的剧情不要画进去。\n${sourceLines.join('\n')}` : '',
+        previousText ? `【前文（原文，从早到近）】\n${previousText}` : '',
         `【本楼正文（已编号）】\n${numberedText}`,
         `【要求】${countLine}${isNsfw ? '本楼为 NSFW 场景，请选择最具代表性的画面。' : ''}`,
         '请直接按输出格式给出字段。',
@@ -20162,12 +20275,620 @@ __igsDefine(exports, "buildPlannerUserPrompt", () => buildPlannerUserPrompt);
 __igsDefine(exports, "PLANNER_SYSTEM_PROMPT", () => PLANNER_SYSTEM_PROMPT);
 __igsDefine(exports, "PLANNER_SOFT_SYSTEM_PROMPT", () => PLANNER_SOFT_SYSTEM_PROMPT);
 });
+__igsRegister("src/generated-images/dbgen-prompt.js", function(module, exports, require) {
+const { moodHasNsfwVariant, moodPresetUse, resolveMoodExpressionTags } = require("src/scene/mood-groups.js");
+// 楼内补立绘一次最多写 8 份，超过则平分 2 批。
+const EXPRESSION_WRITE_BATCH_MAX = 8;
+// 表情差分：不超过 9 份一次写完；10–18 份平分 2 批；超过 18 份平分 3 批。一批写完并出完再写下一批。
+const EXPRESSION_DIFF_BATCH_MAX = 9;
+// 数据库生图模式下的前端提示词接线：写词接口只说明画什么。
+// 正负模板在出图前合并进插件返回的 NaiCaption，不交给写词模型照抄。
+
+const WEIGHT_RE = /^-?\d*\.?\d+::|::$/g;
+function splitTags(text) {
+    return String(text || '').split(/[,，\n]/).map((t) => t.trim()).filter(Boolean);
+}
+
+// 比较用的标签键：忽略大小写、多余空格、NovelAI 权重语法与强调括号。
+function tagKey(tag) {
+    return String(tag || '').trim().replace(WEIGHT_RE, '').replace(/^[{[(]+|[}\])]+$/g, '')
+        .trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+// 按先后顺序合并多组标签，重复的只保留第一次出现。
+function mergeTags(...groups) {
+    const seen = new Set();
+    const out = [];
+    for (const group of groups) {
+        for (const tag of splitTags(group)) {
+            const key = tagKey(tag);
+            if (!key || seen.has(key)) continue;
+            seen.add(key);
+            out.push(tag);
+        }
+    }
+    return out.join(', ');
+}
+
+// 底色标签：以 background / backdrop 结尾的都算，含 no background、加权与括号写法。
+const BACKGROUND_TAG_RE = /(?:^|\s)(?:background|backdrop)(?::-?[\d.]+)?$/;
+function isBackgroundTag(tag) {
+    return BACKGROUND_TAG_RE.test(tagKey(tag));
+}
+
+// 去掉所有底色标签；没有可去的就原样返回，不重排用户的写法。
+function dropBackgroundTags(text) {
+    const tags = splitTags(text);
+    return tags.some(isBackgroundTag) ? tags.filter((tag) => !isBackgroundTag(tag)).join(', ') : String(text || '');
+}
+
+// 立绘只留一种底色：去掉原有的底色标签，在末尾接上指定的那组。
+function withOnlyBackground(text, background) {
+    return mergeTags(dropBackgroundTags(text), background);
+}
+
+// 去掉 text 里和 tags 相同的标签（比较时忽略权重写法），用于负面别和正面的底色打架。
+function dropMatchingTags(text, tags) {
+    const keys = new Set(splitTags(tags).map(tagKey));
+    return splitTags(text).filter((tag) => !keys.has(tagKey(tag))).join(', ');
+}
+
+// 插件 LLM 回给程序的是扁平字段。已有立绘按这个格式放进用户描述。
+function formatReturnedCaption(caption) {
+    const pos = caption && caption.v4_prompt && caption.v4_prompt.caption;
+    const neg = caption && caption.v4_negative_prompt && caption.v4_negative_prompt.caption;
+    if (!pos || !neg) return '';
+    const lines = ['slotid: 1'];
+    const scene = String(pos.base_caption || '').trim();
+    const sceneUc = String(neg.base_caption || '').trim();
+    if (scene) lines.push(`scene: ${scene}`);
+    if (sceneUc) lines.push(`scene_uc: ${sceneUc}`);
+    const chars = Array.isArray(pos.char_captions) ? pos.char_captions : [];
+    const ucs = Array.isArray(neg.char_captions) ? neg.char_captions : [];
+    const count = Math.max(chars.length, ucs.length);
+    for (let i = 0; i < count; i += 1) {
+        const item = chars[i] && typeof chars[i] === 'object' ? chars[i] : {};
+        const center = Array.isArray(item.centers) ? item.centers[0] : null;
+        const x = center && Number.isFinite(Number(center.x)) ? Number(center.x) : 0.5;
+        const y = center && Number.isFinite(Number(center.y)) ? Number(center.y) : 0.5;
+        const text = String(item.char_caption || '').trim();
+        const uc = String((ucs[i] && ucs[i].char_caption) || '').trim();
+        if (text) lines.push(`char: ${x},${y} | ${text}`);
+        if (uc) lines.push(`char_uc: ${uc}`);
+    }
+    return lines.join('\n');
+}
+
+
+function splitEven(list, parts) {
+    const base = Math.floor(list.length / parts);
+    let extra = list.length % parts;
+    const out = [];
+    let offset = 0;
+    for (let i = 0; i < parts; i += 1) {
+        const size = base + (extra > 0 ? 1 : 0);
+        if (extra > 0) extra -= 1;
+        out.push(list.slice(offset, offset + size));
+        offset += size;
+    }
+    return out;
+}
+
+// 楼内补立绘：单次写词最多 8 份。超过 8 份均分成两批（10 份是 5 和 5），由调用方串行写。
+function splitWriteBatches(items) {
+    const list = Array.isArray(items) ? items : [];
+    if (list.length <= EXPRESSION_WRITE_BATCH_MAX) return list.length ? [list] : [];
+    return splitEven(list, 2);
+}
+
+// 表情差分写词：9 份及以内一批；超过 9 份平分 2 批；超过 18 份平分 3 批。
+function splitExpressionWriteBatches(items) {
+    const list = Array.isArray(items) ? items : [];
+    if (!list.length) return [];
+    if (list.length <= EXPRESSION_DIFF_BATCH_MAX) return [list];
+    return splitEven(list, list.length <= EXPRESSION_DIFF_BATCH_MAX * 2 ? 2 : 3);
+}
+
+// 立绘底色由程序按「立绘底色」设置统一加；写词时也写底色，会和程序加的那组混在一起。
+const SPRITE_NO_BACKGROUND_LINE = '不要写背景、场景和底色，底色由程序统一加。';
+
+// 每份表情只交代用在什么场面，不规定怎么做（固定的招牌动作会让每个角色都画成同一副套路脸）；
+// 怎么做由写词模型按角色性格和正文来定。自建组没有预设场面，只出现在最后的份数清单里。
+function moodSceneLines(moods, nsfw) {
+    const lines = moods.map((mood, index) => {
+        const use = moodPresetUse(mood);
+        const nsfwVariant = nsfw && moodHasNsfwVariant(mood) ? '这一份画 NSFW 版，情欲上来时的样子。' : '';
+        return use || nsfwVariant ? `${index + 1} ${mood}：${use ? `用在${use}。` : ''}${nsfwVariant}` : '';
+    }).filter(Boolean);
+    return lines.length ? ['各份表情用在什么场面（只说场面，怎么做按这个角色来）：', ...lines] : [];
+}
+
+// note 是用户这次临时补的要求（性格、某个情绪的特别表现），只影响写词这一步；
+// nsfw 为 true 时「动情」改用它在 NSFW 下的动作说明。
+// anchor：同一组表情分批写时，前面一批写好的一份；后面的批次外貌、服装和身体状态照它，整组才一致。
+function buildExpressionDiffDescription(name, prompt, labels, dna, outfit, { note = '', nsfw = false, world = null, anchor = null } = {}) {
+    const moods = (Array.isArray(labels) ? labels : []).map((item) => String(item || '').trim()).filter(Boolean);
+    const persona = String((dna && typeof dna === 'object' && dna.persona) || '').trim();
+    const stored = prompt && typeof prompt === 'object' ? prompt : {};
+    const caption = formatReturnedCaption(stored.caption);
+    const anchored = formatReturnedCaption(anchor);
+    const clothes = outfit && typeof outfit === 'object' ? outfit : null;
+    const outfitName = clothes ? String(clothes.name || '').trim() : '';
+    const words = clothes && Array.isArray(clothes.words)
+        ? clothes.words.map((item) => String(item || '').trim()).filter(Boolean)
+        : [];
+    const nude = Boolean(clothes && clothes.nude);
+    const clothesPrompt = nude ? '' : (clothes ? String(clothes.prompt || '').trim() : '');
+    const wordText = words.length ? `，衣服按这些词来画：${words.join('、')}` : '';
+    const wear = caption
+        ? '上面 char 里的衣服换成下面的服装提示词，人还是上面那个。'
+        : '衣服按下面的服装提示词来画。';
+    const clothesLine = nude
+        ? '这一套是裸体。不要画任何衣服、内衣和配饰，按这个角色的长相画裸体立绘。不要沿用原装的衣服，也不要另附服装提示词。'
+        : !outfitName
+        ? (caption ? '服装也按上面这份画。' : '外貌、服装和构图与已有立绘保持一致。')
+        : clothesPrompt
+            ? (clothes.ownImage
+                ? `这一套就是服装「${outfitName}」。${wear}不要画成别的衣服。`
+                : `这一套要改成服装「${outfitName}」。${wear}不要沿用原装的衣服。`)
+            : clothes.ownImage
+                ? `这一套就是服装「${outfitName}」${words.length ? `（${words.join('、')}）` : ''}。不要画成别的衣服。`
+                : `这一套要改成服装「${outfitName}」${wordText}。不要沿用原装的衣服。`;
+    return [
+        outfitName
+            ? `为角色「${name || ''}」的服装「${outfitName}」写 ${moods.length} 份立绘表情差分。`
+            : `为角色「${name || ''}」写 ${moods.length} 份立绘表情差分。`,
+        caption ? '下面这份是已有立绘，外貌和构图按它画。这不是要回写的图。' : '',
+        caption,
+        clothesLine,
+        clothes && clothes.nsfwBoost && !nude ? nsfwClothingBoostLine('character') : '',
+        clothesPrompt ? `服装提示词：\n${clothesPrompt}` : '',
+        anchored ? `这一组表情分几次写，下面是前面已经写好的一份。外貌、服装和身体状态要和它完全一致，只有表情和动作按各自的情绪重写：\n${anchored}` : '',
+        '正文和资料里写着的这个角色现在的身体状态（例如怀孕、受伤包扎、湿身），每一份都要写上，各份写法一致；这不算改长相。',
+        ...worldContextLines(world),
+        '每个表情都按这个角色自己的性格、脾气和说话做事的习惯来写，不要套统一的表情模板。',
+        persona ? `「${name || ''}」的性格与表情习惯（据此决定每个表情怎么做、做到多大；只管表情和动作，不要据此改长相和衣服）：\n${persona}` : '',
+        '规格：大腿以上（cowboy shot），身体朝正面站着（各张差分要叠在同一个位置）。头的角度、视线方向、手和肩膀可以随情绪动。禁止全身，禁止露出脚，禁止整个身体侧过去，禁止倾斜构图。',
+        '写每一份之前，先想这个角色在那种场面里真实会怎么反应，再落到脸上（眉、眼、嘴、视线），需要时带到手和肩膀；动多少按这个角色来，内敛的人可以只有眼神和嘴角的变化。',
+        '同一种情绪，不同的人做法可以完全不同：比如委屈，有人噘嘴含泪，有人眼泪汪汪地凑过来要人哄，有人别过头一声不吭，有人反而笑着说没事。不要套最常见的动漫画法，除非这个角色本来就是这样；也不要为了表现情绪把一串同类标签堆在一起，只写这个角色这一刻真会有的那几个。',
+        '每一份要一眼看得出是哪种情绪，彼此不要撞脸，但都要像同一个人。',
+        String(note || '').trim() ? `这次额外的要求：\n${String(note).trim()}` : '',
+        caption ? '上面那份立绘的表情和动作不要沿用，每份的表情、嘴型、眼神和手势都按各自的情绪重写。' : '',
+        SPRITE_NO_BACKGROUND_LINE,
+        ...characterDnaLines(name, dna),
+        ...moodSceneLines(moods, nsfw),
+        `按 slotid 1 到 ${moods.length} 的顺序另写 ${moods.length} 份：${moods.map((label, index) => `${index + 1} ${label}`).join('、')}。`,
+    ].filter(Boolean).join('\n');
+}
+
+const UPRIGHT_POSITIVE = 'cowboy shot, standing, facing viewer, straight-on';
+const UPRIGHT_NEGATIVE = 'dutch angle, from side, profile, full body, feet';
+const EXPRESSION_DROP_POSITIVE = new Set(['arms at sides'].map(tagKey));
+
+// 景别回到大腿以上。只拿掉双手下垂，避免表情动作被锁死。
+function expressionSpritePrompts(positive, negative) {
+    const kept = splitTags(positive).filter((tag) => !EXPRESSION_DROP_POSITIVE.has(tagKey(tag))).join(', ');
+    return { positive: kept, negative: String(negative || '') };
+}
+
+// 写词结果补上大腿以上和正面。负面排除全身和脚。
+function uprightSpriteCaption(caption) {
+    const pos = caption && caption.v4_prompt && caption.v4_prompt.caption;
+    const neg = caption && caption.v4_negative_prompt && caption.v4_negative_prompt.caption;
+    if (!pos || !neg) return caption;
+    const chars = Array.isArray(pos.char_captions) ? pos.char_captions : [];
+    const ucs = Array.isArray(neg.char_captions) ? neg.char_captions : [];
+    const nextChars = chars.map((item) => ({
+        ...(item && typeof item === 'object' ? item : {}),
+        char_caption: mergeTags(item && item.char_caption, UPRIGHT_POSITIVE),
+    }));
+    const nextUcs = (ucs.length ? ucs : nextChars.map(() => ({ char_caption: '' }))).map((item) => ({
+        ...(item && typeof item === 'object' ? item : {}),
+        char_caption: mergeTags(item && item.char_caption, UPRIGHT_NEGATIVE),
+    }));
+    return {
+        ...caption,
+        v4_prompt: {
+            ...caption.v4_prompt,
+            caption: {
+                ...pos,
+                base_caption: chars.length ? pos.base_caption : mergeTags(pos.base_caption, UPRIGHT_POSITIVE),
+                char_captions: nextChars,
+            },
+        },
+        v4_negative_prompt: {
+            ...caption.v4_negative_prompt,
+            caption: {
+                ...neg,
+                base_caption: mergeTags(neg.base_caption, UPRIGHT_NEGATIVE),
+                char_captions: chars.length ? nextUcs : ucs,
+            },
+        },
+    };
+}
+
+// 插件写词会带上世界书、聊天上下文和它自己的角色库，同名角色容易被写成别的长相。
+// 有 DNA 时先声明以设定为准，再列字段；没有 DNA 返回空数组。
+function characterDnaLines(name, dna) {
+    const profile = dna && typeof dna === 'object' ? dna : {};
+    const identity = String(profile.identity || '').trim();
+    const appearance = String(profile.defaultAppearance || '').trim();
+    const dnaNegative = String(profile.negative || '').trim();
+    const triggers = String(profile.triggerWords || '').trim();
+    if (!identity && !appearance && !dnaNegative && !triggers) return [];
+    return [
+        `「${name || ''}」的长相以下面的设定为准，优先于上下文、世界书和角色库里的任何描写；发色、瞳色、发型照设定写，不得改动，不要按名字联想。`,
+        identity ? `固定身份：\n${identity}` : '',
+        appearance ? `默认外观：\n${appearance}` : '',
+        triggers ? `触发词：\n${triggers}` : '',
+        dnaNegative ? `不要出现：\n${dnaNegative}` : '',
+    ].filter(Boolean);
+}
+
+// 立绘站得太板正：要一个不挡身体的日常小动作。
+const SPRITE_DAILY_POSE_LINE = '姿势带一个轻量的日常小动作（如一只手拨头发、手背在身后、手插口袋、轻抓衣角），不要双手僵直下垂，也不要大幅动作或拿道具挡住身体。';
+
+// 设置页直接出一张角色立绘。没有正文，长相和衣服按角色设定写。
+// 生图写词的世界背景：世界观选项 + 世界设定提要；服装、发型、饰品和随身物品都要合这个世界。
+function worldContextLines(world) {
+    const label = String((world && world.label) || '').trim();
+    const summary = String((world && world.summary) || '').trim();
+    if (!label && !summary) return [];
+    return [
+        `这个故事的世界观${label ? `是「${label}」` : '见下面的设定'}。服装、发型、饰品和随身物品都要符合这个世界，不要画出不属于这个世界的东西。`,
+        summary ? `世界设定提要：\n${summary}` : '',
+    ].filter(Boolean);
+}
+
+// 角色卡 / 世界书 / 数据库里这个角色的资料节选：只补角色设定（DNA）没写到的长相、穿着和身份气质。
+function characterSourceLines(name, sourcesText) {
+    const text = String(sourcesText || '').trim();
+    if (!text) return [];
+    return [
+        `下面是「${name || ''}」的资料节选（每段开头标了出处：角色卡、世界书、数据库或前文）。长相和服装以角色设定（DNA）为准；设定没写到的按这些资料补，只取长相、穿着和身份气质，资料里的剧情不要画进去：`,
+        text,
+    ];
+}
+
+// 背景：角色卡 / 世界书 / 数据库 / 前文里提到这个地点的节选，只取地点本身的样子。
+function sceneSourceLines(name, sourcesText) {
+    const text = String(sourcesText || '').trim();
+    if (!text) return [];
+    return [
+        `下面是地点「${name || ''}」的资料节选（每段开头标了出处）。只取地点本身：档次、规模、建筑风格、年代、陈设和氛围；资料里的人物和剧情不要画进去：`,
+        text,
+    ];
+}
+function buildCharacterSpriteDescription(name, dna, options) {
+    const nude = Boolean(options && options.nude);
+    const note = String(options && options.note || '').trim();
+    return [
+        nude ? `画角色「${name || ''}」的裸体立绘。` : `画角色「${name || ''}」的立绘。`,
+        nude
+            ? '不要画任何衣服、内衣和配饰。长相按下面的角色设定，人还是这个角色。不要套用现成的服装提示词，按这个角色自己写裸体该怎么画。'
+            : '外貌与服装按下面的角色设定来画。设定里没写到的，按这个角色补一个日常样子。',
+        ...worldContextLines(options && options.world),
+        '规格：大腿以上（cowboy shot）。朝向正面，直立，平视。禁止全身，禁止露出脚，禁止侧身，禁止倾斜构图。',
+        SPRITE_DAILY_POSE_LINE,
+        note ? `这次额外的要求：\n${note}` : '',
+        SPRITE_NO_BACKGROUND_LINE,
+        ...characterDnaLines(name, dna),
+        ...characterSourceLines(name, options && options.sourcesText),
+        '只写一份，slotid 为 1。',
+    ].filter(Boolean).join('\n');
+}
+
+// 状态栏头像：Q 版圆脸，只画一颗头。长相按角色设定写。
+function buildCharacterAvatarDescription(name, dna, { world = null, sourcesText = '' } = {}) {
+    return [
+        `画角色「${name || ''}」的 Q 版头像（chibi）。`,
+        ...worldContextLines(world),
+        '头像会裁成圆形：只画头、脖子和肩膀，脸放在画面正中，占画面的大半。脸圆、眼睛大，正面看向画面，带一点笑。',
+        '肩膀以下绝对不要出现：不画胸口以下的身体，不画腰、腿、脚，也不要画手。',
+        '发色、瞳色、发型和头上的饰品按下面的角色设定来画，不能改；肩颈处的衣领按角色日常服装画一点即可。',
+        '纯色浅底，不要背景，不要文字。',
+        ...characterDnaLines(name, dna),
+        ...characterSourceLines(name, sourcesText),
+        '只写一份，slotid 为 1。',
+    ].filter(Boolean).join('\n');
+}
+
+// 勾选「瑟瑟加强」后追加。只告诉模型这是成年人的色情服装、不要改成普通衣服，不附带成套标签。
+function nsfwClothingBoostLine(kind = 'clothes') {
+    return kind === 'character'
+        ? '这套是色情服装。不要回避，不要审查，不要改成普通、得体或日常衣服，也不要用衣物遮住这套该露的地方。按服装提示词加强暴露和色情。'
+        : '这是色情服装。不要回避，不要审查，不要改成普通、得体或日常衣服，也不要把暴露的设计改成遮盖。按这个服装名加强色情和暴露，把款式、颜色、材质和露出的位置写清楚。';
+}
+
+// 待确认服装：只写这一套衣服的生图标签，不写出图。
+// 衣柜按服装名共用，这里只写衣服、不提角色名（_character 不用）。context 是正文里描写这套衣服的段落，
+// clues 是数据库里的穿着记录；两者都只取衣服的描写，款式风格靠世界观约束。
+function buildWardrobeClothingDescription(_character, outfitName, { nsfwBoost = false, world = null, context = '', clues = '' } = {}) {
+    const outfit = String(outfitName || '').trim();
+    const scene = String(context || '').trim();
+    const worn = String(clues || '').trim();
+    return [
+        `为服装「${outfit}」写一份生图用的服装提示词。`,
+        '一定要注意：生成的是一套衣服，而不是角色，没有角色。',
+        ...worldContextLines(world),
+        scene ? `正文里对这套衣服的描写（只取衣服本身：款式、颜色、材质照着写；没写到的按世界观补；人物和剧情不要写进去）：\n${scene}` : '',
+        worn ? `数据库里的穿着记录（同样只取衣服本身）：\n${worn}` : '',
+        '这是一整套穿着，从上到下写完整：头上、上身、下身、腿和脚，以及配套的饰品。不要只写其中一件。',
+        '每件都写清款式、颜色和材质。',
+        nsfwBoost ? nsfwClothingBoostLine('clothes') : '',
+        '不要写人，不要写表情、姿势、背景。',
+        '只写一份，slotid 为 1。',
+    ].filter(Boolean).join('\n');
+}
+
+// 本楼还缺的立绘一次写完。名单里只有尚未生成的，已有的不进来。
+function buildDbgenSpriteBatchDescription(needs = [], options = {}) {
+    const world = options.world || null;
+    const items = Array.isArray(needs) ? needs : [];
+    const list = items.map((need, index) => `${index + 1}. ${need && need.name ? need.name : ''}`);
+    const count = list.length;
+    const profiles = items
+        .map((need, index) => {
+            const lines = [...characterDnaLines(need && need.name, need && need.dna), ...characterSourceLines(need && need.name, need && need.sources)];
+            return lines.length ? [`第 ${index + 1} 份：`, ...lines].join('\n') : '';
+        })
+        .filter(Boolean);
+    return [
+        `写${count}张立绘的提示词，按下面的顺序各一份，slotid 从 1 数到 ${count}。`,
+        list.join('\n'),
+        ...worldContextLines(world),
+        profiles.length ? '角色外貌与服装依据正文补充；下面列了设定的角色，长相按设定写。' : '角色外貌与服装依据正文补充。',
+        ...profiles,
+        SPRITE_DAILY_POSE_LINE,
+        SPRITE_NO_BACKGROUND_LINE,
+        '不要写生成点，不要从正文摘挂载句。',
+    ].join('\n');
+}
+
+// 本楼还缺的背景一次写完。名单里只有尚未生成的，已有的不进来。
+function buildDbgenBackgroundBatchDescription(needs = []) {
+    const list = (Array.isArray(needs) ? needs : []).map((need, index) => {
+        const when = [need && need.time, need && need.weather].filter(Boolean).join('、');
+        return `${index + 1}. ${need && need.name ? need.name : ''}${when ? `（${when}）` : ''}`;
+    });
+    const count = list.length;
+    const profiles = (Array.isArray(needs) ? needs : [])
+        .map((need, index) => {
+            const lines = sceneSourceLines(need && need.name, need && need.sources);
+            return lines.length ? [`第 ${index + 1} 份：`, ...lines].join('\n') : '';
+        })
+        .filter(Boolean);
+    return [
+        `为本楼写${count}张背景的提示词，按下面的顺序各一份，slotid 从 1 数到 ${count}。`,
+        list.join('\n'),
+        '地点陈设、光线与氛围依据楼层正文补充。',
+        ...profiles,
+        '不要写生成点，不要从正文摘挂载句。',
+    ].join('\n');
+}
+function buildDbgenAssetDescription(need = {}) {
+    const when = [need.time, need.weather].filter(Boolean).join('、');
+    if (need.type === 'sprite') {
+        return [
+            `画角色「${need.name || ''}」的立绘。`,
+            '角色外貌与服装依据正文补充。',
+            SPRITE_NO_BACKGROUND_LINE,
+            SPRITE_DAILY_POSE_LINE,
+            ...characterDnaLines(need.name, need.dna),
+            ...characterSourceLines(need.name, need.sources),
+        ].join('\n');
+    }
+    if (need.type === 'background') {
+        return [
+            `画场景「${need.name || ''}」${when ? `（${when}）` : ''}的背景图。`,
+            '地点陈设、光线与氛围依据楼层正文补充。',
+            ...sceneSourceLines(need.name, need.sources),
+        ].join('\n');
+    }
+    return '';
+}
+
+// 正面：插件内容在前、前端正向模板追加在后，并去掉与前端负面冲突的标签；
+// 负面：插件负面加上前端负面。角色 caption 结构与坐标原样保留。
+// spriteBackground 为 true（立绘）时底色只用正向模板里的：写词结果里的底色标签全部去掉，负面里和模板底色相同的也去掉。
+function applyUserPromptsToCaption(caption, prompts = {}) {
+    const positive = splitTags(prompts.positive);
+    const negative = splitTags(prompts.negative);
+    if (!caption || typeof caption !== 'object' || (!positive.length && !negative.length)) return caption;
+    const ownBackground = prompts.spriteBackground === true;
+    const blocked = new Set(negative.map(tagKey));
+    const keep = (text) => splitTags(text).filter((tag) => !blocked.has(tagKey(tag)) && !(ownBackground && isBackgroundTag(tag))).join(', ');
+    const background = ownBackground ? positive.filter(isBackgroundTag).join(', ') : '';
+    const unblock = (text) => dropMatchingTags(text, background);
+    const posPrompt = caption.v4_prompt || {};
+    const negPrompt = caption.v4_negative_prompt || {};
+    const pos = posPrompt.caption || {};
+    const neg = negPrompt.caption || {};
+    return {
+        ...caption,
+        v4_prompt: {
+            ...posPrompt,
+            caption: {
+                ...pos,
+                base_caption: mergeTags(keep(pos.base_caption), positive.join(', ')),
+                char_captions: (Array.isArray(pos.char_captions) ? pos.char_captions : [])
+                    .map((c) => ({ ...c, char_caption: keep(c && c.char_caption) })),
+            },
+        },
+        v4_negative_prompt: {
+            ...negPrompt,
+            caption: {
+                ...neg,
+                base_caption: unblock(mergeTags(neg.base_caption, negative.join(', '))),
+                char_captions: (Array.isArray(neg.char_captions) ? neg.char_captions : [])
+                    .map((c) => (ownBackground ? { ...c, char_caption: unblock(c && c.char_caption) } : c)),
+            },
+        },
+    };
+}
+
+// 写词模型仍可能不照 DNA 写（世界书、角色库按名字联想）。出图前把 DNA 里的英文标签硬合进角色 caption：
+// 触发词、身份、默认外观进正面，「不要出现」进负面；写词结果里和 DNA 冲突的发色、瞳色去掉。中文描述 NAI 读不懂，不合入。
+const COLOR_FEATURE_RE = /^(?:(?:light|dark|pale|deep)\s+)?(?:platinum\s+)?(?:blonde|blond|black|brown|red|blue|green|pink|purple|violet|white|silver|grey|gray|orange|aqua|yellow|golden|gold)\s+(hair|eyes)$/;
+
+function dnaEnglishTags(text) {
+    return splitTags(text).filter((tag) => /[a-z]/i.test(tag) && !/[\u3040-\u30ff\u3400-\u9fff]/.test(tag));
+}
+
+// DNA 只管长相和衣服。表情、嘴型、眼神、手势硬合进去会把每张差分都盖成同一张脸。
+const EXPRESSION_POSE_RE = /^(?:expressionless|emotionless|blank stare|straight face|serious|calm|happy|sad|angry|annoyed|smug|shy|embarrassed|surprised|nervous|worried|crying|tears|blush|laughing|smiling|grin|smirk|frown|pout|open mouth|closed mouth|parted lips|closed eyes|half-closed eyes|wide-eyed|narrowed eyes|looking (?:at viewer|away|down|up|to the side)|head tilt|standing|arms at sides|arms behind back|hands behind back|crossed arms|arms crossed|hands? on (?:own )?(?:hips?|chest|chin|cheek)|.*\b(?:smile|expression)|:\)|:d|\^_\^)$/;
+
+function isExpressionPoseTag(tag) {
+    return EXPRESSION_POSE_RE.test(tagKey(tag));
+}
+
+// 默认立绘被写成无表情时，差分照抄会带上这些词。
+const NEUTRAL_FACE_TAGS = new Set(['expressionless', 'emotionless', 'neutral expression', 'blank expression', 'blank stare', 'straight face', 'closed mouth', 'arms at sides'].map(tagKey));
+
+// 表情组的英文表情 tag（用户改过的优先，没改用预设）：只有组上打开「固定加上」（alwaysTags）才放到角色 caption 最前，
+// 并去掉照抄来的无表情词；没打开就完全按写词结果，不兜底（预设 tag 是通用画法，叠上去容易变成套路脸）。
+// 默认组不动；nsfw 为 true 时「动情」没改过就用 NSFW 那套预设。
+function applyMoodToCaption(caption, mood, { nsfw = false, groups = null } = {}) {
+    const label = String(mood || '').trim();
+    if (label === '默认') return caption;
+    const { tags, always } = resolveMoodExpressionTags(label, groups, { nsfw });
+    if (!tags || !always) return caption;
+    return prependCharTags(caption, tags, (tag) => !NEUTRAL_FACE_TAGS.has(tagKey(tag)));
+}
+
+// 衣服跟着同一份来源走，不靠写词插件每份重写：换装有服装词就用服装词；
+// 原装或这套有自己的立绘时，用那张立绘的提示词去掉表情、姿势后剩下的长相和衣服。
+const LOOK_SKIP_TAGS = new Set(['solo', 'cowboy shot', 'facing viewer', 'straight-on', 'centered'].map(tagKey));
+
+function storedCharTags(prompt) {
+    const stored = prompt && typeof prompt === 'object' ? prompt : {};
+    const pos = stored.caption && stored.caption.v4_prompt && stored.caption.v4_prompt.caption;
+    if (pos) {
+        const chars = Array.isArray(pos.char_captions) ? pos.char_captions : [];
+        return String((chars[0] && chars[0].char_caption) || pos.base_caption || '');
+    }
+    return String(stored.positive || '');
+}
+function expressionLookTags(basePrompt, outfit) {
+    const clothes = outfit && typeof outfit === 'object' ? outfit : null;
+    const clothesPrompt = clothes ? String(clothes.prompt || '').trim() : '';
+    if (clothesPrompt) return dnaEnglishTags(clothesPrompt).join(', ');
+    if (clothes && !clothes.ownImage) return '';
+    return splitTags(storedCharTags(basePrompt))
+        .filter((tag) => !isExpressionPoseTag(tag) && !LOOK_SKIP_TAGS.has(tagKey(tag)) && !isBackgroundTag(tag))
+        .join(', ');
+}
+
+// 换了衣服的那一套，DNA 的默认外观里是原装的衣服，硬合会和新衣服打架。
+function expressionPaintDna(dna, outfit) {
+    if (!dna || typeof dna !== 'object' || !outfit || typeof outfit !== 'object') return dna;
+    return { ...dna, defaultAppearance: '' };
+}
+function applyLookToCaption(caption, tags) {
+    return prependCharTags(caption, tags);
+}
+
+// 把一组标签放到角色 caption（没有角色块时放 base）最前，原有标签按 keep 过滤后接在后面。
+function prependCharTags(caption, tags, keep = () => true) {
+    const pos = caption && caption.v4_prompt && caption.v4_prompt.caption;
+    if (!String(tags || '').trim() || !pos) return caption;
+    const merge = (text) => mergeTags(tags, splitTags(text).filter(keep).join(', '));
+    const chars = Array.isArray(pos.char_captions) ? pos.char_captions : [];
+    return {
+        ...caption,
+        v4_prompt: {
+            ...caption.v4_prompt,
+            caption: {
+                ...pos,
+                base_caption: chars.length ? pos.base_caption : merge(pos.base_caption),
+                char_captions: chars.map((item, index) => (index === 0
+                    ? { ...(item && typeof item === 'object' ? item : {}), char_caption: merge(item && item.char_caption) }
+                    : item)),
+            },
+        },
+    };
+}
+function applyCharacterDnaToCaption(caption, dna) {
+    const pos = caption && caption.v4_prompt && caption.v4_prompt.caption;
+    const neg = caption && caption.v4_negative_prompt && caption.v4_negative_prompt.caption;
+    if (!pos || !neg || !dna || typeof dna !== 'object') return caption;
+    const positive = dnaEnglishTags([dna.triggerWords, dna.identity, dna.defaultAppearance].join(',')).filter((tag) => !isExpressionPoseTag(tag));
+    const negative = dnaEnglishTags(dna.negative).filter((tag) => !isExpressionPoseTag(tag));
+    if (!positive.length && !negative.length) return caption;
+    const fixed = new Set();
+    for (const tag of positive) {
+        const hit = tagKey(tag).match(COLOR_FEATURE_RE);
+        if (hit) fixed.add(hit[1]);
+    }
+    const blocked = new Set(negative.map(tagKey));
+    const keep = (text) => splitTags(text).filter((tag) => {
+        const key = tagKey(tag);
+        if (blocked.has(key)) return false;
+        const hit = key.match(COLOR_FEATURE_RE);
+        return !(hit && fixed.has(hit[1]) && !positive.some((p) => tagKey(p) === key));
+    }).join(', ');
+    const chars = Array.isArray(pos.char_captions) ? pos.char_captions : [];
+    const ucs = Array.isArray(neg.char_captions) ? neg.char_captions : [];
+    const dnaPositive = positive.join(', ');
+    const dnaNegative = negative.join(', ');
+    return {
+        ...caption,
+        v4_prompt: {
+            ...caption.v4_prompt,
+            caption: {
+                ...pos,
+                base_caption: chars.length ? keep(pos.base_caption) : mergeTags(dnaPositive, keep(pos.base_caption)),
+                char_captions: chars.map((item, index) => ({
+                    ...(item && typeof item === 'object' ? item : {}),
+                    char_caption: index === 0 ? mergeTags(dnaPositive, keep(item && item.char_caption)) : (item && item.char_caption),
+                })),
+            },
+        },
+        v4_negative_prompt: {
+            ...caption.v4_negative_prompt,
+            caption: { ...neg, base_caption: mergeTags(neg.base_caption, dnaNegative), char_captions: ucs },
+        },
+    };
+}
+
+__igsDefine(exports, "splitTags", () => splitTags);
+__igsDefine(exports, "tagKey", () => tagKey);
+__igsDefine(exports, "mergeTags", () => mergeTags);
+__igsDefine(exports, "isBackgroundTag", () => isBackgroundTag);
+__igsDefine(exports, "dropBackgroundTags", () => dropBackgroundTags);
+__igsDefine(exports, "withOnlyBackground", () => withOnlyBackground);
+__igsDefine(exports, "dropMatchingTags", () => dropMatchingTags);
+__igsDefine(exports, "splitWriteBatches", () => splitWriteBatches);
+__igsDefine(exports, "splitExpressionWriteBatches", () => splitExpressionWriteBatches);
+__igsDefine(exports, "buildExpressionDiffDescription", () => buildExpressionDiffDescription);
+__igsDefine(exports, "expressionSpritePrompts", () => expressionSpritePrompts);
+__igsDefine(exports, "uprightSpriteCaption", () => uprightSpriteCaption);
+__igsDefine(exports, "worldContextLines", () => worldContextLines);
+__igsDefine(exports, "characterSourceLines", () => characterSourceLines);
+__igsDefine(exports, "sceneSourceLines", () => sceneSourceLines);
+__igsDefine(exports, "buildCharacterSpriteDescription", () => buildCharacterSpriteDescription);
+__igsDefine(exports, "buildCharacterAvatarDescription", () => buildCharacterAvatarDescription);
+__igsDefine(exports, "nsfwClothingBoostLine", () => nsfwClothingBoostLine);
+__igsDefine(exports, "buildWardrobeClothingDescription", () => buildWardrobeClothingDescription);
+__igsDefine(exports, "buildDbgenSpriteBatchDescription", () => buildDbgenSpriteBatchDescription);
+__igsDefine(exports, "buildDbgenBackgroundBatchDescription", () => buildDbgenBackgroundBatchDescription);
+__igsDefine(exports, "buildDbgenAssetDescription", () => buildDbgenAssetDescription);
+__igsDefine(exports, "applyUserPromptsToCaption", () => applyUserPromptsToCaption);
+__igsDefine(exports, "applyMoodToCaption", () => applyMoodToCaption);
+__igsDefine(exports, "expressionLookTags", () => expressionLookTags);
+__igsDefine(exports, "expressionPaintDna", () => expressionPaintDna);
+__igsDefine(exports, "applyLookToCaption", () => applyLookToCaption);
+__igsDefine(exports, "applyCharacterDnaToCaption", () => applyCharacterDnaToCaption);
+__igsDefine(exports, "EXPRESSION_WRITE_BATCH_MAX", () => EXPRESSION_WRITE_BATCH_MAX);
+__igsDefine(exports, "EXPRESSION_DIFF_BATCH_MAX", () => EXPRESSION_DIFF_BATCH_MAX);
+});
 __igsRegister("src/generated-images/illustration/asset-prompt.js", function(module, exports, require) {
 // 素材补全（缺失背景 / 无名角色立绘）的 LLM 提示词与 NAI slot 组装。
 // 副 LLM 只写「内容」tag（地点陈设、外貌服装）；构图、底色、禁止项走可编辑模板，
-// 保证背景图里没有人、立绘始终是单人 3/4 身 + 可抠除的浅灰纯色底。
-const { FICTION_FRAME, TAG_WRITING_RULES, SOFT_MODE_NOTE, DEFAULT_ASSET_TEMPLATES, MATTE_BACKGROUND_TAGS, WHITE_BACKGROUND_TAGS, TRANSPARENT_BACKGROUND_TAGS, NSFW_NEGATIVE_GUARD, applyTemplate, dropMatteTagsWhenTransparent, dropWhiteBackgroundNegative, buildDictionaryBackgroundTags } = require("src/generated-images/illustration/prompt-kit.js");
+// 保证背景图里没有人、立绘始终是单人 3/4 身 + 一种底色（透明底、白底或可抠除的浅灰纯色底）。
+const { FICTION_FRAME, TAG_WRITING_RULES, SOFT_MODE_NOTE, DEFAULT_ASSET_TEMPLATES, MATTE_BACKGROUND_TAGS, WHITE_BACKGROUND_TAGS, SPRITE_TRANSPARENT_BACKGROUND_TAG, NSFW_NEGATIVE_GUARD, applyTemplate, buildDictionaryBackgroundTags } = require("src/generated-images/illustration/prompt-kit.js");
 const { buildCharacterDnaPromptParts, mergePromptTags } = require("src/scene/character-dna.js");
+const { dropMatchingTags, withOnlyBackground, worldContextLines } = require("src/generated-images/dbgen-prompt.js");
 const ASSET_TASK = [
     '任务：阅读视觉小说正文，为「需要生成的素材」清单里的每一项写英文 tag。素材分两类：',
     '- 背景：给阅读器当场景背景的空镜头，画面里不能出现任何人物。',
@@ -20210,20 +20931,35 @@ function describeAssetNeed(need, index) {
     if (need.dna && flat(need.dna.defaultAppearance)) dnaNotes.push(`默认外观：${flat(need.dna.defaultAppearance)}`);
     return { id: `ch${index + 1}`, line: [`立绘｜角色：${need.name}`, ...dnaNotes].join('｜') };
 }
-function buildAssetPlannerUserPrompt({ needs = [], readableText = '', previousText = '', lore = [] } = {}) {
+
+// settingMaterial：「读取上下文」加大预算时的全部设定资料（整张角色卡、世界书、数据库），放在最前面；
+// 这时提示词很长，末尾再列一遍要写的素材。
+function buildAssetPlannerUserPrompt({ needs = [], readableText = '', previousText = '', lore = [], settingMaterial = '', world = null } = {}) {
     const listed = needs.map((need, index) => {
         const { id, line } = describeAssetNeed(need, index);
         return `${id}｜${line}`;
     });
+    const worldLines = worldContextLines(world);
+    // 角色卡 / 世界书 / 数据库 / 前文里提到这个角色或地点的节选，由调用方挂在 need.sources 上。
+    const sourcesOf = (type) => needs.map((need, index) => (need.type === type && String(need.sources || '').trim()
+        ? `${describeAssetNeed(need, index).id}「${need.name}」：\n${String(need.sources).trim()}` : '')).filter(Boolean);
+    const sources = sourcesOf('sprite');
+    const sceneSources = sourcesOf('background');
+    const material = String(settingMaterial || '').trim();
     return [
+        material ? `【设定资料】下面是角色卡、世界书和数据库的全部设定（每段开头标了出处），地点和角色的样子都以这些设定和正文为准。\n${material}` : '',
         `【需要生成的素材】\n${listed.join('\n')}`,
+        worldLines.length ? `【世界观】\n${worldLines.join('\n')}` : '',
         needs.some((need) => need.type === 'sprite' && need.dna)
             ? '【角色 DNA】标注了固定身份或默认外观的立绘，tags 不得改变这些特征，只补充正文中额外交代的内容。' : '',
         lore.length
             ? `【角色设定参考】只取外貌（发色、瞳色、发型、体型、常穿服装），正文另有交代时以正文为准。\n${lore.map((item) => `${item.name}：${item.text}`).join('\n')}`
             : '',
-        previousText ? `【前文摘要】\n${previousText}` : '',
+        sources.length ? `【角色资料】下面是提到这些角色的节选，每段开头标了出处（角色卡、世界书、数据库或前文）。长相和服装以 DNA 为准；DNA 没写到的按资料补，只取长相、穿着和身份气质，资料里的剧情不要画进去。\n${sources.join('\n')}` : '',
+        sceneSources.length ? `【场景资料】下面是提到这些地点的节选，每段开头标了出处。背景 tags 要写出资料里地点的档次、规模、建筑风格、年代、陈设和氛围；资料里的人物和剧情不要画进去。\n${sceneSources.join('\n')}` : '',
+        previousText ? `【前文（原文，从早到近）】\n${previousText}` : '',
         `【本楼正文】\n${readableText}`,
+        material ? `【再列一遍要写的素材】\n${listed.join('\n')}` : '',
         '请直接按输出格式给出字段。',
     ].filter(Boolean).join('\n\n');
 }
@@ -20271,8 +21007,10 @@ function joinTags(...parts) {
     return parts.map((p) => String(p || '').trim().replace(/^,+|,+$/g, '').trim()).filter(Boolean).join(', ');
 }
 
-// 生成可直接交给 buildNaiV4Request 的 slot；transparent 为 true 时走 V5 原生透明底。
-function buildAssetSlot(item, { transparent = false, whiteBackground = false, templates = {}, positiveContext = '' } = {}) {
+// 生成可直接交给 buildNaiV4Request 的 slot；transparent 为 true 时写透明底（V5 另走原生透明底参数）。
+// 立绘底色只留一种：透明底只用加权的 transparent background，白底（数据库生图关了透明底）只用白底词，
+// 浅灰底只用抠图的灰底词；副 LLM、DNA、模板里别的底色标签都去掉，底色接在末尾；负面里和这组底色相同的也去掉。
+function buildAssetSlot(item, { transparent = false, whiteBackground = false, templates = {} } = {}) {
     const t = { ...DEFAULT_ASSET_TEMPLATES, ...templates };
     if (item.need.type === 'background') {
         return {
@@ -20284,12 +21022,10 @@ function buildAssetSlot(item, { transparent = false, whiteBackground = false, te
     // 立绘 DNA 固定顺序：triggerWords → identity → defaultAppearance → 副 LLM tag；无 DNA 时输出与旧版一致。
     const dnaParts = item.need.dna ? buildCharacterDnaPromptParts(item.need.dna, { includeDefaultAppearance: true }) : null;
     const tags = dnaParts && dnaParts.positive ? mergePromptTags(dnaParts.positive, item.tags) : item.tags;
-    const useWhite = whiteBackground && !transparent;
-    const matte = transparent ? TRANSPARENT_BACKGROUND_TAGS : (useWhite ? WHITE_BACKGROUND_TAGS : MATTE_BACKGROUND_TAGS);
-    const sceneUc = joinTags(t.spriteNegative, dnaParts ? dnaParts.negative : '', NSFW_NEGATIVE_GUARD, item.uc);
+    const background = transparent ? SPRITE_TRANSPARENT_BACKGROUND_TAG : (whiteBackground ? WHITE_BACKGROUND_TAGS : MATTE_BACKGROUND_TAGS);
     return {
-        scene: dropMatteTagsWhenTransparent(applyTemplate(t.sprite, { tags, matte }), positiveContext),
-        sceneUc: useWhite ? dropWhiteBackgroundNegative(sceneUc) : sceneUc,
+        scene: withOnlyBackground(applyTemplate(t.sprite, { tags, matte: '' }), background),
+        sceneUc: dropMatchingTags(joinTags(t.spriteNegative, dnaParts ? dnaParts.negative : '', NSFW_NEGATIVE_GUARD, item.uc), background),
         chars: [],
         transparent,
     };
@@ -20303,16 +21039,386 @@ __igsDefine(exports, "buildAssetSlot", () => buildAssetSlot);
 __igsDefine(exports, "ASSET_PLANNER_SYSTEM_PROMPT", () => ASSET_PLANNER_SYSTEM_PROMPT);
 __igsDefine(exports, "ASSET_PLANNER_SOFT_SYSTEM_PROMPT", () => ASSET_PLANNER_SOFT_SYSTEM_PROMPT);
 });
+__igsRegister("src/generated-images/illustration/planner-context.js", function(module, exports, require) {
+// 副 LLM 规划（剧情 CG、楼内补背景 / 立绘）读多少上下文：「副 LLM → 读取上下文」。
+// standard：原来的长度——本楼正文前 6000 字；前文是最近 contextFloors 层 AI 楼合起来的末尾 1500 字。
+// 其余档按 token 估算成字数（中日文约 1 字 1 token，留三成余量）：本楼正文整层读，
+// 前文从近到远尽量多读，连用户发言一起（用户常在发言里交代地点和打算），读满预算为止。
+const { numberParagraphs } = require("src/generated-images/illustration/marker-placer.js");
+const CONTEXT_BUDGETS = Object.freeze({ standard: 0, '32k': 32000, '128k': 128000, '500k': 500000, '1000k': 1000000 });
+const STANDARD_FLOOR_CHARS = 6000;
+const STANDARD_PREVIOUS_CHARS = 1500;
+const CHARS_PER_TOKEN = 0.7;
+// 读得多，副 LLM 回得慢：加大预算时请求超时至少放到 10 分钟（比设置里能填的 5 分钟上限还长）。
+const LARGE_CONTEXT_TIMEOUT_MS = 600000;
+function contextBudgetChars(llm) {
+    const tokens = CONTEXT_BUDGETS[llm && llm.contextBudget] || 0;
+    return Math.floor(tokens * CHARS_PER_TOKEN);
+}
+function plannerLlmSettings(llm) {
+    if (!contextBudgetChars(llm)) return llm;
+    return { ...llm, timeoutMs: Math.max(Number(llm.timeoutMs) || 0, LARGE_CONTEXT_TIMEOUT_MS) };
+}
+function readableText(raw) {
+    return numberParagraphs(raw).paragraphs.map((p) => p.text).join('\n');
+}
+
+const stripHtml = (text) => String(text || '').replace(/<[^>]*>/g, ' ').replace(/[ \t]+\n/g, '\n').trim();
+
+// 前文消息：宿主有 readPreviousMessages 就连用户发言一起读，没有就只读 AI 楼。旧的在前。
+function previousMessages(messageHost, messageId, count) {
+    if (typeof messageHost.readPreviousMessages === 'function') {
+        return (messageHost.readPreviousMessages(messageId, count) || []).map((msg) => (msg && msg.isUser
+            ? `（用户）${stripHtml(msg.text)}`
+            : readableText(msg && msg.text)));
+    }
+    if (typeof messageHost.readPreviousAiTexts === 'function') return (messageHost.readPreviousAiTexts(messageId, count) || []).map(readableText);
+    return [];
+}
+
+// 返回 { budget, floorChars, previousText }：floorChars 是本楼正文最多读几个字。
+// reserved：同一份提示词里另外带的资料（设定资料等）占掉的字数，前文相应少读。
+// 设置页写词没有「本楼」：messageId 传 Infinity，从最新一条往前读。
+function readPlannerContext(messageHost, messageId, llm, floorLength = 0, reserved = 0) {
+    const budget = contextBudgetChars(llm);
+    if (!budget) {
+        const floors = llm.contextFloors > 0 && typeof messageHost.readPreviousAiTexts === 'function'
+            ? (messageHost.readPreviousAiTexts(messageId, llm.contextFloors) || []).map(readableText) : [];
+        return { budget, floorChars: STANDARD_FLOOR_CHARS, previousText: floors.join('\n').slice(-STANDARD_PREVIOUS_CHARS) };
+    }
+    // 本楼最多占一半；资料节选另外加，所以前文只用到预算的九成。
+    const floorChars = Math.floor(budget / 2);
+    let left = Math.floor(budget * 0.9) - Math.min(floorLength, floorChars) - Math.max(0, reserved);
+    const kept = [];
+    const messages = previousMessages(messageHost, messageId, Number.MAX_SAFE_INTEGER);
+    for (let i = messages.length - 1; i >= 0 && left > 0; i -= 1) {
+        const text = String(messages[i] || '').trim();
+        if (!text) continue;
+        const piece = text.length > left ? text.slice(-left) : text;
+        kept.unshift(piece);
+        left -= piece.length + 1;
+    }
+    return { budget, floorChars, previousText: kept.join('\n') };
+}
+
+__igsDefine(exports, "contextBudgetChars", () => contextBudgetChars);
+__igsDefine(exports, "plannerLlmSettings", () => plannerLlmSettings);
+__igsDefine(exports, "readableText", () => readableText);
+__igsDefine(exports, "readPlannerContext", () => readPlannerContext);
+__igsDefine(exports, "CONTEXT_BUDGETS", () => CONTEXT_BUDGETS);
+__igsDefine(exports, "STANDARD_FLOOR_CHARS", () => STANDARD_FLOOR_CHARS);
+__igsDefine(exports, "STANDARD_PREVIOUS_CHARS", () => STANDARD_PREVIOUS_CHARS);
+__igsDefine(exports, "LARGE_CONTEXT_TIMEOUT_MS", () => LARGE_CONTEXT_TIMEOUT_MS);
+});
+__igsRegister("src/generated-images/illustration/marker-placer.js", function(module, exports, require) {
+const { stripOutfitFields } = require("src/scene/directive-tags.js");
+const SCENE_RE = /\[igs-scene:([^|\]\n]+)\|([^|\]\n]+)\|([^|\]\n]+)(?:\|([^\]\n]*))?\]/g;
+const CHAR_RE = /\[igs-char:([^|\]\n]+)\|(?:([^|\]\n]*)\|)?([^|\]\n]+)\]?/g;
+const THOUGHT_RE = /\[igs-thought:([^|\]\n]+)\|(?:([^|\]\n]*)\|)?([^|\]\n]+)\]?/g;
+const IMG_RE = /(?:\[igs-img:\s*\d+\s*\]|<IMG>\s*\d+\s*<\/IMG>)/gi;
+const LEADING_SCENE_RE = /^(\s*(?:\[igs-scene:[^\]\n]*\]\s*)+)/;
+
+// 一段正文里可以有多段 <content>。只认第一段会漏掉后面的场景标签。
+function contentSpans(lines) {
+    const spans = [];
+    let start = -1;
+    for (let i = 0; i < lines.length; i += 1) {
+        const line = lines[i];
+        if (start < 0 && /<content\b[^>]*>/i.test(line)) start = i;
+        if (start >= 0 && /<\/content>/i.test(line)) {
+            spans.push([start, i]);
+            start = -1;
+        }
+    }
+    if (start >= 0) spans.push([start, lines.length - 1]);
+    return spans.length ? spans : [[0, lines.length - 1]];
+}
+
+function lineInSpans(index, spans) {
+    return spans.some(([from, to]) => index >= from && index <= to);
+}
+
+function readableLine(line) {
+    return String(line || '')
+        .replace(IMG_RE, '')
+        .replace(SCENE_RE, '')
+        .replace(CHAR_RE, (_, name, _mood, text) => `${name.trim()}：「${text.trim()}」`)
+        .replace(THOUGHT_RE, (_, name, _mood, text) => `${name.trim()}（心想）：${text.trim()}`)
+        // 柏宝绘 / 智绘姬写回楼层的生图词不是正文。
+        .replace(/<bbi_image>[\s\S]*?<\/bbi_image>|<image>[\s\S]*?<\/image>|image###[\s\S]*?###/gi, '')
+        .replace(/<\/?[a-zA-Z][^>]*>/g, '')
+        .trim();
+}
+function numberParagraphs(raw, options = {}) {
+    const lines = String(raw || '').split('\n');
+    const spans = contentSpans(lines);
+    const paragraphs = [];
+    const scenes = [];
+    const characters = new Set();
+    for (let i = 0; i < lines.length; i += 1) {
+        const line = stripOutfitFields(lines[i], options && options.outfitResolver);
+        // 场景标签整楼都认。写在第一段 </content> 之后的转场也要算进 NSFW 和背景。
+        for (const m of line.matchAll(SCENE_RE)) {
+            scenes.push({ scene: m[1].trim(), time: m[2].trim(), weather: m[3].trim(), nsfw: String(m[4] || '').trim().toLowerCase() === 'nsfw', lineIndex: i });
+        }
+        if (!lineInSpans(i, spans)) continue;
+        for (const m of line.matchAll(CHAR_RE)) characters.add(m[1].trim());
+        for (const m of line.matchAll(THOUGHT_RE)) characters.add(m[1].trim());
+        const text = readableLine(line);
+        if (text) paragraphs.push({ no: paragraphs.length + 1, lineIndex: i, text });
+    }
+    return { paragraphs, scenes, characters: Array.from(characters), isNsfw: scenes.some((s) => s.nsfw) };
+}
+function formatNumberedParagraphs(paragraphs, maxChars = 6000) {
+    const out = [];
+    let total = 0;
+    for (const p of paragraphs) {
+        const line = `${p.no}. ${p.text}`;
+        total += line.length + 1;
+        if (total > maxChars) break;
+        out.push(line);
+    }
+    return out.join('\n');
+}
+
+/**
+ * 与数据库生图插件的生成点定位相同：精确 → 去掉空白和标点 → 最长公共子串。
+ * 命中后落回本插件的段落编号，标记仍插在该段前面。
+ * @param {string} raw
+ * @param {Array<{ no: number, lineIndex: number }>} paragraphs
+ * @param {string} anchor
+ * @returns {number}
+ */
+function paragraphNoForAnchor(raw, paragraphs, anchor) {
+    const source = String(raw || '');
+    const found = findAnchorInsertIndex(source, anchor);
+    if (found.index < 0) return 0;
+    const lineIndex = source.slice(0, Math.max(0, found.index - 1)).split('\n').length - 1;
+    const list = Array.isArray(paragraphs) ? paragraphs : [];
+    const exact = list.find((paragraph) => paragraph.lineIndex === lineIndex);
+    if (exact) return exact.no;
+    let before = null;
+    for (const paragraph of list) {
+        if (paragraph.lineIndex <= lineIndex) before = paragraph;
+        else break;
+    }
+    if (before) return before.no;
+    return list.length ? list[0].no : 0;
+}
+
+/**
+ * 在 text 中定位 anchor，返回插入下标（anchor 结束之后）；找不到返回 -1。
+ * @param {string} text
+ * @param {string} anchorSentence
+ * @returns {{ index: number, mode: string }}
+ */
+function findAnchorInsertIndex(text, anchorSentence) {
+    const source = typeof text === 'string' ? text : '';
+    const anchor = typeof anchorSentence === 'string' ? anchorSentence : '';
+    if (!anchor) return { index: -1, mode: 'fail' };
+    const exact = source.indexOf(anchor);
+    if (exact !== -1) return { index: exact + anchor.length, mode: 'exact' };
+    const normResult = findNormalized(source, anchor);
+    if (normResult.index >= 0) return { index: normResult.index, mode: 'normalized' };
+    const lcsResult = findByLongestCommonSubstring(source, anchor);
+    if (lcsResult.index >= 0) return { index: lcsResult.index, mode: 'lcs' };
+    return { index: -1, mode: 'fail' };
+}
+
+function findNormalized(text, anchor) {
+    const { normalized: normText, map } = normalizeWithMap(text);
+    const normAnchor = normalizeAnchorText(anchor);
+    if (!normAnchor) return { index: -1 };
+    const at = normText.indexOf(normAnchor);
+    if (at === -1) return { index: -1 };
+    const endOrig = map[at + normAnchor.length - 1];
+    if (endOrig == null) return { index: -1 };
+    return { index: endOrig + 1 };
+}
+
+function normalizeAnchorText(s) {
+    return s
+        .replace(/\s+/g, '')
+        .replace(/[，。！？、；：""''「」『』（）【】《》,.!?;:'"()\[\]{}]/g, '')
+        .toLowerCase();
+}
+
+function normalizeWithMap(text) {
+    const map = [];
+    const chars = [];
+    const lower = text.toLowerCase();
+    for (let i = 0; i < text.length; i += 1) {
+        const ch = lower[i];
+        if (/\s/.test(ch)) continue;
+        if (/[，。！？、；：""''「」『』（）【】《》,.!?;:'"()\[\]{}]/.test(ch)) continue;
+        chars.push(ch);
+        map.push(i);
+    }
+    return { normalized: chars.join(''), map };
+}
+
+function findByLongestCommonSubstring(text, anchor) {
+    const a = text.toLowerCase();
+    const b = anchor.toLowerCase();
+    if (!a || !b) return { index: -1 };
+    const minLen = Math.max(4, Math.ceil(b.length * 0.4));
+    let bestLen = 0;
+    let bestEndInText = -1;
+    let prev = new Array(b.length + 1).fill(0);
+    let curr = new Array(b.length + 1).fill(0);
+    for (let i = 1; i <= a.length; i += 1) {
+        for (let j = 1; j <= b.length; j += 1) {
+            if (a[i - 1] === b[j - 1]) {
+                curr[j] = prev[j - 1] + 1;
+                if (curr[j] > bestLen) {
+                    bestLen = curr[j];
+                    bestEndInText = i;
+                }
+            } else {
+                curr[j] = 0;
+            }
+        }
+        const tmp = prev;
+        prev = curr;
+        curr = tmp;
+        curr.fill(0);
+    }
+    if (bestLen < minLen || bestEndInText < 0) return { index: -1 };
+    return { index: bestEndInText };
+}
+
+// 同一段里可以有多句生成点。按句尾插入，不按整段，避免四张标记叠在同一处。
+function insertMarkersAtAnchors(raw, slots) {
+    const source = String(raw || '');
+    const placed = [];
+    for (const slot of Array.isArray(slots) ? slots : []) {
+        if (!slot) continue;
+        const found = findAnchorInsertIndex(source, slot.anchorSentence);
+        if (found.index < 0) continue;
+        placed.push({ index: found.index, slot: Number(slot.slot) || placed.length + 1 });
+    }
+    placed.sort((a, b) => b.index - a.index || b.slot - a.slot);
+    let text = source;
+    for (const item of placed) {
+        text = insertTokenOnOwnLine(text, item.index, `[igs-img:${item.slot}]`);
+    }
+    return text;
+}
+
+function insertTokenOnOwnLine(text, index, token) {
+    const at = Math.max(0, Math.min(text.length, Number(index) || 0));
+    const before = text.slice(0, at);
+    const after = text.slice(at);
+    const lead = before.length === 0 || before.endsWith('\n') ? '' : '\n';
+    const trail = after.length === 0 || after.startsWith('\n') ? '' : '\n';
+    return before + lead + token + trail + after;
+}
+function insertMarkers(raw, paragraphs, slots) {
+    const lines = String(raw || '').split('\n');
+    const ordered = [...slots].sort((a, b) => b.at - a.at);
+    for (const s of ordered) {
+        const p = paragraphs[s.at - 1];
+        if (!p) continue;
+        const marker = `[igs-img:${s.slot}]`;
+        const line = lines[p.lineIndex];
+        const lead = line.match(LEADING_SCENE_RE);
+        if (lead) {
+            lines[p.lineIndex] = `${lead[1].trimEnd()}${marker}${line.slice(lead[1].length)}`;
+        } else {
+            lines.splice(p.lineIndex, 0, marker);
+        }
+    }
+    return lines.join('\n');
+}
+
+/**
+ * 出图期间其他插件只在正文末尾追加了内容（平行事件、状态栏等）时，返回追加的那一截；
+ * 正文没变返回 ''，正文中间被改过返回 null。原文结尾的空白允许被改写。
+ * @param {string} before 开始出图时的正文
+ * @param {string} after 现在的正文
+ * @returns {string | null}
+ */
+function appendedTail(before, after) {
+    const source = String(before || '');
+    const current = String(after || '');
+    if (current === source) return '';
+    const head = source.replace(/\s+$/, '');
+    if (!head || !current.startsWith(head)) return null;
+    return current.slice(head.length);
+}
+
+/**
+ * 把插好标记的正文接回追加的那一截。没有追加时原样返回。
+ * @param {string} marked 按开始时的正文插好标记的结果
+ * @param {string} tail appendedTail 的返回值
+ * @returns {string}
+ */
+function reattachTail(marked, tail) {
+    if (!tail) return marked;
+    return String(marked || '').replace(/\s+$/, '') + tail;
+}
+
+const TRANSPLANT_MARKER_RE = /\[igs-img:(\d+)\]/g;
+const TRANSPLANT_CONTEXT = 60;
+
+function contextLine(text, fromEnd) {
+    const lines = String(text || '').replace(/\[igs-img:\d+\]/g, '').split('\n').map((line) => line.trim()).filter(Boolean);
+    const line = fromEnd ? lines[lines.length - 1] : lines[0];
+    if (!line) return '';
+    return fromEnd ? line.slice(-TRANSPLANT_CONTEXT) : line.slice(0, TRANSPLANT_CONTEXT);
+}
+
+/**
+ * 出图期间正文被其他插件改过（开头、中间、content 外插了平行事件等）时，把按旧正文插好的标记搬到现在的正文上：
+ * 每个标记按它前面一行（没有就按后面一行）的文字在新正文里找位置；对不上的那张丢掉，不连累整楼。
+ * @param {string} marked 按旧正文插好标记的结果
+ * @param {string} current 现在的正文
+ * @returns {{ text: string, slots: number[] }} slots 为搬过去的标记编号
+ */
+function transplantMarkers(marked, current) {
+    const source = String(marked || '');
+    const target = String(current || '');
+    const placed = [];
+    TRANSPLANT_MARKER_RE.lastIndex = 0;
+    let match;
+    while ((match = TRANSPLANT_MARKER_RE.exec(source))) {
+        const slot = Number(match[1]);
+        const before = contextLine(source.slice(0, match.index), true);
+        let index = before ? findAnchorInsertIndex(target, before).index : -1;
+        if (index < 0) {
+            const after = contextLine(source.slice(match.index + match[0].length), false);
+            const at = after ? target.indexOf(after) : -1;
+            index = at;
+        }
+        if (index >= 0) placed.push({ index, slot });
+    }
+    placed.sort((a, b) => b.index - a.index || b.slot - a.slot);
+    let text = target;
+    for (const item of placed) text = insertTokenOnOwnLine(text, item.index, `[igs-img:${item.slot}]`);
+    return { text, slots: placed.map((item) => item.slot).sort((a, b) => a - b) };
+}
+
+__igsDefine(exports, "numberParagraphs", () => numberParagraphs);
+__igsDefine(exports, "formatNumberedParagraphs", () => formatNumberedParagraphs);
+__igsDefine(exports, "paragraphNoForAnchor", () => paragraphNoForAnchor);
+__igsDefine(exports, "findAnchorInsertIndex", () => findAnchorInsertIndex);
+__igsDefine(exports, "insertMarkersAtAnchors", () => insertMarkersAtAnchors);
+__igsDefine(exports, "insertMarkers", () => insertMarkers);
+__igsDefine(exports, "appendedTail", () => appendedTail);
+__igsDefine(exports, "reattachTail", () => reattachTail);
+__igsDefine(exports, "transplantMarkers", () => transplantMarkers);
+});
 __igsRegister("src/generated-images/image-backend.js", function(module, exports, require) {
 const { normalizeAutoIllustrationSettings } = require("src/generated-images/illustration/auto-illustration-settings.js");
 const { resolveNaiNativeEndpoint } = require("src/generated-images/request-builders/nai-v4-builder.js");
-const { applyUserPromptsToCaption } = require("src/generated-images/dbgen-prompt.js");
+const { applyUserPromptsToCaption, dropBackgroundTags } = require("src/generated-images/dbgen-prompt.js");
 const { formatStoredPrompt, promptFromCaption, promptFromText } = require("src/generated-images/generation-prompt.js");
 const { findChatu8Host, requestChatu8Image } = require("src/generated-images/chatu8-client.js");
 const { findBaibaiApi, requestBaibaiImage } = require("src/generated-images/baibai-client.js");
 const { waitFloorPromptTags } = require("src/generated-images/floor-prompt-tags.js");
 const { writeCaptionsWithLlm } = require("src/generated-images/illustration/caption-writer.js");
 const { clampPixelPair } = require("src/generated-images/illustration/cg-pixel-cap.js");
+const { plannerLlmSettings } = require("src/generated-images/illustration/planner-context.js");
 // 生图来源：nai = IGS 内置 NAI；dbgen = 数据库生图插件（window.NaiDbGen）；
 // extension = 智绘姬：剧情 CG、素材与物品图经智绘姬的出图事件生成，剧情 CG 优先用它写在楼层里的词；
 // baibai = 柏宝绘：经其公开接口 globalThis.STBaiBaiImage 出图，图不进柏宝绘图库与聊天记录；剧情 CG 优先用它写在楼层里的词。
@@ -20503,7 +21609,7 @@ function createImageBackend({ nai, getBridge, global: globalObject = globalThis,
     // 表情差分、头像、立绘与服装：数据库生图之外的来源由副 LLM 写词，返回形状与插件一致。
     async function writeDbgenPrompt(meta = {}) {
         if (describe().mode !== 'dbgen') {
-            return writeCaptionsWithLlm(llm, normalizeAutoIllustrationSettings(readBridge().autoIllustration).llm, meta.description);
+            return writeCaptionsWithLlm(llm, plannerLlmSettings(normalizeAutoIllustrationSettings(readBridge().autoIllustration).llm), meta.description);
         }
         const api = findDbgenApi(globalObject);
         if (!api) return { ok: false, error: `未检测到${DBGEN_LABEL}` };
@@ -20640,8 +21746,11 @@ function createImageBackend({ nai, getBridge, global: globalObject = globalThis,
                 return { tags: String((c && c.char_caption) || ''), uc: String((negChars[index] && negChars[index].char_caption) || ''), x: Number(center.x) || 0.5, y: Number(center.y) || 0.5 };
             }),
         };
+        const naiSettings = normalizeAutoIllustrationSettings(readBridge().autoIllustration).nai;
+        // 立绘（userPrompts.spriteBackground）的底色只用模板里那一组，内置 NAI 画师串里的底色标签也去掉。
         const settings = {
-            ...normalizeAutoIllustrationSettings(readBridge().autoIllustration).nai,
+            ...naiSettings,
+            ...(userPrompts && userPrompts.spriteBackground === true && { artistPrefix: dropBackgroundTags(naiSettings.artistPrefix) }),
             ...(meta.size && { size: meta.size }),
             ...(Number.isInteger(meta.seed) && meta.seed > 0 && { seed: meta.seed }),
         };
@@ -20689,6 +21798,8 @@ function createImageBackend({ nai, getBridge, global: globalObject = globalThis,
         return { ok: true, via: 'baibai', dataUrl: result.dataUrl, prompt: promptFromText(result.prompt, '') };
     }
 
+    // 场景背景（meta.imageKind 为 background）带上 IGS 的背景尺寸：智绘姬常设成竖的立绘尺寸，不带就会出竖图背景。
+    // 剧情 CG、立绘与物品图照旧沿用智绘姬自己设的尺寸。
     async function viaChatu8(slot, naiSettings, meta = {}) {
         const fallback = (reason) => naiFallback(slot, naiSettings, reason);
         const host = findChatu8();
@@ -20696,7 +21807,8 @@ function createImageBackend({ nai, getBridge, global: globalObject = globalThis,
         const floorTag = await pluginFloorTag('chatu8', CHATU8_LABEL, meta);
         const prompt = floorTag ? floorTag.tag : buildChatu8Prompt(slot);
         if (!prompt) return { ok: false, error: `没有可交给${CHATU8_LABEL}的提示词` };
-        const result = await requestChatu8(host, prompt);
+        const size = meta.imageKind === 'background' ? parseSize(naiSettings && naiSettings.size) : null;
+        const result = await requestChatu8(host, prompt, size || {});
         if (!result || !result.ok) return fallback((result && result.error) || `${CHATU8_LABEL}出图失败`);
         try {
             return { ok: true, via: 'chatu8', dataUrl: await chatu8ImageToDataUrl(result.imageData, host.win || globalObject), prompt: promptFromText(prompt, '') };
@@ -20804,510 +21916,6 @@ __igsDefine(exports, "DBGEN_LABEL", () => DBGEN_LABEL);
 __igsDefine(exports, "CHATU8_LABEL", () => CHATU8_LABEL);
 __igsDefine(exports, "BAIBAI_LABEL", () => BAIBAI_LABEL);
 __igsDefine(exports, "DBGEN_TIMEOUTS", () => DBGEN_TIMEOUTS);
-});
-__igsRegister("src/generated-images/dbgen-prompt.js", function(module, exports, require) {
-const { moodPresetAct, moodPresetTags, moodPresetUse } = require("src/scene/mood-groups.js");
-// 楼内补立绘一次最多写 8 份，超过则平分 2 批。
-const EXPRESSION_WRITE_BATCH_MAX = 8;
-// 表情差分：不超过 9 份一次写完；10–18 份平分 2 批；超过 18 份平分 3 批。一批写完并出完再写下一批。
-const EXPRESSION_DIFF_BATCH_MAX = 9;
-// 数据库生图模式下的前端提示词接线：写词接口只说明画什么。
-// 正负模板在出图前合并进插件返回的 NaiCaption，不交给写词模型照抄。
-
-const WEIGHT_RE = /^-?\d*\.?\d+::|::$/g;
-function splitTags(text) {
-    return String(text || '').split(/[,，\n]/).map((t) => t.trim()).filter(Boolean);
-}
-
-// 比较用的标签键：忽略大小写、多余空格、NovelAI 权重语法与强调括号。
-function tagKey(tag) {
-    return String(tag || '').trim().replace(WEIGHT_RE, '').replace(/^[{[(]+|[}\])]+$/g, '')
-        .trim().toLowerCase().replace(/\s+/g, ' ');
-}
-
-// 按先后顺序合并多组标签，重复的只保留第一次出现。
-function mergeTags(...groups) {
-    const seen = new Set();
-    const out = [];
-    for (const group of groups) {
-        for (const tag of splitTags(group)) {
-            const key = tagKey(tag);
-            if (!key || seen.has(key)) continue;
-            seen.add(key);
-            out.push(tag);
-        }
-    }
-    return out.join(', ');
-}
-
-// 插件 LLM 回给程序的是扁平字段。已有立绘按这个格式放进用户描述。
-function formatReturnedCaption(caption) {
-    const pos = caption && caption.v4_prompt && caption.v4_prompt.caption;
-    const neg = caption && caption.v4_negative_prompt && caption.v4_negative_prompt.caption;
-    if (!pos || !neg) return '';
-    const lines = ['slotid: 1'];
-    const scene = String(pos.base_caption || '').trim();
-    const sceneUc = String(neg.base_caption || '').trim();
-    if (scene) lines.push(`scene: ${scene}`);
-    if (sceneUc) lines.push(`scene_uc: ${sceneUc}`);
-    const chars = Array.isArray(pos.char_captions) ? pos.char_captions : [];
-    const ucs = Array.isArray(neg.char_captions) ? neg.char_captions : [];
-    const count = Math.max(chars.length, ucs.length);
-    for (let i = 0; i < count; i += 1) {
-        const item = chars[i] && typeof chars[i] === 'object' ? chars[i] : {};
-        const center = Array.isArray(item.centers) ? item.centers[0] : null;
-        const x = center && Number.isFinite(Number(center.x)) ? Number(center.x) : 0.5;
-        const y = center && Number.isFinite(Number(center.y)) ? Number(center.y) : 0.5;
-        const text = String(item.char_caption || '').trim();
-        const uc = String((ucs[i] && ucs[i].char_caption) || '').trim();
-        if (text) lines.push(`char: ${x},${y} | ${text}`);
-        if (uc) lines.push(`char_uc: ${uc}`);
-    }
-    return lines.join('\n');
-}
-
-
-function splitEven(list, parts) {
-    const base = Math.floor(list.length / parts);
-    let extra = list.length % parts;
-    const out = [];
-    let offset = 0;
-    for (let i = 0; i < parts; i += 1) {
-        const size = base + (extra > 0 ? 1 : 0);
-        if (extra > 0) extra -= 1;
-        out.push(list.slice(offset, offset + size));
-        offset += size;
-    }
-    return out;
-}
-
-// 楼内补立绘：单次写词最多 8 份。超过 8 份均分成两批（10 份是 5 和 5），由调用方串行写。
-function splitWriteBatches(items) {
-    const list = Array.isArray(items) ? items : [];
-    if (list.length <= EXPRESSION_WRITE_BATCH_MAX) return list.length ? [list] : [];
-    return splitEven(list, 2);
-}
-
-// 表情差分写词：9 份及以内一批；超过 9 份平分 2 批；超过 18 份平分 3 批。
-function splitExpressionWriteBatches(items) {
-    const list = Array.isArray(items) ? items : [];
-    if (!list.length) return [];
-    if (list.length <= EXPRESSION_DIFF_BATCH_MAX) return [list];
-    return splitEven(list, list.length <= EXPRESSION_DIFF_BATCH_MAX * 2 ? 2 : 3);
-}
-
-// note 是用户这次临时补的要求（性格、某个情绪的特别表现），只影响写词这一步；
-// nsfw 为 true 时「动情」改用它在 NSFW 下的动作说明。
-function buildExpressionDiffDescription(name, prompt, labels, dna, outfit, { note = '', nsfw = false, transparent = true } = {}) {
-    const moods = (Array.isArray(labels) ? labels : []).map((item) => String(item || '').trim()).filter(Boolean);
-    const stored = prompt && typeof prompt === 'object' ? prompt : {};
-    const caption = formatReturnedCaption(stored.caption);
-    const clothes = outfit && typeof outfit === 'object' ? outfit : null;
-    const outfitName = clothes ? String(clothes.name || '').trim() : '';
-    const words = clothes && Array.isArray(clothes.words)
-        ? clothes.words.map((item) => String(item || '').trim()).filter(Boolean)
-        : [];
-    const nude = Boolean(clothes && clothes.nude);
-    const clothesPrompt = nude ? '' : (clothes ? String(clothes.prompt || '').trim() : '');
-    const wordText = words.length ? `，衣服按这些词来画：${words.join('、')}` : '';
-    const wear = caption
-        ? '上面 char 里的衣服换成下面的服装提示词，人还是上面那个。'
-        : '衣服按下面的服装提示词来画。';
-    const clothesLine = nude
-        ? '这一套是裸体。不要画任何衣服、内衣和配饰，按这个角色的长相画裸体立绘。不要沿用原装的衣服，也不要另附服装提示词。'
-        : !outfitName
-        ? (caption ? '服装也按上面这份画。' : '外貌、服装和构图与已有立绘保持一致。')
-        : clothesPrompt
-            ? (clothes.ownImage
-                ? `这一套就是服装「${outfitName}」。${wear}不要画成别的衣服。`
-                : `这一套要改成服装「${outfitName}」。${wear}不要沿用原装的衣服。`)
-            : clothes.ownImage
-                ? `这一套就是服装「${outfitName}」${words.length ? `（${words.join('、')}）` : ''}。不要画成别的衣服。`
-                : `这一套要改成服装「${outfitName}」${wordText}。不要沿用原装的衣服。`;
-    return [
-        outfitName
-            ? `为角色「${name || ''}」的服装「${outfitName}」写 ${moods.length} 份立绘表情差分。`
-            : `为角色「${name || ''}」写 ${moods.length} 份立绘表情差分。`,
-        caption ? '下面这份是已有立绘，外貌和构图按它画。这不是要回写的图。' : '',
-        caption,
-        clothesLine,
-        clothes && clothes.nsfwBoost && !nude ? nsfwClothingBoostLine('character') : '',
-        clothesPrompt ? `服装提示词：\n${clothesPrompt}` : '',
-        '表情依据该角色的性格、脾气与行为习惯分别撰写，禁止套用统一表情模板。',
-        '规格：大腿以上（cowboy shot）。朝向正面，直立，平视。禁止全身，禁止露出脚，禁止侧身，禁止倾斜构图。',
-        '情绪须写入肢体：手势、肩线、重心随该情绪变化。禁止仅替换面部。',
-        '各表情的动作按下面的说明写，不要把不同表情画成同一张脸。',
-        '下面的动作是基准，不是照抄的模板。先按角色的性格改幅度和形式：三无、高冷、内敛的性格幅度极小，靠眼神和嘴角的细微变化，动作克制；开朗、外向的性格按基准写；狂躁、元气、暴烈的性格幅度夸张，带动肩、手、重心，甚至打破站姿。',
-        String(note || '').trim() ? `这次额外的要求：\n${String(note).trim()}` : '',
-        caption ? '上面那份立绘的表情和动作不要沿用，每份的表情、嘴型、眼神和手势都按各自的情绪重写。' : '',
-        spriteGroundLine(transparent),
-        ...characterDnaLines(name, dna),
-        ...moods.map((mood, index) => {
-            const act = moodPresetAct(mood, { nsfw });
-            if (!act) return '';
-            const use = moodPresetUse(mood);
-            return use ? `${index + 1} ${mood}：${act}。用在${use}。` : `${index + 1} ${mood}：${act}`;
-        }).filter(Boolean),
-        `按 slotid 1 到 ${moods.length} 的顺序另写 ${moods.length} 份：${moods.map((label, index) => `${index + 1} ${label}`).join('、')}。`,
-    ].filter(Boolean).join('\n');
-}
-
-const UPRIGHT_POSITIVE = 'cowboy shot, standing, facing viewer, straight-on';
-const UPRIGHT_NEGATIVE = 'dutch angle, from side, profile, full body, feet';
-const EXPRESSION_DROP_POSITIVE = new Set(['arms at sides'].map(tagKey));
-
-// 景别回到大腿以上。只拿掉双手下垂，避免表情动作被锁死。
-function expressionSpritePrompts(positive, negative) {
-    const kept = splitTags(positive).filter((tag) => !EXPRESSION_DROP_POSITIVE.has(tagKey(tag))).join(', ');
-    return { positive: kept, negative: String(negative || '') };
-}
-
-// 写词结果补上大腿以上和正面。负面排除全身和脚。
-function uprightSpriteCaption(caption) {
-    const pos = caption && caption.v4_prompt && caption.v4_prompt.caption;
-    const neg = caption && caption.v4_negative_prompt && caption.v4_negative_prompt.caption;
-    if (!pos || !neg) return caption;
-    const chars = Array.isArray(pos.char_captions) ? pos.char_captions : [];
-    const ucs = Array.isArray(neg.char_captions) ? neg.char_captions : [];
-    const nextChars = chars.map((item) => ({
-        ...(item && typeof item === 'object' ? item : {}),
-        char_caption: mergeTags(item && item.char_caption, UPRIGHT_POSITIVE),
-    }));
-    const nextUcs = (ucs.length ? ucs : nextChars.map(() => ({ char_caption: '' }))).map((item) => ({
-        ...(item && typeof item === 'object' ? item : {}),
-        char_caption: mergeTags(item && item.char_caption, UPRIGHT_NEGATIVE),
-    }));
-    return {
-        ...caption,
-        v4_prompt: {
-            ...caption.v4_prompt,
-            caption: {
-                ...pos,
-                base_caption: chars.length ? pos.base_caption : mergeTags(pos.base_caption, UPRIGHT_POSITIVE),
-                char_captions: nextChars,
-            },
-        },
-        v4_negative_prompt: {
-            ...caption.v4_negative_prompt,
-            caption: {
-                ...neg,
-                base_caption: mergeTags(neg.base_caption, UPRIGHT_NEGATIVE),
-                char_captions: chars.length ? nextUcs : ucs,
-            },
-        },
-    };
-}
-
-// 插件写词会带上世界书、聊天上下文和它自己的角色库，同名角色容易被写成别的长相。
-// 有 DNA 时先声明以设定为准，再列字段；没有 DNA 返回空数组。
-function characterDnaLines(name, dna) {
-    const profile = dna && typeof dna === 'object' ? dna : {};
-    const identity = String(profile.identity || '').trim();
-    const appearance = String(profile.defaultAppearance || '').trim();
-    const dnaNegative = String(profile.negative || '').trim();
-    const triggers = String(profile.triggerWords || '').trim();
-    if (!identity && !appearance && !dnaNegative && !triggers) return [];
-    return [
-        `「${name || ''}」的长相以下面的设定为准，优先于上下文、世界书和角色库里的任何描写；发色、瞳色、发型照设定写，不得改动，不要按名字联想。`,
-        identity ? `固定身份：\n${identity}` : '',
-        appearance ? `默认外观：\n${appearance}` : '',
-        triggers ? `触发词：\n${triggers}` : '',
-        dnaNegative ? `不要出现：\n${dnaNegative}` : '',
-    ].filter(Boolean);
-}
-
-// 立绘站得太板正：要一个不挡身体的日常小动作。
-const SPRITE_DAILY_POSE_LINE = '姿势带一个轻量的日常小动作（如一只手拨头发、手背在身后、手插口袋、轻抓衣角），不要双手僵直下垂，也不要大幅动作或拿道具挡住身体。';
-
-function spriteGroundLine(transparent) {
-    return transparent === false ? '白色背景，不要透明底。' : '无背景，透明底。';
-}
-
-// 设置页直接出一张角色立绘。没有正文，长相和衣服按角色设定写。
-function buildCharacterSpriteDescription(name, dna, options) {
-    const nude = Boolean(options && options.nude);
-    const note = String(options && options.note || '').trim();
-    return [
-        nude ? `画角色「${name || ''}」的裸体立绘。` : `画角色「${name || ''}」的立绘。`,
-        nude
-            ? '不要画任何衣服、内衣和配饰。长相按下面的角色设定，人还是这个角色。不要套用现成的服装提示词，按这个角色自己写裸体该怎么画。'
-            : '外貌与服装按下面的角色设定来画。设定里没写到的，按这个角色补一个日常样子。',
-        '规格：大腿以上（cowboy shot）。朝向正面，直立，平视。禁止全身，禁止露出脚，禁止侧身，禁止倾斜构图。',
-        SPRITE_DAILY_POSE_LINE,
-        note ? `这次额外的要求：\n${note}` : '',
-        spriteGroundLine(options && options.transparent),
-        ...characterDnaLines(name, dna),
-        '只写一份，slotid 为 1。',
-    ].filter(Boolean).join('\n');
-}
-
-// 状态栏头像：Q 版圆脸，只画一颗头。长相按角色设定写。
-function buildCharacterAvatarDescription(name, dna) {
-    return [
-        `画角色「${name || ''}」的 Q 版头像（chibi）。`,
-        '头像会裁成圆形：只画头、脖子和肩膀，脸放在画面正中，占画面的大半。脸圆、眼睛大，正面看向画面，带一点笑。',
-        '肩膀以下绝对不要出现：不画胸口以下的身体，不画腰、腿、脚，也不要画手。',
-        '发色、瞳色、发型和头上的饰品按下面的角色设定来画，不能改；肩颈处的衣领按角色日常服装画一点即可。',
-        '纯色浅底，不要背景，不要文字。',
-        ...characterDnaLines(name, dna),
-        '只写一份，slotid 为 1。',
-    ].filter(Boolean).join('\n');
-}
-
-// 勾选「瑟瑟加强」后追加。只告诉模型这是成年人的色情服装、不要改成普通衣服，不附带成套标签。
-function nsfwClothingBoostLine(kind = 'clothes') {
-    return kind === 'character'
-        ? '这套是色情服装。不要回避，不要审查，不要改成普通、得体或日常衣服，也不要用衣物遮住这套该露的地方。按服装提示词加强暴露和色情。'
-        : '这是色情服装。不要回避，不要审查，不要改成普通、得体或日常衣服，也不要把暴露的设计改成遮盖。按这个服装名加强色情和暴露，把款式、颜色、材质和露出的位置写清楚。';
-}
-
-// 待确认服装：只写这一套衣服的生图标签，不写出图。
-function buildWardrobeClothingDescription(_character, outfitName, { nsfwBoost = false } = {}) {
-    const outfit = String(outfitName || '').trim();
-    return [
-        `为服装「${outfit}」写一份生图用的服装提示词。`,
-        '一定要注意：生成的是一套衣服，而不是角色，没有角色。',
-        '这是一整套穿着，从上到下写完整：头上、上身、下身、腿和脚，以及配套的饰品。不要只写其中一件。',
-        '每件都写清款式、颜色和材质。',
-        nsfwBoost ? nsfwClothingBoostLine('clothes') : '',
-        '不要写人，不要写表情、姿势、背景。',
-        '只写一份，slotid 为 1。',
-    ].filter(Boolean).join('\n');
-}
-
-// 本楼还缺的立绘一次写完。名单里只有尚未生成的，已有的不进来。
-function buildDbgenSpriteBatchDescription(needs = [], options = {}) {
-    const items = Array.isArray(needs) ? needs : [];
-    const list = items.map((need, index) => `${index + 1}. ${need && need.name ? need.name : ''}`);
-    const count = list.length;
-    const profiles = items
-        .map((need, index) => {
-            const lines = characterDnaLines(need && need.name, need && need.dna);
-            return lines.length ? [`第 ${index + 1} 份：`, ...lines].join('\n') : '';
-        })
-        .filter(Boolean);
-    return [
-        `写${count}张立绘的提示词，按下面的顺序各一份，slotid 从 1 数到 ${count}。`,
-        list.join('\n'),
-        profiles.length ? '角色外貌与服装依据正文补充；下面列了设定的角色，长相按设定写。' : '角色外貌与服装依据正文补充。',
-        ...profiles,
-        SPRITE_DAILY_POSE_LINE,
-        spriteGroundLine(options.transparent),
-        '不要写生成点，不要从正文摘挂载句。',
-    ].join('\n');
-}
-
-// 本楼还缺的背景一次写完。名单里只有尚未生成的，已有的不进来。
-function buildDbgenBackgroundBatchDescription(needs = []) {
-    const list = (Array.isArray(needs) ? needs : []).map((need, index) => {
-        const when = [need && need.time, need && need.weather].filter(Boolean).join('、');
-        return `${index + 1}. ${need && need.name ? need.name : ''}${when ? `（${when}）` : ''}`;
-    });
-    const count = list.length;
-    return [
-        `为本楼写${count}张背景的提示词，按下面的顺序各一份，slotid 从 1 数到 ${count}。`,
-        list.join('\n'),
-        '地点陈设、光线与氛围依据楼层正文补充。',
-        '不要写生成点，不要从正文摘挂载句。',
-    ].join('\n');
-}
-function buildDbgenAssetDescription(need = {}, options = {}) {
-    const when = [need.time, need.weather].filter(Boolean).join('、');
-    if (need.type === 'sprite') {
-        return [
-            `画角色「${need.name || ''}」的立绘。`,
-            `角色外貌与服装依据正文补充。${spriteGroundLine(options.transparent)}`,
-            SPRITE_DAILY_POSE_LINE,
-            ...characterDnaLines(need.name, need.dna),
-        ].join('\n');
-    }
-    if (need.type === 'background') {
-        return [
-            `画场景「${need.name || ''}」${when ? `（${when}）` : ''}的背景图。`,
-            '地点陈设、光线与氛围依据楼层正文补充。',
-        ].join('\n');
-    }
-    return '';
-}
-
-// 正面：插件内容在前、前端正向模板追加在后，并去掉与前端负面冲突的标签；
-// 负面：插件负面加上前端负面。角色 caption 结构与坐标原样保留。
-function applyUserPromptsToCaption(caption, prompts = {}) {
-    const positive = splitTags(prompts.positive);
-    const negative = splitTags(prompts.negative);
-    if (!caption || typeof caption !== 'object' || (!positive.length && !negative.length)) return caption;
-    const blocked = new Set(negative.map(tagKey));
-    const keep = (text) => splitTags(text).filter((tag) => !blocked.has(tagKey(tag))).join(', ');
-    const posPrompt = caption.v4_prompt || {};
-    const negPrompt = caption.v4_negative_prompt || {};
-    const pos = posPrompt.caption || {};
-    const neg = negPrompt.caption || {};
-    return {
-        ...caption,
-        v4_prompt: {
-            ...posPrompt,
-            caption: {
-                ...pos,
-                base_caption: mergeTags(keep(pos.base_caption), positive.join(', ')),
-                char_captions: (Array.isArray(pos.char_captions) ? pos.char_captions : [])
-                    .map((c) => ({ ...c, char_caption: keep(c && c.char_caption) })),
-            },
-        },
-        v4_negative_prompt: {
-            ...negPrompt,
-            caption: {
-                ...neg,
-                base_caption: mergeTags(neg.base_caption, negative.join(', ')),
-                char_captions: Array.isArray(neg.char_captions) ? neg.char_captions : [],
-            },
-        },
-    };
-}
-
-// 写词模型仍可能不照 DNA 写（世界书、角色库按名字联想）。出图前把 DNA 里的英文标签硬合进角色 caption：
-// 触发词、身份、默认外观进正面，「不要出现」进负面；写词结果里和 DNA 冲突的发色、瞳色去掉。中文描述 NAI 读不懂，不合入。
-const COLOR_FEATURE_RE = /^(?:(?:light|dark|pale|deep)\s+)?(?:platinum\s+)?(?:blonde|blond|black|brown|red|blue|green|pink|purple|violet|white|silver|grey|gray|orange|aqua|yellow|golden|gold)\s+(hair|eyes)$/;
-
-function dnaEnglishTags(text) {
-    return splitTags(text).filter((tag) => /[a-z]/i.test(tag) && !/[\u3040-\u30ff\u3400-\u9fff]/.test(tag));
-}
-
-// DNA 只管长相和衣服。表情、嘴型、眼神、手势硬合进去会把每张差分都盖成同一张脸。
-const EXPRESSION_POSE_RE = /^(?:expressionless|emotionless|blank stare|straight face|serious|calm|happy|sad|angry|annoyed|smug|shy|embarrassed|surprised|nervous|worried|crying|tears|blush|laughing|smiling|grin|smirk|frown|pout|open mouth|closed mouth|parted lips|closed eyes|half-closed eyes|wide-eyed|narrowed eyes|looking (?:at viewer|away|down|up|to the side)|head tilt|standing|arms at sides|arms behind back|hands behind back|crossed arms|arms crossed|hands? on (?:own )?(?:hips?|chest|chin|cheek)|.*\b(?:smile|expression)|:\)|:d|\^_\^)$/;
-
-function isExpressionPoseTag(tag) {
-    return EXPRESSION_POSE_RE.test(tagKey(tag));
-}
-
-// 默认立绘被写成无表情时，差分照抄会带上这些词。
-const NEUTRAL_FACE_TAGS = new Set(['expressionless', 'emotionless', 'neutral expression', 'blank expression', 'blank stare', 'straight face', 'closed mouth', 'arms at sides'].map(tagKey));
-
-// 写词插件常常整份漏写表情（只写了长相和衣服）。预设组的英文表情标签放到角色 caption 最前，
-// 并去掉照抄来的无表情词；默认组和自建组不动。nsfw 为 true 时「动情」换成 NSFW 那套标签。
-function applyMoodToCaption(caption, mood, { nsfw = false } = {}) {
-    const label = String(mood || '').trim();
-    const tags = label === '默认' ? '' : moodPresetTags(label, { nsfw });
-    return prependCharTags(caption, tags, (tag) => !NEUTRAL_FACE_TAGS.has(tagKey(tag)));
-}
-
-// 衣服跟着同一份来源走，不靠写词插件每份重写：换装有服装词就用服装词；
-// 原装或这套有自己的立绘时，用那张立绘的提示词去掉表情、姿势后剩下的长相和衣服。
-const LOOK_SKIP_TAGS = new Set(['solo', 'cowboy shot', 'facing viewer', 'straight-on', 'centered', 'transparent background', 'simple background', 'grey background', 'light grey background', 'flat color background', 'no background'].map(tagKey));
-
-function storedCharTags(prompt) {
-    const stored = prompt && typeof prompt === 'object' ? prompt : {};
-    const pos = stored.caption && stored.caption.v4_prompt && stored.caption.v4_prompt.caption;
-    if (pos) {
-        const chars = Array.isArray(pos.char_captions) ? pos.char_captions : [];
-        return String((chars[0] && chars[0].char_caption) || pos.base_caption || '');
-    }
-    return String(stored.positive || '');
-}
-function expressionLookTags(basePrompt, outfit) {
-    const clothes = outfit && typeof outfit === 'object' ? outfit : null;
-    const clothesPrompt = clothes ? String(clothes.prompt || '').trim() : '';
-    if (clothesPrompt) return dnaEnglishTags(clothesPrompt).join(', ');
-    if (clothes && !clothes.ownImage) return '';
-    return splitTags(storedCharTags(basePrompt))
-        .filter((tag) => !isExpressionPoseTag(tag) && !LOOK_SKIP_TAGS.has(tagKey(tag)))
-        .join(', ');
-}
-
-// 换了衣服的那一套，DNA 的默认外观里是原装的衣服，硬合会和新衣服打架。
-function expressionPaintDna(dna, outfit) {
-    if (!dna || typeof dna !== 'object' || !outfit || typeof outfit !== 'object') return dna;
-    return { ...dna, defaultAppearance: '' };
-}
-function applyLookToCaption(caption, tags) {
-    return prependCharTags(caption, tags);
-}
-
-// 把一组标签放到角色 caption（没有角色块时放 base）最前，原有标签按 keep 过滤后接在后面。
-function prependCharTags(caption, tags, keep = () => true) {
-    const pos = caption && caption.v4_prompt && caption.v4_prompt.caption;
-    if (!String(tags || '').trim() || !pos) return caption;
-    const merge = (text) => mergeTags(tags, splitTags(text).filter(keep).join(', '));
-    const chars = Array.isArray(pos.char_captions) ? pos.char_captions : [];
-    return {
-        ...caption,
-        v4_prompt: {
-            ...caption.v4_prompt,
-            caption: {
-                ...pos,
-                base_caption: chars.length ? pos.base_caption : merge(pos.base_caption),
-                char_captions: chars.map((item, index) => (index === 0
-                    ? { ...(item && typeof item === 'object' ? item : {}), char_caption: merge(item && item.char_caption) }
-                    : item)),
-            },
-        },
-    };
-}
-function applyCharacterDnaToCaption(caption, dna) {
-    const pos = caption && caption.v4_prompt && caption.v4_prompt.caption;
-    const neg = caption && caption.v4_negative_prompt && caption.v4_negative_prompt.caption;
-    if (!pos || !neg || !dna || typeof dna !== 'object') return caption;
-    const positive = dnaEnglishTags([dna.triggerWords, dna.identity, dna.defaultAppearance].join(',')).filter((tag) => !isExpressionPoseTag(tag));
-    const negative = dnaEnglishTags(dna.negative).filter((tag) => !isExpressionPoseTag(tag));
-    if (!positive.length && !negative.length) return caption;
-    const fixed = new Set();
-    for (const tag of positive) {
-        const hit = tagKey(tag).match(COLOR_FEATURE_RE);
-        if (hit) fixed.add(hit[1]);
-    }
-    const blocked = new Set(negative.map(tagKey));
-    const keep = (text) => splitTags(text).filter((tag) => {
-        const key = tagKey(tag);
-        if (blocked.has(key)) return false;
-        const hit = key.match(COLOR_FEATURE_RE);
-        return !(hit && fixed.has(hit[1]) && !positive.some((p) => tagKey(p) === key));
-    }).join(', ');
-    const chars = Array.isArray(pos.char_captions) ? pos.char_captions : [];
-    const ucs = Array.isArray(neg.char_captions) ? neg.char_captions : [];
-    const dnaPositive = positive.join(', ');
-    const dnaNegative = negative.join(', ');
-    return {
-        ...caption,
-        v4_prompt: {
-            ...caption.v4_prompt,
-            caption: {
-                ...pos,
-                base_caption: chars.length ? keep(pos.base_caption) : mergeTags(dnaPositive, keep(pos.base_caption)),
-                char_captions: chars.map((item, index) => ({
-                    ...(item && typeof item === 'object' ? item : {}),
-                    char_caption: index === 0 ? mergeTags(dnaPositive, keep(item && item.char_caption)) : (item && item.char_caption),
-                })),
-            },
-        },
-        v4_negative_prompt: {
-            ...caption.v4_negative_prompt,
-            caption: { ...neg, base_caption: mergeTags(neg.base_caption, dnaNegative), char_captions: ucs },
-        },
-    };
-}
-
-__igsDefine(exports, "splitTags", () => splitTags);
-__igsDefine(exports, "tagKey", () => tagKey);
-__igsDefine(exports, "mergeTags", () => mergeTags);
-__igsDefine(exports, "splitWriteBatches", () => splitWriteBatches);
-__igsDefine(exports, "splitExpressionWriteBatches", () => splitExpressionWriteBatches);
-__igsDefine(exports, "buildExpressionDiffDescription", () => buildExpressionDiffDescription);
-__igsDefine(exports, "expressionSpritePrompts", () => expressionSpritePrompts);
-__igsDefine(exports, "uprightSpriteCaption", () => uprightSpriteCaption);
-__igsDefine(exports, "buildCharacterSpriteDescription", () => buildCharacterSpriteDescription);
-__igsDefine(exports, "buildCharacterAvatarDescription", () => buildCharacterAvatarDescription);
-__igsDefine(exports, "nsfwClothingBoostLine", () => nsfwClothingBoostLine);
-__igsDefine(exports, "buildWardrobeClothingDescription", () => buildWardrobeClothingDescription);
-__igsDefine(exports, "buildDbgenSpriteBatchDescription", () => buildDbgenSpriteBatchDescription);
-__igsDefine(exports, "buildDbgenBackgroundBatchDescription", () => buildDbgenBackgroundBatchDescription);
-__igsDefine(exports, "buildDbgenAssetDescription", () => buildDbgenAssetDescription);
-__igsDefine(exports, "applyUserPromptsToCaption", () => applyUserPromptsToCaption);
-__igsDefine(exports, "applyMoodToCaption", () => applyMoodToCaption);
-__igsDefine(exports, "expressionLookTags", () => expressionLookTags);
-__igsDefine(exports, "expressionPaintDna", () => expressionPaintDna);
-__igsDefine(exports, "applyLookToCaption", () => applyLookToCaption);
-__igsDefine(exports, "applyCharacterDnaToCaption", () => applyCharacterDnaToCaption);
-__igsDefine(exports, "EXPRESSION_WRITE_BATCH_MAX", () => EXPRESSION_WRITE_BATCH_MAX);
-__igsDefine(exports, "EXPRESSION_DIFF_BATCH_MAX", () => EXPRESSION_DIFF_BATCH_MAX);
 });
 __igsRegister("src/generated-images/generation-prompt.js", function(module, exports, require) {
 // 出图时实际交给模型的正负提示词。只存文本，不存密钥和整份请求体。
@@ -21567,6 +22175,7 @@ function nextRequestId() {
 
 // 发一次出图请求并等待同 id 的回执。结果：{ ok: true, imageData } 或 { ok: false, reason, error }。
 // imageData 原样返回（可能是 data URL、blob URL 或同源路径），转换由调用方负责。
+// options.width / height：请求里带上宽高时，智绘姬的 NovelAI / SD / ComfyUI / RunningHub 出图优先用它，不带就用智绘姬自己设的尺寸。
 function requestChatu8Image(host, prompt, options = {}) {
     const text = String(prompt || '').trim();
     if (!host || !host.eventSource) return Promise.resolve({ ok: false, reason: 'chatu8-missing', error: '未检测到智绘姬' });
@@ -21576,6 +22185,9 @@ function requestChatu8Image(host, prompt, options = {}) {
     const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : CHATU8_DEFAULT_TIMEOUT_MS;
     const setTimer = typeof options.setTimeout === 'function' ? options.setTimeout : globalThis.setTimeout;
     const clearTimer = typeof options.clearTimeout === 'function' ? options.clearTimeout : globalThis.clearTimeout;
+    const width = Number(options.width);
+    const height = Number(options.height);
+    const size = width > 0 && height > 0 ? { width, height } : null;
 
     return new Promise((resolve) => {
         let settled = false;
@@ -21609,7 +22221,7 @@ function requestChatu8Image(host, prompt, options = {}) {
         if (timer && typeof timer.unref === 'function') timer.unref();
         try {
             // 酒馆 eventSource.emit 返回 Promise；监听器抛错时同样按失败收尾。
-            const pending = eventSource.emit(CHATU8_REQUEST_EVENT, { id, prompt: text });
+            const pending = eventSource.emit(CHATU8_REQUEST_EVENT, { id, prompt: text, ...size });
             if (pending && typeof pending.catch === 'function') {
                 pending.catch((error) => fail('chatu8-failed', `智绘姬出图失败：${(error && error.message) || error}`));
             }
@@ -21835,7 +22447,8 @@ function parseCaptionSlots(text) {
             return m ? m[1].trim() : '';
         };
         const scene = read('scene');
-        const char = read('char');
+        // 说明里的已有立绘是「char: x,y | tags」，模型有时照抄这种写法（偶尔还带角色名）：去掉开头的坐标，免得 0.5, 0.5 混进标签。
+        const char = read('char').replace(/^(?:[^|,]*\|\s*)?-?\d*\.?\d+\s*,\s*-?\d*\.?\d+\s*\|\s*/, '');
         if (!scene && !char) return null;
         const hasChar = Boolean(char);
         return { slotId, caption: { v4_prompt: side(scene, hasChar ? char : null), v4_negative_prompt: side(read('uc'), hasChar ? '' : null) } };
@@ -22159,6 +22772,7 @@ details.igs-perf-more>summary{cursor:pointer;user-select:none}
 .igs-mood-group-total,.igs-mood-group-words{color:var(--igs-settings-ink-3);font-size:12px;font-weight:500}
 .igs-mood-group-words{margin-left:auto}
 .igs-mood-group .igs-mood-word-list{padding:0 8px 8px}
+.igs-mood-group-tags{display:flex;flex-direction:column;gap:6px;padding:0 8px 8px}
 .igs-mood-word-list{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:2px 0}
 .igs-bgm-tracks{display:flex;flex-direction:column;gap:4px;margin:6px 0}
 .igs-bgm-track{display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:var(--igs-settings-radius-small);background:var(--igs-settings-field)}
@@ -22806,12 +23420,13 @@ __igsDefine(exports, "STATUS_HUD_POSITION_STYLE_TEXT", () => STATUS_HUD_POSITION
 });
 __igsRegister("src/visual/igs-ui/settings-fields.js", function(module, exports, require) {
 const { esc } = require("src/visual/igs-ui/reader-value-utils.js");
-const { normalizeMoodGroups } = require("src/scene/mood-groups.js");
+const { MOOD_PRESET, moodPresetTags, normalizeMoodGroups } = require("src/scene/mood-groups.js");
+const { worldContextOf } = require("src/scene/worldview.js");
 const { TOOLBAR_ACTIONS } = require("src/visual/igs-ui/reader-host-constants.js");
 const { STAGE_SHAKE_INTENSITIES } = require("src/visual/igs-ui/stage-shake-runtime.js");
 const { CHAT_SHOW_BUBBLE_RADIUS_LEVELS, CHAT_SHOW_DIM_LEVELS, CHAT_SHOW_PROMPT_RULE } = require("src/visual/igs-ui/chat-show-runtime.js");
 const { CHAT_SFX_PRESET_LABELS } = require("src/visual/igs-ui/chat-sfx.js");
-const { SLOT_ICONS, menuItem, transferIcons, renderCharacterSlotTabs, renderReviewCard, renderRowMenu, slotActions } = require("src/visual/igs-ui/settings-outfit-fields.js");
+const { SLOT_ICONS, menuItem, transferIcons, renderCharacterSlotTabs, renderReviewCard, renderRowMenu, slotActions, spriteClearPick } = require("src/visual/igs-ui/settings-outfit-fields.js");
 const { MAGIC_HOUSES, normalizeMagicHouse } = require("src/visual/igs-ui/dialog-theme-css-skins.js");
 const { resolveCharacterMagicHouse } = require("src/visual/igs-ui/magic-house.js");
 const { VOICE_PITCH_LIMIT, VOICE_SPEED_RANGE, normalizeCharacterVoice, resolveCharacterVoice, voicePackOptions } = require("src/visual/igs-ui/voice-bark.js");
@@ -23225,6 +23840,8 @@ function renderCharacterAssetList(characters, options = {}) {
     const outfitMap = options.characterOutfits && typeof options.characterOutfits === 'object' && !Array.isArray(options.characterOutfits)
         ? options.characterOutfits : {};
     const outfitTabs = options.outfitTabs && typeof options.outfitTabs === 'object' ? options.outfitTabs : {};
+    // 「清空立绘」多选：{ character, outfit, moods: Set }，不在多选时为 null。
+    const spriteClear = options.spriteClear && options.spriteClear.moods instanceof Set ? options.spriteClear : null;
     // 折叠区的展开状态由宿主按 data-advanced 记住，重渲染后不会收起。
     const isOpen = typeof options.isOpen === 'function' ? options.isOpen : () => false;
     // 魔法星夜才显示学院行；未指定时按 DNA 自动识别，识别不出用全局配色。
@@ -23285,7 +23902,9 @@ function renderCharacterAssetList(characters, options = {}) {
                 menuItem(`scene-rename-mood:${c}:${m}`, '重命名'),
                 menuItem(`scene-remove-mood:${c}:${m}`, '删除', ' is-danger'),
             ], `「${mood}」的操作`);
+            const clearing = spriteClear && spriteClear.character === charName && spriteClear.outfit === '';
             const collapsedRow = `<div class="igs-btn-mgr-row igs-scene-mood-row">`
+                + (clearing ? spriteClearPick(c, '', m, rawUrl, spriteClear.moods.has(mood)) : '')
                 + rowThumb
                 + `<span class="igs-btn-mgr-label">${esc(mood)}</span>`
                 + (imageId ? '' : `<input class="igs-scene-url-input" data-scene-char="${esc(charName)}" data-scene-mood="${esc(mood)}" value="${esc(url || '')}" placeholder="URL或data:image/...">`)
@@ -23309,6 +23928,7 @@ function renderCharacterAssetList(characters, options = {}) {
             sceneAssets: options.sceneAssets || { characters, characterAliases: aliasesByCharacter, characterOutfits: outfitMap, moodGroups },
             icons: { pencil, trash },
             isOpen,
+            spriteClear,
         });
         // 和场景一样，每个角色平时只有一行；点名字或右边箭头才展开服装和立绘。
         const openKey = `char-open:${charName}`;
@@ -23406,13 +24026,15 @@ function renderCharacterVoiceRow(charName, { sceneAssets, tts }) {
 }
 
 const SPRITE_HEIGHT_SOURCE_LABELS = { female: '女性', male: '男性', other: '其他', base: '基准高度' };
+const SPRITE_HEIGHT_AGE_LABELS = { elder: '老人', child: '儿童' };
 
 // 角色立绘高度（角色展开后放在立绘列表最上面）：留空跟随性别默认 / 基准高度；填了就固定这个角色的高度，「调整立绘」调过的表情仍按调整结果。
 function renderCharacterSpriteHeightRow(charName, { sceneAssets, reader }) {
     const assets = sceneAssets && typeof sceneAssets === 'object' ? sceneAssets : {};
     const manual = resolveSpriteBaseScale(assets, reader, charName);
     const auto = manual.source === 'manual' ? resolveSpriteBaseScale({ ...assets, characterSpriteScales: {} }, reader, charName) : manual;
-    const autoText = `${SPRITE_HEIGHT_SOURCE_LABELS[auto.source]} ${auto.defaultScale}%`;
+    const ageLabel = SPRITE_HEIGHT_AGE_LABELS[auto.age] ? ` · ${SPRITE_HEIGHT_AGE_LABELS[auto.age]}` : '';
+    const autoText = `${SPRITE_HEIGHT_SOURCE_LABELS[auto.source]}${ageLabel} ${auto.defaultScale}%`;
     const placed = hasCharacterSpriteLayout(reader && reader.spriteLayouts, charName);
     const note = placed ? ' title="在「调整立绘」里单独调过的表情，按调整结果显示"' : '';
     return `<div class="igs-char-info-row igs-char-height-row"><span class="igs-char-info-label">立绘高度 %</span>`
@@ -23452,7 +24074,17 @@ function renderCharacterSetupPanel(charName, dna, profileRows) {
     return `<div class="igs-char-dna-panel"><div class="igs-char-dna-panel-head">角色设定`
         + `<button type="button" class="igs-review-link" data-action="scene-toggle-dna:${encSeg(charName)}">收起</button></div>`
         + profileRows
-        + `<div class="igs-char-info-row is-block"><span class="igs-char-info-label">角色DNA<span class="igs-outfit-muted">（生图时保持长相）</span></span>${renderCharacterDnaFields(charName, dna)}</div></div>`;
+        + `<div class="igs-char-info-row is-block"><span class="igs-char-info-label">角色DNA<span class="igs-outfit-muted">（生图时保持长相）</span></span>${renderCharacterDnaFields(charName, dna)}</div>`
+        + renderCharacterPersonaRow(charName, dna)
+        + `</div>`;
+}
+
+// 性格与表情习惯：跟着 DNA 存，只给表情差分写词用。空着时第一次生成表情差分会自动提炼。
+function renderCharacterPersonaRow(charName, dna) {
+    const persona = dnaValue(dna, 'persona');
+    return `<div class="igs-char-info-row is-block"><span class="igs-char-info-label">性格与表情习惯<span class="igs-outfit-muted">（只给表情差分写词用，不进画图提示词）</span></span>`
+        + `<textarea class="igs-scene-url-input igs-dna-input" rows="3" data-dna-char="${esc(charName)}" data-dna-field="persona" placeholder="例：高雅内敛，情绪很少写在脸上；委屈时垂眼抿唇，不会噘嘴撒娇。空着时第一次生成表情差分会自动从角色卡、世界书和数据库提炼。">${esc(persona)}</textarea>`
+        + `<div class="igs-settings-row"><button type="button" class="igs-settings-action" data-action="char-persona-extract:${encSeg(charName)}">${persona.trim() ? '重新从资料提炼' : '从角色卡 / 世界书 / 数据库提炼'}</button></div></div>`;
 }
 function renderCharacterDnaEditor(charName, dna) {
     return `<details class="igs-dna-editor"><summary class="igs-dna-summary">角色DNA${characterDnaFilled(dna) ? '' : '（未填写）'}</summary>${renderCharacterDnaFields(charName, dna)}</details>`;
@@ -23495,6 +24127,26 @@ function storedMoodGroups(value) {
     return value.filter((group) => group && String(group.label || '').trim());
 }
 
+// 「场景 → 规则」的世界设定提要：给画立绘、服装和表情差分的写词参考；空着时第一次生成会自动提炼。
+function renderWorldSummarySection(sceneAssets) {
+    const world = worldContextOf(sceneAssets);
+    return `<div class="igs-source-filter-note">当前世界观：${esc(world.label)}（在首页「适配世界」里改）。画立绘、服装和表情差分时，写词会参考世界观和这段提要；提要空着时，第一次生成会自动从角色卡的场景栏和世界书的常驻条目提炼。</div>`
+        + `<textarea class="igs-scene-url-input igs-dna-input" rows="4" data-world-summary="1" aria-label="世界设定提要" placeholder="例：架空的中式王朝，丝绸与刺绣常见，女子多着襦裙、披帛，饰品用玉和银；不出现现代衣物和电子产品。">${esc(world.summary)}</textarea>`
+        + `<div class="igs-settings-row"><button type="button" class="igs-settings-action" data-action="world-summary-extract">${world.summary ? '重新从资料提炼' : '从角色卡 / 世界书提炼'}</button></div>`;
+}
+
+// 表情差分用的表情 tag：开关打开就每次放到最前；关着不加，表情全按写词的来。输入框空着用预设（自建组没有预设）。
+function renderMoodGroupExpressionTags(group, label) {
+    const always = group.alwaysTags === true;
+    const custom = typeof group.tags === 'string' ? group.tags : '';
+    const preset = label === '默认' ? '' : moodPresetTags(label);
+    return `<div class="igs-mood-group-tags">`
+        + `<button type="button" class="igs-switch${always ? ' is-on' : ''}" data-action="mood-group-always:${encSeg(label)}" aria-pressed="${always ? 'true' : 'false'}"><i></i><span>表情差分固定加上这组 tag</span></button>`
+        + `<input class="igs-scene-url-input" data-mood-group-tags="${esc(label)}" value="${esc(custom)}" placeholder="${esc(preset || '自建组没有预设 tag，填了才会用')}" aria-label="「${esc(label)}」的表情 tag">`
+        + `<div class="igs-source-filter-note">${always ? '每张差分都放在提示词最前。' : '关着时不加，表情全按写词时照角色性格写的来。'}清空回到预设。</div>`
+        + `</div>`;
+}
+
 // 情绪组是词库里的容器，和角色上的表情槽分开列。标题上的数字就是当前有多少组。
 function renderMoodGroupList(groups, options = {}) {
     const list = storedMoodGroups(groups);
@@ -23512,6 +24164,7 @@ function renderMoodGroupList(groups, options = {}) {
         )).join('');
         const wordsHtml = open
             ? `<div class="igs-mood-word-list">${tags || '<div class="igs-scene-empty">暂无情绪词</div>'}<button type="button" class="igs-btn-mgr-icon" data-action="mood-add-word:${encSeg(label)}" title="添加词">+</button></div>`
+                + renderMoodGroupExpressionTags(group, label)
             : '';
         return `<div class="igs-mood-group" data-mood-group="${esc(label)}">`
             + `<div class="igs-btn-mgr-row">`
@@ -23524,10 +24177,18 @@ function renderMoodGroupList(groups, options = {}) {
             + `<button type="button" class="igs-btn-mgr-icon" data-action="${toggle}" title="${open ? '收起' : '展开这个组里的词'}" aria-expanded="${open}">${open ? chevronUp : chevronDown}</button>`
             + `</div>${wordsHtml}</div>`;
     }).join('');
+    // 旧版默认只有 8 组；表情差分按 20 档预设画，缺的组在这里提示并可一键补上（已有的组不重置）。
+    const have = new Set(list.map((group) => String(group.label || '').trim()));
+    const missing = MOOD_PRESET.map((entry) => entry.label).filter((label) => !have.has(label));
+    const missingHtml = missing.length
+        ? `<div class="igs-source-filter-note igs-mood-missing">表情差分最多画 20 种表情，这里还缺 ${missing.length} 组：${esc(missing.join('、'))}。缺的组在正文里认不出来，画了也用不上。`
+            + `<button type="button" class="igs-review-link" data-action="mood-fill-presets">补上缺的 ${missing.length} 组</button></div>`
+        : '';
     return `<div class="igs-mood-groups" data-mood-group-count="${list.length}">`
         + `<div class="igs-settings-section-head"><div class="igs-settings-subhead">情绪组 <span class="igs-mood-group-total">${list.length}</span></div>`
         + `<button type="button" class="igs-btn-mgr-icon" data-action="mood-add-group" title="新增情绪组" aria-label="新增情绪组">+</button></div>`
         + `<div class="igs-source-filter-note">组名对应表情槽，组里的词是正文里的叫法。</div>`
+        + missingHtml
         + `<div class="igs-btn-mgr-list">${rows || '<div class="igs-scene-empty">还没有情绪组</div>'}</div>`
         + `</div>`;
 }
@@ -23721,6 +24382,7 @@ __igsDefine(exports, "renderCharacterAssetList", () => renderCharacterAssetList)
 __igsDefine(exports, "renderCharacterDnaEditor", () => renderCharacterDnaEditor);
 __igsDefine(exports, "renderDnaCandidateBar", () => renderDnaCandidateBar);
 __igsDefine(exports, "renderDnaOnlyCharacterList", () => renderDnaOnlyCharacterList);
+__igsDefine(exports, "renderWorldSummarySection", () => renderWorldSummarySection);
 __igsDefine(exports, "renderMoodGroupList", () => renderMoodGroupList);
 __igsDefine(exports, "renderMoodReviewList", () => renderMoodReviewList);
 __igsDefine(exports, "renderPinnedButtons", () => renderPinnedButtons);
@@ -28436,9 +29098,14 @@ function detectVoiceGender(text) {
 
 // 按主名查 DNA 判断性别（声线和立绘默认高度共用）；没有 DNA 或看不出时返回 ''。
 function characterDnaGender(sceneAssets, name) {
+    return detectVoiceGender(characterDnaText(sceneAssets, name));
+}
+
+// 主名 DNA 里描述角色本身的文字（触发词、固定身份、默认外观；不含负面词）；没有 DNA 时为 ''。
+function characterDnaText(sceneAssets, name) {
     const dnaMap = plainObject(sceneAssets && sceneAssets.characterDna) || {};
     const dna = name && hasOwn(dnaMap, name) ? plainObject(dnaMap[name]) : null;
-    return dna ? detectVoiceGender(`${dna.triggerWords || ''}\n${dna.identity || ''}\n${dna.defaultAppearance || ''}`) : '';
+    return dna ? `${dna.triggerWords || ''}\n${dna.identity || ''}\n${dna.defaultAppearance || ''}` : '';
 }
 
 function hashName(name) {
@@ -28750,6 +29417,7 @@ __igsDefine(exports, "normalizeCharacterVoices", () => normalizeCharacterVoices)
 __igsDefine(exports, "canonicalName", () => canonicalName);
 __igsDefine(exports, "detectVoiceGender", () => detectVoiceGender);
 __igsDefine(exports, "characterDnaGender", () => characterDnaGender);
+__igsDefine(exports, "characterDnaText", () => characterDnaText);
 __igsDefine(exports, "resolveCharacterVoice", () => resolveCharacterVoice);
 __igsDefine(exports, "resolveBarkMood", () => resolveBarkMood);
 __igsDefine(exports, "pickBarkClip", () => pickBarkClip);
@@ -31143,6 +31811,8 @@ const { normalizeRenderQualitySetting } = require("src/visual/igs-ui/render-qual
 const { spriteIdentity } = require("src/scene/character-outfits.js");
 const { normalizeImageCacheCount } = require("src/media/tavern-image-cache.js");
 const { normalizeStatusHudPercent } = require("src/data/shujuku/status-hud-model.js");
+const { SPRITE_BACKGROUND_MODES } = require("src/generated-images/illustration/auto-illustration-settings.js");
+const { CONTEXT_BUDGETS } = require("src/generated-images/illustration/planner-context.js");
 function normalizeReaderMode(mode, bridge) {
     if (mode === 'default') return 'default';
     const resolved = resolveLegacyReaderMode(mode, '', bridge || {});
@@ -31207,6 +31877,8 @@ function normalizeSettingsValue(path, value) {
         if (path === 'readerSettings.spriteGenderScale.enabled') return value === true || value === 'true' || value === 1 || value === '1';
         const genderHeight = path.match(/^readerSettings\.spriteGenderScale\.(female|male|other)$/);
         if (genderHeight) return normalizeSpriteHeight(value, SPRITE_GENDER_SCALE_DEFAULTS[genderHeight[1]]);
+        const ageShorter = path.match(/^readerSettings\.spriteGenderScale\.(elderShorter|childShorter)$/);
+        if (ageShorter) return normalizeSpriteShorter(value, SPRITE_GENDER_SCALE_DEFAULTS[ageShorter[1]]);
         if (path === 'readerSettings.spriteDisplayScale') return normalizeSpriteDisplayScale(value);
         if (path === 'readerSettings.dialogTextEffectStrength') return Math.max(5, Math.min(50, Number(value) || 20));
         if (path === 'readerSettings.dialogTextEffectSize') return [0.4, 0.6, 0.8, 1, 1.2, 1.6, 2].includes(Number(value)) ? Number(value) : 0.8;
@@ -31232,12 +31904,14 @@ function normalizeSettingsValue(path, value) {
     if (/^bridge\.autoIllustration\.(nsfwEnabled|interludeEnabled|assets\.(spriteEnabled|backgroundEnabled|strictMatch))$/.test(path)) {
         return value === true || value === 'true' || value === 1 || value === '1';
     }
+    if (path === 'bridge.autoIllustration.assets.spriteBackground') return SPRITE_BACKGROUND_MODES.includes(value) ? value : 'auto';
     if (/^bridge\.autoIllustration\.assets\.(spriteSize|backgroundSize|templates\.(background|backgroundNegative|sprite|spriteNegative|nsfwExtra))$/.test(path)) {
         return String(value || '');
     }
     if (/^bridge\.autoIllustration\.(nsfwCount|interludeProbability|interludeMaxCount|assets\.maxPerFloor|llm\.contextFloors|llm\.timeoutMs|nai\.steps|nai\.scale|nai\.timeoutMs)$/.test(path)) {
         return Number(value);
     }
+    if (path === 'bridge.autoIllustration.llm.contextBudget') return Object.keys(CONTEXT_BUDGETS).includes(value) ? value : 'standard';
     if (path === 'bridge.autoIllustration.llm.source' || path === 'bridge.autoIllustration.nai.transport') {
         return String(value || '');
     }
@@ -31345,7 +32019,9 @@ function normalizeSpriteDefaultScale(value) {
 
 // 设置里能填的立绘高度（基准高度、性别默认、角色自定义），单位是舞台高度百分比。
 const SPRITE_HEIGHT_RANGE = Object.freeze([60, 150]);
-const SPRITE_GENDER_SCALE_DEFAULTS = Object.freeze({ enabled: false, female: 90, male: 100, other: 95 });
+// elderShorter / childShorter：老人、儿童比同性别默认高度矮多少（百分点）。
+const SPRITE_GENDER_SCALE_DEFAULTS = Object.freeze({ enabled: false, female: 90, male: 100, other: 95, elderShorter: 5, childShorter: 20 });
+const SPRITE_SHORTER_RANGE = Object.freeze([0, 60]);
 
 // 留空或不是数字时用 fallback；超出范围夹到两端并取整。
 function normalizeSpriteHeight(value, fallback = null) {
@@ -31353,6 +32029,12 @@ function normalizeSpriteHeight(value, fallback = null) {
     const n = Number(value);
     if (!Number.isFinite(n)) return fallback;
     return Math.round(Math.max(SPRITE_HEIGHT_RANGE[0], Math.min(SPRITE_HEIGHT_RANGE[1], n)));
+}
+function normalizeSpriteShorter(value, fallback = 0) {
+    if (value == null || String(value).trim() === '') return fallback;
+    const n = Number(value);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.round(Math.max(SPRITE_SHORTER_RANGE[0], Math.min(SPRITE_SHORTER_RANGE[1], n)));
 }
 function normalizeSpriteGenderScale(value) {
     const src = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
@@ -31362,6 +32044,8 @@ function normalizeSpriteGenderScale(value) {
         female: normalizeSpriteHeight(src.female, defaults.female),
         male: normalizeSpriteHeight(src.male, defaults.male),
         other: normalizeSpriteHeight(src.other, defaults.other),
+        elderShorter: normalizeSpriteShorter(src.elderShorter, defaults.elderShorter),
+        childShorter: normalizeSpriteShorter(src.childShorter, defaults.childShorter),
     };
 }
 
@@ -31483,6 +32167,7 @@ __igsDefine(exports, "normalizeBtnOrder", () => normalizeBtnOrder);
 __igsDefine(exports, "normalizeSpriteLayouts", () => normalizeSpriteLayouts);
 __igsDefine(exports, "normalizeSpriteDefaultScale", () => normalizeSpriteDefaultScale);
 __igsDefine(exports, "normalizeSpriteHeight", () => normalizeSpriteHeight);
+__igsDefine(exports, "normalizeSpriteShorter", () => normalizeSpriteShorter);
 __igsDefine(exports, "normalizeSpriteGenderScale", () => normalizeSpriteGenderScale);
 __igsDefine(exports, "normalizeSpriteDisplayScale", () => normalizeSpriteDisplayScale);
 __igsDefine(exports, "applySpriteDisplayScale", () => applySpriteDisplayScale);
@@ -31491,6 +32176,7 @@ __igsDefine(exports, "resolveSpriteLayout", () => resolveSpriteLayout);
 __igsDefine(exports, "resolveActiveTheme", () => resolveActiveTheme);
 __igsDefine(exports, "renderDialogueHtml", () => renderDialogueHtml);
 __igsDefine(exports, "SPRITE_HEIGHT_RANGE", () => SPRITE_HEIGHT_RANGE);
+__igsDefine(exports, "SPRITE_SHORTER_RANGE", () => SPRITE_SHORTER_RANGE);
 });
 __igsRegister("src/visual/igs-ui/settings-tabs.js", function(module, exports, require) {
 const BASIC_TAB_TEMPLATE = `
@@ -31600,6 +32286,11 @@ const IMAGE_SOURCE_TEMPLATE = `
     <div class="igs-settings-row"><button class="igs-settings-action" data-action="test-image" type="button">{{imageTestActionLabel}}</button><button class="igs-settings-action" data-action="open-dbgen-settings" type="button"{{sourceDbgenHidden}}>插件设置</button></div>
     <div class="igs-settings-result" data-result="image">{{imageTestHelp}}</div>
   </div>
+  <div class="igs-source-filter" data-image-feature="sprite-background">
+    <div class="igs-source-filter-title">立绘底色<span class="igs-outfit-muted">立绘、表情差分与衣柜参考图</span></div>
+    {{spriteBackgroundField}}
+    <div class="igs-source-filter-note">{{spriteBackgroundNote}}</div>
+  </div>
 </div>
 `.trim();
 
@@ -31610,7 +32301,7 @@ const IMAGE_LLM_TEMPLATE = `
     <div class="igs-source-filter-note">{{autoLlmNote}}</div>
     <div class="igs-source-filter-note" data-image-feature="llm-warn"{{autoLlmWarnHidden}}>{{autoLlmWarn}}</div>
     <div class="igs-source-filter-grid">
-      {{autoLlmSourceField}}{{autoLlmContextField}}
+      {{autoLlmSourceField}}{{autoLlmContextField}}{{autoLlmContextBudgetField}}
     </div>
     <div class="igs-settings-sub"{{autoLlmApiHidden}}>
       <div class="igs-source-filter-grid">
@@ -31837,6 +32528,10 @@ const SCENE_RULES_TEMPLATE = `
     <div class="igs-settings-result" data-result="prompt-rule">{{promptRuleStatus}}</div>
     {{promptRuleOutfitHint}}
     {{promptAdvanced}}
+  </div>
+  <div class="igs-source-filter" data-world-section>
+    <div class="igs-source-filter-title">世界设定提要<span class="igs-outfit-muted">生图用</span></div>
+    {{worldSection}}
   </div>
   <div class="igs-source-filter" data-wardrobe-section>
     <div class="igs-source-filter-title">衣柜提示词<span class="igs-outfit-muted">生图用</span><button class="igs-btn-mgr-icon igs-title-add" data-action="wardrobe-add" type="button" title="添加一条衣柜提示词" aria-label="添加一条衣柜提示词">+</button></div>
@@ -33617,11 +34312,28 @@ const __igsReExportSource1 = require("src/data/shujuku/table-parser.js");
 __igsReExport(exports, __igsReExportSource1, [["parseTables","parseTables"]]);
 });
 __igsRegister("src/visual/igs-ui/sprite-height.js", function(module, exports, require) {
-// 立绘默认高度：没被「调整立绘」单独调过的立绘，先看角色自定义高度，再看性别默认高度（开关打开时按 DNA 判断），最后是立绘基准高度。
-const { normalizeSpriteDefaultScale, normalizeSpriteGenderScale, normalizeSpriteHeight } = require("src/visual/igs-ui/settings-normalize.js");
-const { canonicalName, characterDnaGender } = require("src/visual/igs-ui/voice-bark.js");
+// 立绘默认高度：没被「调整立绘」单独调过的立绘，先看角色自定义高度，再看性别默认高度（开关打开时按 DNA 判断；没有 DNA 时看生成立绘的 tag；老人、儿童在此基础上再矮一点），最后是立绘基准高度。
+const { SPRITE_HEIGHT_RANGE, normalizeSpriteDefaultScale, normalizeSpriteGenderScale, normalizeSpriteHeight } = require("src/visual/igs-ui/settings-normalize.js");
+const { canonicalName, characterDnaText, detectVoiceGender } = require("src/visual/igs-ui/voice-bark.js");
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const plain = (value) => (value && typeof value === 'object' && !Array.isArray(value) ? value : null);
+
+// 年龄只分老人、儿童两档。先认明写的岁数（60 岁以上 / 12 岁以下，写了成年岁数就不再看称呼），再认称呼与 tag；
+// 刻意不认单字「老」（老师、老板）、elder（elder sister）和爷爷奶奶这类亲属称呼，childhood friend 也不会误中 child。
+const AGE_NUMBER_RE = /(\d{1,3})\s*(?:岁|周岁|歳|years?\s*old)/i;
+const ELDER_RE = /\b(?:old (?:man|woman|lady)|elderly|grandpa|grandma)\b|老人|老者|老头|老太|老妇|老翁|老妪|老爷爷|老奶奶|老婆婆|老爷子|年迈|年老|垂暮|花甲|古稀|耄耋|白发苍苍/i;
+const CHILD_RE = /\b(?:child|kid|toddler|loli|shota|little (?:girl|boy))\b|儿童|小孩|孩童|幼童|幼女|幼儿|女童|男童|小女孩|小男孩|萝莉|正太|小学生/i;
+function detectSpriteAge(text) {
+    const value = String(text || '');
+    const number = value.match(AGE_NUMBER_RE);
+    if (number) {
+        const years = Number(number[1]);
+        return years >= 60 ? 'elder' : years <= 12 ? 'child' : '';
+    }
+    const elder = ELDER_RE.test(value);
+    const child = CHILD_RE.test(value);
+    return elder === child ? '' : elder ? 'elder' : 'child';
+}
 
 // 角色自定义高度和声线一样按主名记在根素材库：{ 角色名: 60~150 }，留空的角色不进表。
 function normalizeCharacterSpriteScales(value) {
@@ -33634,8 +34346,8 @@ function normalizeCharacterSpriteScales(value) {
     return out;
 }
 
-// 返回 { characterScale, defaultScale, source }：characterScale 只在角色自定义时有值，交给 resolveSpriteLayout 压过模式整体缩放；
-// source 为 manual / female / male / other / base，设置页据此显示「自动」用的是哪一档。
+// 返回 { characterScale, defaultScale, source, age? }：characterScale 只在角色自定义时有值，交给 resolveSpriteLayout 压过模式整体缩放；
+// source 为 manual / female / male / other / base，按性别取高度时另给 age（elder / child / ''），设置页据此显示「自动」用的是哪一档。
 function resolveSpriteBaseScale(sceneAssets, readerSettings, character) {
     const assets = plain(sceneAssets) || {};
     const reader = plain(readerSettings) || {};
@@ -33647,10 +34359,17 @@ function resolveSpriteBaseScale(sceneAssets, readerSettings, character) {
     if (manual != null) return { characterScale: manual, defaultScale: base, source: 'manual' };
     const genders = normalizeSpriteGenderScale(reader.spriteGenderScale);
     if (!genders.enabled) return { characterScale: null, defaultScale: base, source: 'base' };
-    const gender = characterDnaGender(assets, name) || 'other';
-    return { characterScale: null, defaultScale: genders[gender], source: gender };
+    // 有 DNA 先看 DNA；待确认 / 仅本聊天的生成立绘没有 DNA，用生成时的 tag（第一个是 1girl / 1boy，接着写外观年龄），由 reader-host 挂在 _tempSpriteTags。
+    const dnaText = characterDnaText(assets, name);
+    const tempTags = plain(reader._tempSpriteTags) || {};
+    const tagText = Object.hasOwn(tempTags, name) ? tempTags[name] : '';
+    const gender = detectVoiceGender(dnaText) || detectVoiceGender(tagText) || 'other';
+    const age = detectSpriteAge(dnaText) || detectSpriteAge(tagText);
+    const shorter = age === 'elder' ? genders.elderShorter : age === 'child' ? genders.childShorter : 0;
+    return { characterScale: null, defaultScale: Math.max(SPRITE_HEIGHT_RANGE[0], genders[gender] - shorter), source: gender, age };
 }
 
+__igsDefine(exports, "detectSpriteAge", () => detectSpriteAge);
 __igsDefine(exports, "normalizeCharacterSpriteScales", () => normalizeCharacterSpriteScales);
 __igsDefine(exports, "resolveSpriteBaseScale", () => resolveSpriteBaseScale);
 });
@@ -33942,6 +34661,8 @@ const { collectAssetZipEntries } = require("src/scene/asset-zip.js");
 const { assetOwnerKey, draftAssetLibrary, draftEffectiveAssets, effectiveSceneAssets, ensureCardLibrary, libraryHasContent, moveLibraryEntry, rememberAssetScope, sceneAssetsForContext } = require("src/scene/asset-scope.js");
 const { buildCharacterCardPack, buildImageZip, buildPresetArchive, mergeLabelGroups, parseCharacterCardPack, parsePresetArchive, parseSettingsArchive, spriteEntriesForNames } = require("src/scene/card-pack.js");
 const { getSillyTavernContext } = require("src/host/tavern-helper-adapter.js");
+const { collectCharacterSources, formatCharacterSources, pickCharacterSources, pickChatMentions, readSourceMaterial } = require("src/host/character-sources.js");
+const { extractWorldSummary, prepareWorldContext } = require("src/visual/igs-ui/world-context.js");
 const { localImageCacheFor } = require("src/media/tavern-image-cache.js");
 const { createIndexedDbAssetThumbStore } = require("src/media/asset-thumb-store.js");
 const { buildPageDiagnostic } = require("src/visual/igs-ui/page-diagnostic.js");
@@ -33962,7 +34683,7 @@ const { ROMANCE_ACTIONS_MAX, normalizeRomanceFxSettings } = require("src/visual/
 const { META_GLOBAL_SCOPE, META_LINE_KINDS, META_LINES_MAX, normalizeMetaFxSettings } = require("src/visual/igs-ui/meta-settings.js");
 const { applyPerformancePreset, capturePerformancePreset, detectPerformancePreset, performancePresetLabel, restorePerformancePreset } = require("src/visual/igs-ui/performance-presets.js");
 const { applyPerformanceProfile, hasPerformanceProfile, profileDiff, profileFromReader } = require("src/visual/igs-ui/performance-profile.js");
-const { WORLDVIEWS, applyWorldview, resolveWorldview } = require("src/scene/worldview.js");
+const { WORLDVIEWS, applyWorldview, resolveWorldview, worldContextOf } = require("src/scene/worldview.js");
 const { normalizeHorrorGore, normalizeHorrorStyle } = require("src/scene/horror.js");
 const { BGM_ACTION_RE, handleBgmSettingsAction } = require("src/visual/igs-ui/bgm-settings-actions.js");
 const { deleteTavernFont, loadCustomFonts, pickFontFile, saveCustomFonts, uploadFontFile } = require("src/media/custom-fonts.js");
@@ -34019,7 +34740,7 @@ function assetFolderScope(settingsState, options) {
 
 const CHARACTER_FIELDS = ['characters', 'characterOutfits', 'characterDna', 'characterAliases', 'statusAvatars'];
 const SCENE_ACTION = /^scene-(?:(?:add|remove|rename|set|toggle|pick)-(?:bg|bg-word|bg-url|time|time-url|weather|weather-url)|variant-(?:set|retry))$/;
-const CHARACTER_ACTION = /^(?:scene-(?:add|remove|rename|set|toggle|pick)-(?:char|char-alias|mood|mood-url|dna-char|outfit-mood)|status-avatar-(?:pick|clear|set-url|generate)|char-generate-sprite|outfit-generate-nude|char-expression-(?:prompt|set|retry|resume)|outfit-expression-(?:prompt|set|retry|resume))$/;
+const CHARACTER_ACTION = /^(?:scene-(?:add|remove|rename|set|toggle|pick)-(?:char|char-alias|mood|mood-url|dna-char|outfit-mood)|status-avatar-(?:pick|clear|set-url|generate)|char-generate-sprite|char-persona-extract|outfit-generate-nude|char-expression-(?:prompt|set|retry|resume)|outfit-expression-(?:prompt|set|retry|resume)|sprite-clear(?:-pick|-all|-apply)?)$/;
 
 // 服装的适用场景可能指向另一边的场景：场景改名、删除时全局和本卡的服装都要跟上。
 function linkedCharacterOutfits(settingsState) {
@@ -34124,6 +34845,48 @@ function characterExpressionDna(sceneAssets, name) {
     return hit ? hit.dna : null;
 }
 
+// 「性格与表情习惯」：从角色卡 / 世界书 / 数据库收集提到这个角色的资料，交给副 LLM 提炼。
+async function extractCharacterPersona({ service, globalObj, sceneAssets, name }) {
+    if (!service || typeof service.summarizeCharacterPersona !== 'function') return { ok: false, error: '当前不能提炼性格' };
+    const sources = await collectCharacterSources(globalObj, { name, aliases: characterAliasesOf(sceneAssets, name) });
+    const sourcesText = formatCharacterSources(sources);
+    if (!sourcesText) {
+        return { ok: false, error: `角色卡、世界书和数据库里都没找到「${name}」的资料${sources.notes.length ? `（${sources.notes.join('，')}）` : ''}` };
+    }
+    const written = await service.summarizeCharacterPersona({ name, sourcesText });
+    if (!written || !written.ok) return { ok: false, error: (written && written.error) || '提炼失败' };
+    if (written.insufficient) return { ok: false, error: `资料里看不出「${name}」的性格` };
+    return { ok: true, persona: written.persona };
+}
+
+// 画默认立绘、头像时给写词的角色资料节选：比提炼性格时短，只补 DNA 没写到的长相和穿着。
+// 「副 LLM → 读取上下文」加大了预算时，素材服务另在说明前附上全部设定资料和正文原文。
+const SPRITE_SOURCE_LIMITS = Object.freeze({ card: 2000, worldbook: 2500, entry: 1000, database: 800 });
+const characterAliasesOf = (sceneAssets, name) => (sceneAssets.characterAliases && Array.isArray(sceneAssets.characterAliases[name]) ? sceneAssets.characterAliases[name] : []);
+
+// 角色卡 / 世界书 / 数据库节选，加上正文里提到这个角色的段落（长相、穿着常写在剧情里）。
+function characterSourcesText(material, sceneAssets, name) {
+    const sources = pickCharacterSources(material, { name, aliases: characterAliasesOf(sceneAssets, name), limits: SPRITE_SOURCE_LIMITS });
+    const chat = pickChatMentions(material.chat, name);
+    return formatCharacterSources({ ...sources, chat: chat ? `【前文·提到「${name}」的段落】\n${chat}` : '' });
+}
+
+// 画默认立绘前读一次角色卡 / 世界书 / 数据库：世界背景（还没有世界设定提要就先提炼）和这个角色的资料节选；DNA 不动。
+async function spriteWritingBackground({ settingsState, service, globalObj, sceneAssets, name, onProgress, persist }) {
+    const material = await readSourceMaterial(globalObj);
+    const prepared = await prepareWorldContext({ settingsState, service, globalObj, material, onProgress, persist });
+    if (prepared.note) showGeneratedNotice(globalObj, prepared.note, prepared.tone);
+    return { world: prepared.world, sourcesText: characterSourcesText(material, sceneAssets, name) };
+}
+
+// 存进这个角色的 DNA（和 DNA 一起跟着角色走）；返回更新后的 DNA。
+function saveCharacterPersona(sceneAssets, name, persona) {
+    const map = sceneAssets.characterDna && typeof sceneAssets.characterDna === 'object' && !Array.isArray(sceneAssets.characterDna)
+        ? sceneAssets.characterDna : (sceneAssets.characterDna = {});
+    map[name] = normalizeCharacterDna({ ...normalizeCharacterDna(Object.hasOwn(map, name) ? map[name] : null), persona });
+    return map[name];
+}
+
 function expressionNoteKey(name, outfit) {
     return outfit ? `${name}\u0001${outfit}` : name;
 }
@@ -34179,6 +34942,8 @@ function settingsProgressHost(globalObj) {
 // 进度条写明在画谁：写词和出图分开说，一批多张带上第几张。
 function expressionProgressText(who, event) {
     if (event && event.phase === 'write') return `写提示词：${who}`;
+    if (event && event.phase === 'persona') return `提炼性格：${who}`;
+    if (event && event.phase === 'world') return `提炼世界设定：${who}`;
     const total = Number(event && event.total) || 0;
     if (total > 1) return `生图中：${who}·${event.mood || ''} ${Number(event.done) || 0}/${total}`;
     return `生图中：${who}`;
@@ -34232,13 +34997,13 @@ function generationFailure(globalObj, dialogs, message, reason) {
 }
 
 // 已有提示词的先补画，不重写；剩下没有词的再写再画。补画中途停下就不再写。
-async function paintThenWriteExpressions({ service, name, paintItems, writeLabels, basePrompt, dna, outfit, note, nsfw, onProgress, signal }) {
+async function paintThenWriteExpressions({ service, name, paintItems, writeLabels, basePrompt, dna, outfit, note, nsfw, world = null, onProgress, signal }) {
     const paint = paintItems.length && typeof service.paintExpressionCaptions === 'function'
         ? await service.paintExpressionCaptions({ name, items: paintItems, basePrompt, dna, outfit, nsfw, onProgress, signal })
         : null;
     if (paint && !paint.ok) return paint;
     if (paint && (paint.stopped || (signal && signal.aborted))) return paint;
-    const written = await service.generateExpressionSet({ name, basePrompt, moods: writeLabels, dna, outfit, note, nsfw, onProgress, signal });
+    const written = await service.generateExpressionSet({ name, basePrompt, moods: writeLabels, dna, outfit, note, nsfw, world, onProgress, signal });
     if (!paint) return written;
     const paintedItems = paint.items || [];
     const wroteItems = written && written.items;
@@ -34459,15 +35224,57 @@ function applyMoodPreset(groups) {
     for (const group of custom) {
         for (const word of Array.isArray(group.words) ? group.words : []) customWords.add(String(word || '').trim());
     }
+    // 套用预设只重置词；各组改过的表情 tag 和「固定加上」开关保留。
+    const tagSettings = (label) => {
+        const old = groups.find((group) => group && String(group.label || '').trim() === label) || {};
+        return { ...(old.tags && { tags: old.tags }), ...(old.alwaysTags === true && { alwaysTags: true }) };
+    };
     const built = MOOD_PRESET.map((entry) => ({
         label: entry.label,
         words: entry.words.filter((word) => !customWords.has(word)),
+        ...tagSettings(entry.label),
     }));
-    const next = [...built, ...custom.map((group) => ({ label: String(group.label).trim(), words: (group.words || []).slice() }))];
+    const next = [...built, ...custom.map((group) => ({ label: String(group.label).trim(), words: (group.words || []).slice(), ...tagSettings(String(group.label).trim()) }))];
     const before = JSON.stringify(groups.map((group) => ({ label: group.label, words: group.words })));
     const after = JSON.stringify(next.map((group) => ({ label: group.label, words: group.words })));
     groups.splice(0, groups.length, ...next);
     return before !== after;
+}
+
+// 补上缺的预设组：旧版默认只有 8 组，表情差分却按 20 档预设画；正文里写「委屈」「哭泣」时找不到组，那几张立绘永远用不上。
+// 只加还没有的预设组（带预设词），已有的组不重置。新组的组名和预设词如果在别的预设组里，挪到新组
+// （不挪的话正文里的这个词还是先归到旧组）；用户自建组里的词不动，新组就不带这些词。返回 { added, moved }。
+function planMissingMoodPresets(groups) {
+    const list = Array.isArray(groups) ? groups : [];
+    const have = new Set(list.map((group) => String(group && group.label || '').trim()));
+    const presetLabels = new Set(MOOD_PRESET.map((entry) => entry.label));
+    const missing = MOOD_PRESET.filter((entry) => !have.has(entry.label));
+    const customWords = new Set(list
+        .filter((group) => group && !presetLabels.has(String(group.label || '').trim()))
+        .flatMap((group) => (Array.isArray(group.words) ? group.words : []).map((word) => String(word || '').trim())));
+    const added = missing.map((entry) => ({ label: entry.label, words: entry.words.filter((word) => !customWords.has(word)) }));
+    const moved = [];
+    for (const entry of added) {
+        const words = new Set([entry.label, ...entry.words]);
+        for (const group of list) {
+            const label = String(group && group.label || '').trim();
+            if (!presetLabels.has(label)) continue;
+            for (const word of Array.isArray(group.words) ? group.words : []) {
+                if (words.has(String(word || '').trim())) moved.push({ word: String(word).trim(), from: label, to: entry.label });
+            }
+        }
+    }
+    return { added, moved };
+}
+
+function applyMissingMoodPresets(groups, plan) {
+    for (const { word, from, to } of plan.moved) {
+        const group = groups.find((item) => item && String(item.label || '').trim() === from);
+        if (group && Array.isArray(group.words)) group.words = group.words.filter((item) => String(item || '').trim() !== word);
+        const target = plan.added.find((item) => item.label === to);
+        if (target && word !== to && !target.words.includes(word)) target.words.push(word);
+    }
+    groups.push(...plan.added.map((item) => ({ label: item.label, words: item.words.slice() })));
 }
 
 function generatedOperationFailure(dialogs, globalObj, message, reason) {
@@ -34736,6 +35543,53 @@ async function handleSettingsAction(action, ctx) {
             if (result && result.ok === false) return result;
         }
         asyncState.assetSelect = null;
+        return rerenderSettings();
+    }
+    // 清空一套服装（原装 outfit 为空）下选中的立绘：只清图和这格存下的写词注记，情绪格留着，之后可以重新生成。
+    // 多选只记在界面状态里（asyncState.spriteClear），清空时才改草稿并保存。
+    const clearMatch = /^sprite-clear(?:-(pick|all|apply))?:([^:]*):([^:]*)(?::(.*))?$/.exec(normalizedAction);
+    if (clearMatch) {
+        const [, op = 'toggle', c, o, m = ''] = clearMatch;
+        const character = decodeSeg(c);
+        const outfit = decodeSeg(o);
+        const asyncState = settingsState.asyncState;
+        const cur = asyncState.spriteClear && asyncState.spriteClear.character === character && asyncState.spriteClear.outfit === outfit
+            ? asyncState.spriteClear : null;
+        const liveAssets = draftAssetLibrary(settingsState, editTarget);
+        const outfitEntry = outfit ? ((liveAssets.characterOutfits || {})[character] || {})[outfit] : null;
+        const slots = outfit
+            ? (outfitEntry && outfitEntry.moods && typeof outfitEntry.moods === 'object' ? outfitEntry.moods : {})
+            : ((liveAssets.characters || {})[character] || {});
+        const filled = Object.keys(slots).filter((mood) => String(slots[mood] || '').trim());
+        if (op === 'toggle') {
+            asyncState.spriteClear = cur ? null : { character, outfit, moods: new Set() };
+            return rerenderSettings();
+        }
+        if (!cur) return rerenderSettings();
+        if (op === 'pick') {
+            const mood = decodeSeg(m);
+            if (cur.moods.has(mood)) cur.moods.delete(mood); else cur.moods.add(mood);
+            return rerenderSettings();
+        }
+        if (op === 'all') {
+            cur.moods = cur.moods.size === filled.length ? new Set() : new Set(filled);
+            return rerenderSettings();
+        }
+        const moods = [...cur.moods].filter((mood) => filled.includes(mood));
+        if (!moods.length) return rerenderSettings();
+        const where = `「${character}」${outfit ? `「${outfit}」` : '原装'}`;
+        const preview = moods.slice(0, 6).map((mood) => `「${mood}」`).join('') + (moods.length > 6 ? ` 等 ${moods.length} 张` : '');
+        if (typeof dialogs.confirm === 'function' && !(await dialogs.confirm(`清空${where}的 ${preview}立绘？情绪格会留着，可以重新生成；这几格存下的提示词也一起清掉。`))) return rerenderSettings();
+        let library = normalizeGeneratedLibrary(liveAssets.generated);
+        const noteKey = expressionNoteKey(character, outfit);
+        for (const mood of moods) {
+            slots[mood] = '';
+            library = clearExpressionNote(library, noteKey, mood);
+        }
+        liveAssets.generated = library;
+        asyncState.spriteClear = null;
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
         return rerenderSettings();
     }
     if (normalizedAction.startsWith('asset-filter:')) {
@@ -35307,8 +36161,11 @@ async function handleSettingsAction(action, ctx) {
             progress.end();
             return generationFailure(globalObj, dialogs, `「${name}」的默认立绘未能生成：${errorText(error, '未返回原因')}${current ? '\n原有图片保持不变。' : ''}`, 'sprite-generate-failed');
         };
+        // 拿已有词重画不写词，不用先读资料。
+        const background = redrawCaption ? {} : await spriteWritingBackground({ settingsState, service, globalObj, sceneAssets, name, onProgress: progress.onProgress, persist: persistSettingsDraft });
+        progress.onProgress({ phase: redrawCaption ? 'paint' : 'write' });
         try {
-            result = await service.generateCharacterSprite({ name, dna, note: spriteNote, caption: redrawCaption, exact: redrawExact, onProgress: progress.onProgress });
+            result = await service.generateCharacterSprite({ name, dna, note: spriteNote, caption: redrawCaption, exact: redrawExact, ...background, onProgress: progress.onProgress });
         } catch (error) {
             return failed(error);
         }
@@ -35365,8 +36222,9 @@ async function handleSettingsAction(action, ctx) {
             restoreBusy();
             return generationFailure(globalObj, dialogs, `「${name}」的「${outfitName}」裸体立绘未能生成：${errorText(error, '未返回原因')}${current ? '\n原有图片保持不变。' : ''}`, 'sprite-generate-failed');
         };
+        const background = await spriteWritingBackground({ settingsState, service, globalObj, sceneAssets, name, onProgress: progress.onProgress, persist: persistSettingsDraft });
         try {
-            result = await service.generateCharacterSprite({ name, dna, nude: true, onProgress: progress.onProgress });
+            result = await service.generateCharacterSprite({ name, dna, nude: true, ...background, onProgress: progress.onProgress });
         } catch (error) {
             return failed(error);
         }
@@ -35391,6 +36249,28 @@ async function handleSettingsAction(action, ctx) {
         restoreBusy();
         showGeneratedNotice(globalObj, `「${name}」的「${outfitName}」裸体立绘已更新。`, 'info');
         return rendered;
+    }
+
+    // 角色设定里的「从资料提炼」：手动（重新）提炼性格与表情习惯，已有内容先问一句再覆盖。
+    if (normalizedAction.startsWith('char-persona-extract:')) {
+        const name = decodeSeg(normalizedAction.slice('char-persona-extract:'.length));
+        if (!name || ['__proto__', 'constructor', 'prototype'].includes(name)) return { ok: false, error: '角色名无效' };
+        const globalObj = options.global || globalThis;
+        const sceneAssets = draftAssetLibrary(settingsState, editTarget);
+        const existing = characterExpressionDna(sceneAssets, name);
+        if (existing && existing.persona && !(await dialogs.confirm(`「${name}」已经有性格与表情习惯，重新提炼会覆盖现在的内容。继续吗？`))) return rerenderSettings();
+        const task = beginSettingsProgress(() => settingsProgressHost(globalObj), `提炼性格：${name}`);
+        let extracted;
+        try {
+            extracted = await extractCharacterPersona({ service: options.generatedAssets, globalObj, sceneAssets, name });
+        } finally {
+            task.end();
+        }
+        if (!extracted.ok) return generationFailure(globalObj, dialogs, `没能提炼「${name}」的性格：${extracted.error}`, 'persona-extract-failed');
+        saveCharacterPersona(sceneAssets, name, extracted.persona);
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
     }
 
     if (/^(?:char|outfit)-expression-(?:set|retry|resume):/.test(normalizedAction)) {
@@ -35475,7 +36355,7 @@ async function handleSettingsAction(action, ctx) {
             }
             if (!savedCaption && note && note.caption) savedCaption = note.caption;
         }
-        const dna = characterExpressionDna(sceneAssets, name);
+        let dna = characterExpressionDna(sceneAssets, name);
         const nude = outfitMode && isBuiltinNudeOutfit(outfitEntry.wardrobe);
         const clothes = outfitMode && !nude ? resolveWardrobePrompt(draftEffectiveAssets(settingsState).wardrobe || {}, outfitEntry, outfitName) : null;
         const outfit = outfitMode ? { name: outfitName, words: nude ? [] : outfitEntry.words, ownImage: Boolean(ownUrl), prompt: nude ? '' : (clothes ? clothes.prompt : ''), nude, nsfwBoost: Boolean(!nude && clothes && clothes.nsfwBoost) } : null;
@@ -35537,6 +36417,25 @@ async function handleSettingsAction(action, ctx) {
         let result;
         if (!progress) progress = startExpressionProgress(globalObj, subject);
         const onProgress = progress.onProgress;
+        // 要写新词、角色还没有「性格与表情习惯」时，先从角色卡 / 世界书 / 数据库提炼一段存起来；提炼失败不挡生成。
+        if (!resume && (retry ? !savedCaption : writeLabels.length > 0) && !(dna && dna.persona)) {
+            onProgress({ phase: 'persona' });
+            const extracted = await extractCharacterPersona({ service, globalObj, sceneAssets, name });
+            if (extracted.ok) {
+                dna = saveCharacterPersona(sceneAssets, name, extracted.persona);
+                persistSettingsDraft();
+                showGeneratedNotice(globalObj, `已为「${name}」提炼性格与表情习惯，写表情时会参考；可在角色设定里查看和修改。`, 'info');
+            } else {
+                showGeneratedNotice(globalObj, `没能提炼「${name}」的性格：${extracted.error}。这次按默认写法写表情。`);
+            }
+        }
+        // 世界背景：要写新词时还没有世界设定提要就先提炼；只补画存好的词时直接用现有的。
+        let world = worldContextOf(draftEffectiveAssets(settingsState));
+        if (!resume && (retry ? !savedCaption : writeLabels.length > 0)) {
+            const prepared = await prepareWorldContext({ settingsState, service, globalObj, onProgress, persist: persistSettingsDraft });
+            world = prepared.world;
+            if (prepared.note) showGeneratedNotice(globalObj, prepared.note, prepared.tone);
+        }
         // 单张重画的按钮由宿主按 settingsBusyLabel 锁住，这里只锁整套差分的按钮。
         const restoreBusy = retry ? () => {} : markExpressionActionBusy(globalObj, normalizedAction, '生图中');
         // 单张重画不接停止键：只有一张，按了也停不下来，别把「表情差分」按钮变成摆设。
@@ -35555,11 +36454,11 @@ async function handleSettingsAction(action, ctx) {
             result = resume || paintOnly
                 ? await service.paintExpressionCaptions({ name, items: resumeItems, basePrompt, dna, outfit, nsfw, onProgress, signal: stopControl.signal })
                 : retry && savedCaption && typeof service.generateExpressionImage === 'function'
-                ? await service.generateExpressionImage({ name, mood, caption: savedCaption, exact: savedExact, basePrompt, dna, outfit, nsfw, onProgress, signal: stopControl.signal })
+                ? await service.generateExpressionImage({ name, mood, caption: savedCaption, exact: savedExact, basePrompt, dna, outfit, nsfw, world, onProgress, signal: stopControl.signal })
                 : retry
-                    ? await service.generateExpressionImage({ name, mood, basePrompt, dna, outfit, nsfw, onProgress, signal: stopControl.signal })
+                    ? await service.generateExpressionImage({ name, mood, basePrompt, dna, outfit, nsfw, world, onProgress, signal: stopControl.signal })
                     : await paintThenWriteExpressions({
-                        service, name, paintItems, writeLabels, basePrompt, dna, outfit, note: moodNote, nsfw, onProgress, signal: stopControl.signal,
+                        service, name, paintItems, writeLabels, basePrompt, dna, outfit, note: moodNote, nsfw, world, onProgress, signal: stopControl.signal,
                     });
         } catch (error) {
             stopControl.done();
@@ -35865,6 +36764,24 @@ async function handleSettingsAction(action, ctx) {
         return rerenderSettings();
     }
 
+    // 「场景 → 规则」的世界设定提要：从角色卡场景栏和世界书常驻条目（重新）提炼，已有内容先问一句再覆盖。
+    if (normalizedAction === 'world-summary-extract') {
+        const globalObj = options.global || globalThis;
+        if (worldContextOf(draftEffectiveAssets(settingsState)).summary
+            && !(await dialogs.confirm('已经有世界设定提要，重新提炼会覆盖现在的内容。继续吗？'))) return rerenderSettings();
+        const task = beginSettingsProgress(() => settingsProgressHost(globalObj), '提炼世界设定');
+        let extracted;
+        try {
+            extracted = await extractWorldSummary({ settingsState, service: options.generatedAssets, globalObj });
+        } finally {
+            task.end();
+        }
+        if (!extracted.ok) return generationFailure(globalObj, dialogs, `没能提炼世界设定提要：${extracted.error}`, 'world-summary-failed');
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
     const worldviewAction = normalizedAction.match(/^worldview:([a-z-]+)$/);
     if (worldviewAction) {
         const bridgeDraft = settingsState.draft.bridge = settingsState.draft.bridge || {};
@@ -36165,7 +37082,9 @@ async function handleSettingsAction(action, ctx) {
         let result;
         const progress = startExpressionProgress(globalObj, `${charName}·Q版头像`);
         try {
-            result = await service.generateCharacterAvatar({ name: charName, dna: characterExpressionDna(sceneAssets, charName), onProgress: progress.onProgress });
+            // 头像只带现有的世界背景，不为它单独提炼世界设定；角色资料照默认立绘那样附上，DNA 空着时发色瞳色不靠猜。
+            const sourcesText = characterSourcesText(await readSourceMaterial(globalObj), sceneAssets, charName);
+            result = await service.generateCharacterAvatar({ name: charName, dna: characterExpressionDna(sceneAssets, charName), world: worldContextOf(draftEffectiveAssets(settingsState)), sourcesText, onProgress: progress.onProgress });
         } catch (error) {
             result = { ok: false, error: errorText(error, '') };
         }
@@ -37363,6 +38282,21 @@ async function handleSettingsAction(action, ctx) {
         return rerenderSettings();
     }
 
+    if (normalizedAction === 'mood-fill-presets') {
+        const groups = ensureMoodGroups(settingsState);
+        const plan = planMissingMoodPresets(groups);
+        if (!plan.added.length) return rerenderSettings();
+        const movedText = plan.moved.length
+            ? `\n这些词会从原来的组挪到新组（不挪的话正文里写这个词还是先归到旧组）：${plan.moved.map((item) => `「${item.word}」${item.from}→${item.to}`).join('、')}。`
+            : '';
+        const message = `补上 ${plan.added.length} 个预设情绪组：${plan.added.map((item) => item.label).join('、')}。\n已有的组和你加的词不重置。${movedText}`;
+        if (typeof dialogs.confirm === 'function' && !(await dialogs.confirm(message, { okLabel: '补上' }))) return rerenderSettings();
+        applyMissingMoodPresets(groups, plan);
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
     if (normalizedAction === 'mood-add-group') {
         const globalObj = options.global || globalThis;
         const groups = ensureMoodGroups(settingsState);
@@ -37424,6 +38358,25 @@ async function handleSettingsAction(action, ctx) {
             const persisted = persistSettingsDraft();
             if (persisted.ok === false) return persisted;
         }
+        return rerenderSettings();
+    }
+
+    // 情绪组的表情 tag：开关打开时表情差分出图总是放到最前，关着就不加；tag 清空回到预设。
+    if (normalizedAction.startsWith('mood-group-always:') || normalizedAction.startsWith('mood-group-tags:')) {
+        const always = normalizedAction.startsWith('mood-group-always:');
+        const [rawLabel, rawValue] = normalizedAction.slice(always ? 'mood-group-always:'.length : 'mood-group-tags:'.length).split(':');
+        const group = ensureMoodGroups(settingsState).find((g) => g.label === decodeSeg(rawLabel));
+        if (!group) return { ok: false, error: '找不到这个情绪组' };
+        if (always) {
+            if (group.alwaysTags === true) delete group.alwaysTags;
+            else group.alwaysTags = true;
+        } else {
+            const tags = decodeSeg(rawValue).replace(/\s+/g, ' ').trim();
+            if (tags) group.tags = tags;
+            else delete group.tags;
+        }
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
         return rerenderSettings();
     }
 
@@ -38492,6 +39445,7 @@ function ensureCharacterAliases(settingsState, editTarget) {
 }
 
 __igsDefine(exports, "assetEditTarget", () => assetEditTarget);
+__igsDefine(exports, "planMissingMoodPresets", () => planMissingMoodPresets);
 __igsDefine(exports, "unreferencedGeneratedImageIds", () => unreferencedGeneratedImageIds);
 __igsDefine(exports, "releasedGeneratedImageIds", () => releasedGeneratedImageIds);
 __igsDefine(exports, "sanitizeDownloadName", () => sanitizeDownloadName);
@@ -42350,10 +43304,17 @@ function spriteEntriesForNames(map, names, withMode) {
     }
     return out;
 }
+
+// 情绪组的表情 tag 设置（tags / alwaysTags）跟着组走：已有的组保留自己的，新加进来的组带上导入的。
+const groupTagSettings = (group) => ({
+    ...(typeof group.tags === 'string' && group.tags.trim() && { tags: group.tags.trim() }),
+    ...(group.alwaysTags === true && { alwaysTags: true }),
+});
 function mergeLabelGroups(current, incoming) {
     const base = (Array.isArray(current) ? current : []).map((group) => ({
         label: String(group && group.label || '').trim(),
         words: Array.isArray(group && group.words) ? group.words.map((word) => String(word || '').trim()).filter(Boolean) : [],
+        ...(group && groupTagSettings(group)),
     })).filter((group) => group.label);
     for (const group of Array.isArray(incoming) ? incoming : []) {
         const label = String(group && group.label || '').trim();
@@ -42361,7 +43322,7 @@ function mergeLabelGroups(current, incoming) {
         const words = Array.isArray(group.words) ? group.words.map((word) => String(word || '').trim()).filter(Boolean) : [];
         const found = base.find((item) => item.label === label);
         if (!found) {
-            base.push({ label, words: words.length ? words : [label] });
+            base.push({ label, words: words.length ? words : [label], ...groupTagSettings(group) });
             continue;
         }
         for (const word of words) {
@@ -42557,6 +43518,402 @@ __igsDefine(exports, "parsePresetArchive", () => parsePresetArchive);
 __igsDefine(exports, "buildSettingsArchive", () => buildSettingsArchive);
 __igsDefine(exports, "parseSettingsArchive", () => parseSettingsArchive);
 __igsDefine(exports, "buildImageZip", () => buildImageZip);
+});
+__igsRegister("src/host/character-sources.js", function(module, exports, require) {
+// 表情差分提炼「性格与表情习惯」用的原始资料：当前角色卡、角色卡与当前聊天绑定的世界书、数据库表格。
+// 只读；按主名和别名筛，限长。哪一处读不到就跳过并记在 notes 里，不影响其余来源。
+const { getSillyTavernContext, getTavernHelper } = require("src/host/tavern-helper-adapter.js");
+const { createShujukuClient } = require("src/data/shujuku/client.js");
+const { parseTables } = require("src/data/shujuku/table-parser.js");
+const CHARACTER_SOURCE_LIMITS = Object.freeze({ card: 3000, worldbook: 4000, entry: 1500, database: 1500 });
+
+const clip = (text, max) => {
+    const value = String(text || '').trim();
+    return value.length > max ? `${value.slice(0, max)}…` : value;
+};
+const mentions = (text, names) => names.some((name) => String(text || '').includes(name));
+
+function nameList(name, aliases) {
+    return [...new Set([name, ...(Array.isArray(aliases) ? aliases : [])].map((item) => String(item || '').trim()).filter(Boolean))];
+}
+
+const CARD_FIELD_LABELS = Object.freeze({ description: '描述', personality: '性格', scenario: '场景' });
+
+// 卡名就是这个角色时描述、性格整段保留；多角色卡只留提到他的段落（按空行分段）。
+// fields 换成描述、场景栏时用来找地点：地点名不会是卡名，只留提到它的段落。
+function pickCardText(card, names, limit = CHARACTER_SOURCE_LIMITS.card, fields = ['description', 'personality']) {
+    if (!card || typeof card !== 'object') return '';
+    const data = card.data && typeof card.data === 'object' ? card.data : {};
+    const own = names.includes(String(card.name || data.name || '').trim());
+    const parts = [];
+    for (const field of fields) {
+        const label = CARD_FIELD_LABELS[field];
+        const text = String(card[field] ?? data[field] ?? '').trim();
+        if (!text) continue;
+        const kept = own ? text : text.split(/\n\s*\n/).filter((block) => mentions(block, names)).join('\n\n');
+        if (kept) parts.push(`【角色卡·${label}】\n${kept}`);
+    }
+    return clip(parts.join('\n'), limit);
+}
+
+// 已启用、关键词或内容提到这个角色的条目；关键词命中的排前面。关键词可能是正则，按字面比较。
+// keyInName：关键词被名字包含也算命中（地点名常比关键词长：「金华酒店大堂」对上关键词「金华酒店」），单字关键词不算。
+function pickWorldbookText(books, names, limits = CHARACTER_SOURCE_LIMITS, { keyInName = false } = {}) {
+    const picked = [];
+    for (const { name: book, entries } of Array.isArray(books) ? books : []) {
+        for (const entry of Array.isArray(entries) ? entries : []) {
+            if (!entry || entry.enabled === false || !String(entry.content || '').trim()) continue;
+            const keys = entry.strategy && Array.isArray(entry.strategy.keys) ? entry.strategy.keys.map((key) => String(key).trim()) : [];
+            const keyHit = keys.some((key) => names.some((name) => key.includes(name) || (keyInName && key.length >= 2 && name.includes(key))));
+            if (!keyHit && !mentions(entry.content, names)) continue;
+            picked.push({ keyHit, text: `【世界书·${book}·${entry.name || '条目'}】\n${clip(entry.content, limits.entry)}` });
+        }
+    }
+    picked.sort((a, b) => Number(b.keyHit) - Number(a.keyHit));
+    const out = [];
+    let used = 0;
+    for (const item of picked) {
+        if (used + item.text.length > limits.worldbook) break;
+        out.push(item.text);
+        used += item.text.length;
+    }
+    return out.join('\n');
+}
+
+// 有一格正好是这个角色名字的行，按「列名：值」整行写出。
+function pickDatabaseText(readResult, names, limit = CHARACTER_SOURCE_LIMITS.database) {
+    if (!readResult || readResult.ok === false) return '';
+    const lines = [];
+    for (const table of parseTables(readResult.data)) {
+        for (const row of table.rows) {
+            if (!Array.isArray(row) || !row.some((cell) => names.includes(String(cell ?? '').trim()))) continue;
+            const pairs = table.columns
+                .map((column, index) => [String(column || '').trim(), String(row[index] ?? '').trim()])
+                .filter(([column, value]) => column && value);
+            if (pairs.length) lines.push(`【数据库·${table.name}】${pairs.map(([column, value]) => `${column}：${value}`).join('；')}`);
+        }
+    }
+    return clip(lines.join('\n'), limit);
+}
+
+async function readWorldbooks(helper, notes) {
+    const names = new Set();
+    try {
+        const own = helper.getCharWorldbookNames('current') || {};
+        if (own.primary) names.add(own.primary);
+        for (const extra of Array.isArray(own.additional) ? own.additional : []) if (extra) names.add(extra);
+    } catch (error) {
+        notes.push('角色卡绑定的世界书读不到');
+    }
+    try {
+        const chat = typeof helper.getChatWorldbookName === 'function' ? helper.getChatWorldbookName('current') : null;
+        if (chat) names.add(chat);
+    } catch (error) {
+        notes.push('聊天绑定的世界书读不到');
+    }
+    const books = [];
+    for (const name of names) {
+        try {
+            books.push({ name, entries: await helper.getWorldbook(name) });
+        } catch (error) {
+            notes.push(`世界书「${name}」读不到`);
+        }
+    }
+    return books;
+}
+
+// 全局世界书（酒馆里勾选的全局条目，这个聊天也在用）：只给「读取上下文」加大预算时的全部资料用，按名字挑节选时不读。
+async function readGlobalWorldbooks(helper, notes, skip) {
+    if (typeof helper.getGlobalWorldbookNames !== 'function') return [];
+    let names = [];
+    try {
+        names = (helper.getGlobalWorldbookNames() || []).filter((name) => name && !skip.has(name));
+    } catch (error) {
+        notes.push('全局世界书读不到');
+        return [];
+    }
+    const books = [];
+    for (const name of names) {
+        try {
+            books.push({ name, entries: await helper.getWorldbook(name) });
+        } catch (error) {
+            notes.push(`世界书「${name}」读不到`);
+        }
+    }
+    return books;
+}
+
+// 角色卡、世界书、数据库一次读进来，再按名字挑：一层里补好几个角色立绘时不必每人重读世界书。
+// withGlobal：连全局世界书一起读（globalBooks），给「读取上下文」加大预算时的全部资料用。
+async function readSourceMaterial(globalObject, { withGlobal = false } = {}) {
+    const notes = [];
+    const ctx = getSillyTavernContext(globalObject);
+    const card = ctx && ctx.characters && ctx.characterId != null ? ctx.characters[ctx.characterId] : null;
+    if (!card) notes.push('当前没有打开单人角色卡');
+    const helper = getTavernHelper(globalObject);
+    let books = [];
+    let globalBooks = [];
+    if (helper && typeof helper.getWorldbook === 'function' && typeof helper.getCharWorldbookNames === 'function') {
+        books = await readWorldbooks(helper, notes);
+        if (withGlobal) globalBooks = await readGlobalWorldbooks(helper, notes, new Set(books.map((book) => book.name)));
+    } else {
+        notes.push('没有找到酒馆助手的世界书接口');
+    }
+    const api = globalObject && (globalObject.AutoCardUpdaterAPI || (globalObject.top && globalObject.top.AutoCardUpdaterAPI));
+    const tables = api ? createShujukuClient(api).readTables() : null;
+    return { card, books, globalBooks, tables, notes, chat: ctx && Array.isArray(ctx.chat) ? ctx.chat : [] };
+}
+function pickCharacterSources(material, { name, aliases = [], limits = CHARACTER_SOURCE_LIMITS } = {}) {
+    const names = nameList(name, aliases);
+    const notes = material && Array.isArray(material.notes) ? material.notes.slice() : [];
+    if (!names.length || !material) return { card: '', worldbook: '', database: '', notes };
+    return {
+        card: pickCardText(material.card, names, limits.card),
+        worldbook: material.books.length ? pickWorldbookText(material.books, names, limits) : '',
+        database: material.tables ? pickDatabaseText(material.tables, names, limits.database) : '',
+        notes,
+    };
+}
+
+// 素材补全的背景：角色卡描述 / 场景栏、世界书、数据库里提到这个地点的节选，用来画出地点的档次、风格和陈设。
+function pickSceneSources(material, { name, limits = CHARACTER_SOURCE_LIMITS } = {}) {
+    const names = nameList(name);
+    const notes = material && Array.isArray(material.notes) ? material.notes.slice() : [];
+    if (!names.length || !material) return { card: '', worldbook: '', database: '', notes };
+    return {
+        card: pickCardText(material.card, names, limits.card, ['description', 'scenario']),
+        worldbook: material.books.length ? pickWorldbookText(material.books, names, limits, { keyInName: true }) : '',
+        database: material.tables ? pickDatabaseText(material.tables, names, limits.database) : '',
+        notes,
+    };
+}
+
+// 「读取上下文」加大预算时写词用的全部设定资料：整张角色卡（描述、性格、场景、开场白、备选开场白、对话示例）、
+// 角色卡 / 聊天 / 全局世界书的所有已启用条目、数据库所有行。提到 names 的条目和行排前面，其余在后，按 limit 字截。
+function pickSettingMaterial(material, { names = [], limit = 0 } = {}) {
+    if (!material || !(limit > 0)) return '';
+    const keys = nameList(names[0], names.slice(1));
+    const parts = [];
+    const card = material.card && typeof material.card === 'object' ? material.card : null;
+    if (card) {
+        const data = card.data && typeof card.data === 'object' ? card.data : {};
+        const cardName = String(card.name || data.name || '').trim();
+        const greetings = card.alternate_greetings ?? data.alternate_greetings;
+        for (const [label, raw] of [
+            ['描述', card.description ?? data.description], ['性格', card.personality ?? data.personality],
+            ['场景', card.scenario ?? data.scenario], ['开场白', card.first_mes ?? data.first_mes],
+            ['备选开场白', Array.isArray(greetings) ? greetings.join('\n\n——\n\n') : ''], ['对话示例', card.mes_example ?? data.mes_example],
+        ]) {
+            const text = String(raw || '').trim();
+            if (text) parts.push({ first: true, text: `【角色卡${cardName ? `「${cardName}」` : ''}·${label}】\n${text}` });
+        }
+    }
+    for (const { name: book, entries } of [...(material.books || []), ...(material.globalBooks || [])]) {
+        for (const entry of Array.isArray(entries) ? entries : []) {
+            if (!entry || entry.enabled === false || !String(entry.content || '').trim()) continue;
+            const entryKeys = entry.strategy && Array.isArray(entry.strategy.keys) ? entry.strategy.keys.map((key) => String(key)) : [];
+            const hit = keys.some((key) => entryKeys.some((entryKey) => entryKey.includes(key) || (entryKey.length >= 2 && key.includes(entryKey)))) || mentions(entry.content, keys);
+            parts.push({ first: hit, text: `【世界书·${book}·${entry.name || '条目'}】\n${String(entry.content).trim()}` });
+        }
+    }
+    if (material.tables && material.tables.ok !== false) {
+        for (const table of parseTables(material.tables.data)) {
+            for (const row of table.rows) {
+                if (!Array.isArray(row)) continue;
+                const pairs = table.columns
+                    .map((column, index) => [String(column || '').trim(), String(row[index] ?? '').trim()])
+                    .filter(([column, value]) => column && value);
+                if (!pairs.length) continue;
+                const text = `【数据库·${table.name}】${pairs.map(([column, value]) => `${column}：${value}`).join('；')}`;
+                parts.push({ first: mentions(text, keys), text });
+            }
+        }
+    }
+    const ordered = [...parts.filter((part) => part.first), ...parts.filter((part) => !part.first)];
+    const out = [];
+    let used = 0;
+    for (const part of ordered) {
+        if (used + part.text.length > limit) continue;
+        out.push(part.text);
+        used += part.text.length + 2;
+    }
+    return out.join('\n\n');
+}
+async function collectCharacterSources(globalObject, { name, aliases = [], limits = CHARACTER_SOURCE_LIMITS } = {}) {
+    if (!nameList(name, aliases).length) return { card: '', worldbook: '', database: '', notes: [] };
+    return pickCharacterSources(await readSourceMaterial(globalObject), { name, aliases, limits });
+}
+
+// 世界设定的原始资料：角色卡的「场景」栏，加上世界书里常驻（蓝灯）的已启用条目。
+const WORLD_SOURCE_LIMITS = Object.freeze({ scenario: 2000, worldbook: 5000, entry: 1500 });
+function pickWorldText(material, limits = WORLD_SOURCE_LIMITS) {
+    if (!material) return '';
+    const card = material.card && typeof material.card === 'object' ? material.card : null;
+    const data = card && card.data && typeof card.data === 'object' ? card.data : {};
+    const scenario = card ? String(card.scenario ?? data.scenario ?? '').trim() : '';
+    const parts = scenario ? [`【角色卡·场景】\n${clip(scenario, limits.scenario)}`] : [];
+    let used = 0;
+    for (const { name: book, entries } of material.books || []) {
+        for (const entry of Array.isArray(entries) ? entries : []) {
+            const constant = entry && entry.strategy && entry.strategy.type === 'constant';
+            if (!constant || entry.enabled === false || !String(entry.content || '').trim()) continue;
+            const text = `【世界书·${book}·${entry.name || '条目'}】\n${clip(entry.content, limits.entry)}`;
+            if (used + text.length > limits.worldbook) break;
+            parts.push(text);
+            used += text.length;
+        }
+    }
+    return parts.join('\n');
+}
+
+// 正文里提到某个词（服装名、角色名）的段落：最近 floors 层（不算系统消息）里的，去掉 HTML（状态栏之类），超长时留最近的。
+function pickChatMentions(chat, word, { floors = 30, limit = 1500 } = {}) {
+    const key = String(word || '').trim();
+    if (!key || !Array.isArray(chat)) return '';
+    const paragraphs = chat.slice(-floors)
+        .filter((msg) => msg && !msg.is_system && typeof msg.mes === 'string')
+        .flatMap((msg) => msg.mes.split(/\n+/))
+        .map((line) => line.replace(/<[^>]*>/g, ' ').replace(/\s{2,}/g, ' ').trim())
+        .filter((line) => line.includes(key));
+    const kept = [];
+    let used = 0;
+    for (let i = paragraphs.length - 1; i >= 0; i -= 1) {
+        if (used + paragraphs[i].length > limit) break;
+        kept.unshift(paragraphs[i]);
+        used += paragraphs[i].length;
+    }
+    return kept.join('\n');
+}
+function formatCharacterSources(sources) {
+    const value = sources && typeof sources === 'object' ? sources : {};
+    return [value.card, value.worldbook, value.database, value.chat].map((part) => String(part || '').trim()).filter(Boolean).join('\n\n');
+}
+
+__igsDefine(exports, "pickCardText", () => pickCardText);
+__igsDefine(exports, "pickWorldbookText", () => pickWorldbookText);
+__igsDefine(exports, "pickDatabaseText", () => pickDatabaseText);
+__igsDefine(exports, "readSourceMaterial", () => readSourceMaterial);
+__igsDefine(exports, "pickCharacterSources", () => pickCharacterSources);
+__igsDefine(exports, "pickSceneSources", () => pickSceneSources);
+__igsDefine(exports, "pickSettingMaterial", () => pickSettingMaterial);
+__igsDefine(exports, "collectCharacterSources", () => collectCharacterSources);
+__igsDefine(exports, "pickWorldText", () => pickWorldText);
+__igsDefine(exports, "pickChatMentions", () => pickChatMentions);
+__igsDefine(exports, "formatCharacterSources", () => formatCharacterSources);
+__igsDefine(exports, "CHARACTER_SOURCE_LIMITS", () => CHARACTER_SOURCE_LIMITS);
+__igsDefine(exports, "WORLD_SOURCE_LIMITS", () => WORLD_SOURCE_LIMITS);
+});
+__igsRegister("src/data/shujuku/client.js", function(module, exports, require) {
+function createShujukuClient(api) {
+    return {
+        // kept for backward compat — simulate.test.js depends on this
+        async updateRowAndRefresh(tableName, rowIndex, patch) {
+            if (!api || typeof api.updateRow !== 'function')
+                return { ok: false, reason: 'missing-update-row' };
+            const updateResult = await api.updateRow(tableName, rowIndex, patch);
+            if (!isSuccessful(updateResult))
+                return { ok: false, reason: 'update-row-failed', result: updateResult };
+            if (typeof api.refreshDataAndWorldbook === 'function') {
+                const refreshResult = await api.refreshDataAndWorldbook();
+                if (!isSuccessful(refreshResult))
+                    return { ok: false, reason: 'refresh-worldbook-failed', result: refreshResult };
+            }
+            return { ok: true, tableName, rowIndex, patch };
+        },
+
+        readTables() {
+            if (!api || typeof api.exportTableAsJson !== 'function')
+                return { ok: false, reason: 'missing-api' };
+            try {
+                return { ok: true, data: api.exportTableAsJson() };
+            } catch (e) {
+                return { ok: false, reason: String(e && e.message || 'read-failed') };
+            }
+        },
+
+        async updateCell(tableName, rowIndex, colName, value) {
+            if (!api || typeof api.updateCell !== 'function')
+                return { ok: false, reason: 'missing-api' };
+            const result = await api.updateCell(tableName, rowIndex, colName, String(value));
+            return isSuccessful(result) ? { ok: true } : { ok: false, reason: 'update-failed' };
+        },
+
+        async insertRow(tableName, rowData) {
+            if (!api || typeof api.insertRow !== 'function')
+                return { ok: false, reason: 'missing-api' };
+            const result = await api.insertRow(tableName, rowData);
+            return isSuccessful(result) ? { ok: true } : { ok: false, reason: 'insert-failed' };
+        },
+
+        async deleteRow(tableName, rowIndex) {
+            if (!api || typeof api.deleteRow !== 'function')
+                return { ok: false, reason: 'missing-api' };
+            const result = await api.deleteRow(tableName, rowIndex);
+            return isSuccessful(result) ? { ok: true } : { ok: false, reason: 'delete-failed' };
+        },
+
+        async refresh() {
+            if (!api || typeof api.refreshDataAndWorldbook !== 'function')
+                return { ok: false, reason: 'missing-api' };
+            await api.refreshDataAndWorldbook();
+            return { ok: true };
+        },
+
+        registerCallback(cb) {
+            if (api && typeof api.registerTableUpdateCallback === 'function')
+                api.registerTableUpdateCallback(cb);
+        },
+
+        unregisterCallback(cb) {
+            if (api && typeof api.unregisterTableUpdateCallback === 'function')
+                api.unregisterTableUpdateCallback(cb);
+        },
+    };
+}
+
+function isSuccessful(result) {
+    if (result == null || result === false || result === -1) return false;
+    if (typeof result === 'object' && result.success === false) return false;
+    return true;
+}
+
+__igsDefine(exports, "createShujukuClient", () => createShujukuClient);
+});
+__igsRegister("src/visual/igs-ui/world-context.js", function(module, exports, require) {
+// 生图写词的世界背景：世界观选项 + 世界设定提要。提要存在当前角色卡的素材里（和世界观同一处），
+// 用户可在「场景 → 规则」里改；空着时由这里从角色卡场景栏和世界书常驻（蓝灯）条目提炼。
+const { draftAssetLibrary, draftEffectiveAssets } = require("src/scene/asset-scope.js");
+const { worldContextOf } = require("src/scene/worldview.js");
+const { pickWorldText, readSourceMaterial } = require("src/host/character-sources.js");
+// 返回 { ok, summary } 或 { ok: false, error }；成功时已写进草稿，由调用方决定何时保存。
+async function extractWorldSummary({ settingsState, service, globalObj, material = null }) {
+    if (!service || typeof service.summarizeWorldSetting !== 'function') return { ok: false, error: '当前不能提炼世界设定' };
+    const world = worldContextOf(draftEffectiveAssets(settingsState));
+    const sourcesText = pickWorldText(material || await readSourceMaterial(globalObj));
+    if (!sourcesText) return { ok: false, error: '角色卡的场景栏和世界书的常驻条目里都没有内容' };
+    const written = await service.summarizeWorldSetting({ label: world.label, sourcesText });
+    if (!written || !written.ok) return { ok: false, error: (written && written.error) || '提炼失败' };
+    if (written.insufficient || !written.summary) return { ok: false, error: '资料里看不出这个世界的设定' };
+    draftAssetLibrary(settingsState, null).worldSummary = written.summary;
+    return { ok: true, summary: written.summary };
+}
+
+// 写词前调用：已有提要直接用；没有就试着提炼一次并保存。提炼不了只带世界观，不挡生成。
+// 返回 { world, note, tone }：note 是要提示用户的一句话（空串就不提示），tone 为 info 时是好消息。
+async function prepareWorldContext({ settingsState, service, globalObj, material = null, onProgress, persist }) {
+    const world = worldContextOf(draftEffectiveAssets(settingsState));
+    if (world.summary || !service || typeof service.summarizeWorldSetting !== 'function') return { world, note: '', tone: '' };
+    const source = material || await readSourceMaterial(globalObj);
+    if (!pickWorldText(source)) return { world, note: '', tone: '' };
+    if (typeof onProgress === 'function') onProgress({ phase: 'world' });
+    const extracted = await extractWorldSummary({ settingsState, service, globalObj, material: source });
+    if (!extracted.ok) return { world, note: `没能提炼世界设定提要（${extracted.error}），这次只按世界观「${world.label}」写。`, tone: '' };
+    if (typeof persist === 'function') persist();
+    return { world: { ...world, summary: extracted.summary }, note: '已提炼世界设定提要，写立绘和服装时会参考；可在「场景 → 规则」里查看和修改。', tone: 'info' };
+}
+
+__igsDefine(exports, "extractWorldSummary", () => extractWorldSummary);
+__igsDefine(exports, "prepareWorldContext", () => prepareWorldContext);
 });
 __igsRegister("src/media/asset-thumb-store.js", function(module, exports, require) {
 // 设置页素材缩略图（IndexedDB igs-asset-thumbs）：每张生成 / 上传的图存一张 160 宽小图，
@@ -44551,6 +45908,9 @@ const { draftAssetLibrary, draftEffectiveAssets, rememberAssetScope } = require(
 const { getSillyTavernContext } = require("src/host/tavern-helper-adapter.js");
 const { createSettingsDialogs } = require("src/visual/igs-ui/settings-dialog.js");
 const { beginSettingsProgress, remountSettingsNotice, SETTINGS_NOTICE_MS } = require("src/visual/igs-ui/settings-notice.js");
+const { pickChatMentions, readSourceMaterial } = require("src/host/character-sources.js");
+const { collectOutfitClues } = require("src/data/shujuku/outfit-clues.js");
+const { prepareWorldContext } = require("src/visual/igs-ui/world-context.js");
 const BLOCKED_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 const CHARACTER_FIELDS = ['characters', 'characterOutfits', 'characterDna', 'characterAliases', 'statusAvatars'];
 const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
@@ -44745,7 +46105,7 @@ async function handleWardrobe(command, segs, ctx) {
             }
             const progress = wardrobeProgress(globalObj, `写提示词：${name}`);
             let written;
-            try { written = await service.writeWardrobePrompt(subject); }
+            try { written = await service.writeWardrobePrompt({ ...subject, ...(await wardrobeWritingBackground(ctx, globalObj, subject)) }); }
             catch (error) { written = { ok: false, error: '服装提示词编写失败' }; }
             progress.end();
             if (!written || !written.ok || !String(written.prompt || '').trim()) {
@@ -44775,7 +46135,7 @@ async function handleWardrobe(command, segs, ctx) {
         }
         const progress = wardrobeProgress(globalObj, `写提示词：${word}`);
         let written;
-        try { written = await service.writeWardrobePrompt({ character, outfit: word }); }
+        try { written = await service.writeWardrobePrompt({ character, outfit: word, ...(await wardrobeWritingBackground(ctx, globalObj, { character, outfit: word })) }); }
         catch (error) { written = { ok: false, error: '服装提示词编写失败' }; }
         progress.end();
         if (!written || !written.ok || !String(written.prompt || '').trim()) {
@@ -44882,6 +46242,21 @@ function handleOutfitReview(command, segs, ctx) {
 const COMMAND_RE = /^(scene-(?:add|rename|remove)-outfit(?:-(?:mood|word|scene))?|scene-set-outfit-(?:mood|avatar|wardrobe)-url|scene-set-outfit-note|scene-clear-outfit-avatar|scene-outfit-(?:tab|copy-slots)|outfit-review-(?:assign|create|dismiss|clear)|wardrobe-(?:add|rename|remove|generate-prompt|reference|nsfw|for-outfit|prompt))(?::(.*))?$/;
 
 // 服装区 action：返回 null 表示不归本模块处理。位置 / 头部标定 key 随改名迁移、随删除清理。
+// 写服装提示词前的背景：世界观（还没有世界设定提要就先提炼）、正文里描写这套衣服的段落、
+// 数据库里这个角色提到这套衣服的穿着记录（数据库记的是当前穿着，只留提到这套衣服名的，免得写成别的衣服）。
+async function wardrobeWritingBackground(ctx, globalObj, { character = '', outfit = '' } = {}) {
+    const { settingsState, options, persistSettingsDraft } = ctx;
+    const material = await readSourceMaterial(globalObj);
+    const prepared = await prepareWorldContext({ settingsState, service: options.generatedAssets, globalObj, material, persist: persistSettingsDraft });
+    const assets = draftEffectiveAssets(settingsState);
+    const aliases = character && assets.characterAliases && Array.isArray(assets.characterAliases[character]) ? assets.characterAliases[character] : [];
+    const clues = character ? collectOutfitClues(material.tables, [character, ...aliases]) : { profile: [], worn: [] };
+    return {
+        world: prepared.world,
+        context: pickChatMentions(material.chat, outfit),
+        clues: [...clues.profile, ...clues.worn].filter((line) => outfit && String(line).includes(outfit)).join('\n'),
+    };
+}
 function handleOutfitAction(normalizedAction, ctx) {
     const match = COMMAND_RE.exec(normalizedAction);
     return match ? runOutfitAction(match, ctx) : null;
@@ -45088,6 +46463,63 @@ __igsDefine(exports, "removeOutfitReview", () => removeOutfitReview);
 __igsDefine(exports, "dropConfirmedOutfitReview", () => dropConfirmedOutfitReview);
 __igsDefine(exports, "clearOutfitReview", () => clearOutfitReview);
 __igsDefine(exports, "OUTFIT_REVIEW_LIMIT", () => OUTFIT_REVIEW_LIMIT);
+});
+__igsRegister("src/data/shujuku/outfit-clues.js", function(module, exports, require) {
+const { parseTables } = require("src/data/shujuku/table-parser.js");
+const { matchesRecordTable } = require("src/data/shujuku/record-tables.js");
+const { OUTFIT_CLUE_FIELDS } = require("src/data/shujuku/record-model.js");
+const { ITEM_DESCRIPTION_FIELDS } = require("src/data/shujuku/item-catalog.js");
+// 装备表方案 A：只有表头含持有者类列才参与，不按物品名或描述猜归属。
+const ITEM_HOLDER_FIELDS = Object.freeze(['持有者', '所属角色', '拥有者', '穿戴者', '角色']);
+const WORN_STATUS_WORDS = Object.freeze(['穿着', '正在穿', '已穿戴', '已装备', '装备中']);
+const NOT_WORN_STATUS_WORDS = Object.freeze(['收纳', '脱下', '未穿戴', '未装备', '损坏', '遗失']);
+
+const cell = (row, index) => (index >= 0 && Array.isArray(row) ? String(row[index] ?? '').trim() : '');
+const indexOf = (columns, names) => columns.findIndex((column) => names.includes(String(column || '').trim()));
+function isWornStatus(status) {
+    const text = String(status || '');
+    return WORN_STATUS_WORDS.some((w) => text.includes(w)) && !NOT_WORN_STATUS_WORDS.some((w) => text.includes(w));
+}
+
+// 只读收集某角色的服装线索：角色表「穿着打扮」等列（profile）与装备表中正在穿戴的衣物（worn）。
+// 读取失败返回 read-error 与原因，不当作空数据；names 为主名与别名，按单元格全文精确匹配。
+function collectOutfitClues(readResult, names) {
+    if (!readResult || readResult.ok === false) {
+        return { status: 'read-error', reason: String((readResult && readResult.reason) || '读取失败'), profile: [], worn: [] };
+    }
+    const wanted = new Set((Array.isArray(names) ? names : [names]).map((n) => String(n || '').trim()).filter(Boolean));
+    const profile = [];
+    const worn = [];
+    for (const table of parseTables(readResult.data)) {
+        const columns = table.columns;
+        if (matchesRecordTable(table.name, 'inventory')) {
+            const holderIdx = indexOf(columns, ITEM_HOLDER_FIELDS);
+            const statusIdx = indexOf(columns, OUTFIT_CLUE_FIELDS.itemStatus);
+            if (holderIdx < 0 || statusIdx < 0) continue;
+            const textIdx = [indexOf(columns, OUTFIT_CLUE_FIELDS.itemTitle), indexOf(columns, ITEM_DESCRIPTION_FIELDS)];
+            for (const row of table.rows) {
+                if (!wanted.has(cell(row, holderIdx)) || !isWornStatus(cell(row, statusIdx))) continue;
+                const text = textIdx.map((i) => cell(row, i)).filter(Boolean).join(' ');
+                if (text) worn.push(text);
+            }
+            continue;
+        }
+        const nameIdx = indexOf(columns, OUTFIT_CLUE_FIELDS.name);
+        const outfitIdx = indexOf(columns, OUTFIT_CLUE_FIELDS.outfit);
+        if (nameIdx < 0 || outfitIdx < 0) continue;
+        for (const row of table.rows) {
+            const text = wanted.has(cell(row, nameIdx)) ? cell(row, outfitIdx) : '';
+            if (text) profile.push(text);
+        }
+    }
+    return { status: profile.length || worn.length ? 'ready' : 'empty', reason: '', profile, worn };
+}
+
+__igsDefine(exports, "isWornStatus", () => isWornStatus);
+__igsDefine(exports, "collectOutfitClues", () => collectOutfitClues);
+__igsDefine(exports, "ITEM_HOLDER_FIELDS", () => ITEM_HOLDER_FIELDS);
+__igsDefine(exports, "WORN_STATUS_WORDS", () => WORN_STATUS_WORDS);
+__igsDefine(exports, "NOT_WORN_STATUS_WORDS", () => NOT_WORN_STATUS_WORDS);
 });
 __igsRegister("src/visual/igs-ui/settings-sections.js", function(module, exports, require) {
 const { cloneData, esc } = require("src/visual/igs-ui/reader-value-utils.js");
@@ -46093,6 +47525,7 @@ const EXTRA_ENTRIES = Object.freeze([
     { id: 'sprite-scale', label: '立绘缩放与高度', aliases: ['立绘太大', '立绘太小', '缩放', '高度', '人物大小'], location: '素材 › 角色 › 立绘设置', target: { tab: 'scene', sceneSubTab: 'characters', open: ['sprite-display'] } },
     { id: 'dialog-skin', label: '对话框风格', aliases: ['皮肤', '对话框样式', '换皮', '科幻', '末日', '全息', '废土', '本卡皮肤'], location: '阅读器 › 对话框 › 风格', target: { tab: 'reader', readerSubTab: 'dialog', open: [] } },
     { id: 'title-screen', label: '开场先显示主界面', aliases: ['主界面', '标题画面', '开始菜单', '开场白', '第0层', '选择世界观'], location: '阅读器 › 对话框 › 风格', target: { tab: 'reader', readerSubTab: 'dialog', open: [] } },
+    { id: 'sprite-background', label: '立绘底色', aliases: ['透明底', '透明背景', '灰底', '浅灰底', '抠图', '背景tag'], location: '生图 › 图像来源 › 立绘底色', target: { tab: 'image', imageSubTab: 'source', open: [] } },
     { id: 'text-effect', label: '文字增强', aliases: ['描边', '看不清', '投影', '字看不清'], location: '阅读器 › 文字 › 排版', target: { tab: 'reader', readerSubTab: 'text', open: [] } },
     { id: 'camera-kenburns', label: '背景缓慢推镜', group: 'stage', open: ['perf-camera'], aliases: ['推镜', '背景移动', '镜头'] },
     { id: 'camera-parallax', label: '鼠标视差', group: 'stage', open: ['perf-camera'], aliases: ['视差', '镜头'] },
@@ -68011,6 +69444,8 @@ __igsRegister("src/generated-images/illustration/auto-illustration-service.js", 
 const { numberParagraphs, formatNumberedParagraphs, insertMarkers, insertMarkersAtAnchors, findAnchorInsertIndex, appendedTail, reattachTail, transplantMarkers } = require("src/generated-images/illustration/marker-placer.js");
 const { MIN_AUTO_IMAGE_BODY_CHARS, floorBodyLength } = require("src/generated-images/illustration/floor-body-length.js");
 const { buildPlannerUserPrompt } = require("src/generated-images/illustration/planner-prompt.js");
+const { STANDARD_FLOOR_CHARS, plannerLlmSettings, readPlannerContext } = require("src/generated-images/illustration/planner-context.js");
+const { worldContextOf } = require("src/scene/worldview.js");
 const { requestWithSoftRetry, DEFAULT_ASSET_TEMPLATES } = require("src/generated-images/illustration/prompt-kit.js");
 const { parseIllustrationPlan } = require("src/generated-images/illustration/planner-parser.js");
 const { normalizeAutoIllustrationSettings } = require("src/generated-images/illustration/auto-illustration-settings.js");
@@ -68104,10 +69539,6 @@ const CACHE_LIMIT = 40;
 // 只有这些状态算「本楼已处理完」；failed / stale / 中途刷新残留的 planning 在下次渲染时重试，
 // 否则改好 Key 或地址之后，之前失败过的楼层永远不会再发请求。
 const SETTLED_STATUSES = new Set(['done']);
-
-function toReadableText(raw) {
-    return numberParagraphs(raw).paragraphs.map((p) => p.text).join('\n');
-}
 
 // 按既有别名归约取主名 DNA；没有 DNA 映射时返回 null，调用方保持旧行为。
 function createDnaResolver(sceneAssets) {
@@ -68223,6 +69654,31 @@ function createAutoIllustrationService(deps) {
         const value = typeof deps.getSceneAssets === 'function' ? deps.getSceneAssets() : null;
         return value && typeof value === 'object' ? value : {};
     };
+
+    // 本楼正文读多少、前文读哪些（见 planner-context）；读不到前文就当没有。
+    function plannerContextOf(messageId, s, floorLength) {
+        try {
+            return readPlannerContext(messageHost, messageId, s.llm, floorLength);
+        } catch (error) {
+            return { budget: 0, floorChars: STANDARD_FLOOR_CHARS, previousText: '' };
+        }
+    }
+
+    // 出场角色的角色卡 / 世界书 / 数据库节选（宿主读）。标准长度时只给没有 DNA 的角色（有 DNA 的长相以 DNA 为准）；
+    // 加大预算时都给。没接或读不到就不附。
+    async function readCgCharacterSources(names, sceneAssets, large) {
+        if (typeof deps.readCharacterSources !== 'function') return [];
+        const resolver = createDnaResolver(sceneAssets);
+        const wanted = (Array.isArray(names) ? names : []).filter((name) => large || !resolver || !resolver.resolve(name));
+        if (!wanted.length) return [];
+        let found = {};
+        try {
+            found = (await deps.readCharacterSources(wanted, { large })) || {};
+        } catch (error) {
+            return [];
+        }
+        return wanted.map((name) => ({ name, text: String(found[name] || '').trim() })).filter((item) => item.text);
+    }
 
     function remember(key, value) {
         cache.delete(key);
@@ -68462,13 +69918,17 @@ function createAutoIllustrationService(deps) {
         await store.putFloor(key, { ...base, status: 'planning', updatedAt: now() });
         let plan;
         try {
-            const previousText = messageHost.readPreviousAiTexts(messageId, s.llm.contextFloors)
-                .map(toReadableText).join('\n').slice(-1500);
+            const floorLength = numbered.paragraphs.reduce((sum, p) => sum + p.text.length + 1, 0);
+            const context = plannerContextOf(messageId, s, floorLength);
+            const sceneAssets = readSceneAssets();
+            const characterDna = summarizeCharacterDna(numbered.characters, sceneAssets);
             const user = buildPlannerUserPrompt({
-                numberedText: formatNumberedParagraphs(numbered.paragraphs),
+                numberedText: formatNumberedParagraphs(numbered.paragraphs, context.floorChars),
                 scenes: numbered.scenes, characters: numbered.characters,
-                previousText, want: decision.want, exact: decision.exact, isNsfw: numbered.isNsfw,
-                characterDna: summarizeCharacterDna(numbered.characters, readSceneAssets()),
+                previousText: context.previousText, want: decision.want, exact: decision.exact, isNsfw: numbered.isNsfw,
+                characterDna,
+                characterSources: await readCgCharacterSources(numbered.characters, sceneAssets, context.budget > 0),
+                world: worldContextOf(sceneAssets),
                 frame: cgFramePrompt(cgSize(s)),
             });
             plan = await requestWithSoftRetry(llm, {
@@ -68476,7 +69936,7 @@ function createAutoIllustrationService(deps) {
                 softSystem: numbered.isNsfw ? s.llm.prompts.illustrationSoft : '',
                 user,
                 parse: (reply) => parseIllustrationPlan(reply, { maxSlots: decision.want, paragraphCount: numbered.paragraphs.length }),
-            }, s.llm);
+            }, plannerLlmSettings(s.llm));
             // 温和模式下 LLM 只给了构图，露骨 tag 在本地补上，不经过 LLM。
             if (plan.ok && plan.soft) {
                 const extra = s.assets.templates.nsfwExtra || DEFAULT_ASSET_TEMPLATES.nsfwExtra;
@@ -68793,304 +70253,6 @@ __igsDefine(exports, "createAutoIllustrationService", () => createAutoIllustrati
 __igsDefine(exports, "ILLUSTRATION_UPDATED_EVENT", () => ILLUSTRATION_UPDATED_EVENT);
 __igsDefine(exports, "ILLUSTRATION_PROGRESS_EVENT", () => ILLUSTRATION_PROGRESS_EVENT);
 __igsDefine(exports, "EMBEDDED_PHONE_MAX_WIDTH", () => EMBEDDED_PHONE_MAX_WIDTH);
-});
-__igsRegister("src/generated-images/illustration/marker-placer.js", function(module, exports, require) {
-const { stripOutfitFields } = require("src/scene/directive-tags.js");
-const SCENE_RE = /\[igs-scene:([^|\]\n]+)\|([^|\]\n]+)\|([^|\]\n]+)(?:\|([^\]\n]*))?\]/g;
-const CHAR_RE = /\[igs-char:([^|\]\n]+)\|(?:([^|\]\n]*)\|)?([^|\]\n]+)\]?/g;
-const THOUGHT_RE = /\[igs-thought:([^|\]\n]+)\|(?:([^|\]\n]*)\|)?([^|\]\n]+)\]?/g;
-const IMG_RE = /(?:\[igs-img:\s*\d+\s*\]|<IMG>\s*\d+\s*<\/IMG>)/gi;
-const LEADING_SCENE_RE = /^(\s*(?:\[igs-scene:[^\]\n]*\]\s*)+)/;
-
-// 一段正文里可以有多段 <content>。只认第一段会漏掉后面的场景标签。
-function contentSpans(lines) {
-    const spans = [];
-    let start = -1;
-    for (let i = 0; i < lines.length; i += 1) {
-        const line = lines[i];
-        if (start < 0 && /<content\b[^>]*>/i.test(line)) start = i;
-        if (start >= 0 && /<\/content>/i.test(line)) {
-            spans.push([start, i]);
-            start = -1;
-        }
-    }
-    if (start >= 0) spans.push([start, lines.length - 1]);
-    return spans.length ? spans : [[0, lines.length - 1]];
-}
-
-function lineInSpans(index, spans) {
-    return spans.some(([from, to]) => index >= from && index <= to);
-}
-
-function readableLine(line) {
-    return String(line || '')
-        .replace(IMG_RE, '')
-        .replace(SCENE_RE, '')
-        .replace(CHAR_RE, (_, name, _mood, text) => `${name.trim()}：「${text.trim()}」`)
-        .replace(THOUGHT_RE, (_, name, _mood, text) => `${name.trim()}（心想）：${text.trim()}`)
-        // 柏宝绘 / 智绘姬写回楼层的生图词不是正文。
-        .replace(/<bbi_image>[\s\S]*?<\/bbi_image>|<image>[\s\S]*?<\/image>|image###[\s\S]*?###/gi, '')
-        .replace(/<\/?[a-zA-Z][^>]*>/g, '')
-        .trim();
-}
-function numberParagraphs(raw, options = {}) {
-    const lines = String(raw || '').split('\n');
-    const spans = contentSpans(lines);
-    const paragraphs = [];
-    const scenes = [];
-    const characters = new Set();
-    for (let i = 0; i < lines.length; i += 1) {
-        const line = stripOutfitFields(lines[i], options && options.outfitResolver);
-        // 场景标签整楼都认。写在第一段 </content> 之后的转场也要算进 NSFW 和背景。
-        for (const m of line.matchAll(SCENE_RE)) {
-            scenes.push({ scene: m[1].trim(), time: m[2].trim(), weather: m[3].trim(), nsfw: String(m[4] || '').trim().toLowerCase() === 'nsfw' });
-        }
-        if (!lineInSpans(i, spans)) continue;
-        for (const m of line.matchAll(CHAR_RE)) characters.add(m[1].trim());
-        for (const m of line.matchAll(THOUGHT_RE)) characters.add(m[1].trim());
-        const text = readableLine(line);
-        if (text) paragraphs.push({ no: paragraphs.length + 1, lineIndex: i, text });
-    }
-    return { paragraphs, scenes, characters: Array.from(characters), isNsfw: scenes.some((s) => s.nsfw) };
-}
-function formatNumberedParagraphs(paragraphs, maxChars = 6000) {
-    const out = [];
-    let total = 0;
-    for (const p of paragraphs) {
-        const line = `${p.no}. ${p.text}`;
-        total += line.length + 1;
-        if (total > maxChars) break;
-        out.push(line);
-    }
-    return out.join('\n');
-}
-
-/**
- * 与数据库生图插件的生成点定位相同：精确 → 去掉空白和标点 → 最长公共子串。
- * 命中后落回本插件的段落编号，标记仍插在该段前面。
- * @param {string} raw
- * @param {Array<{ no: number, lineIndex: number }>} paragraphs
- * @param {string} anchor
- * @returns {number}
- */
-function paragraphNoForAnchor(raw, paragraphs, anchor) {
-    const source = String(raw || '');
-    const found = findAnchorInsertIndex(source, anchor);
-    if (found.index < 0) return 0;
-    const lineIndex = source.slice(0, Math.max(0, found.index - 1)).split('\n').length - 1;
-    const list = Array.isArray(paragraphs) ? paragraphs : [];
-    const exact = list.find((paragraph) => paragraph.lineIndex === lineIndex);
-    if (exact) return exact.no;
-    let before = null;
-    for (const paragraph of list) {
-        if (paragraph.lineIndex <= lineIndex) before = paragraph;
-        else break;
-    }
-    if (before) return before.no;
-    return list.length ? list[0].no : 0;
-}
-
-/**
- * 在 text 中定位 anchor，返回插入下标（anchor 结束之后）；找不到返回 -1。
- * @param {string} text
- * @param {string} anchorSentence
- * @returns {{ index: number, mode: string }}
- */
-function findAnchorInsertIndex(text, anchorSentence) {
-    const source = typeof text === 'string' ? text : '';
-    const anchor = typeof anchorSentence === 'string' ? anchorSentence : '';
-    if (!anchor) return { index: -1, mode: 'fail' };
-    const exact = source.indexOf(anchor);
-    if (exact !== -1) return { index: exact + anchor.length, mode: 'exact' };
-    const normResult = findNormalized(source, anchor);
-    if (normResult.index >= 0) return { index: normResult.index, mode: 'normalized' };
-    const lcsResult = findByLongestCommonSubstring(source, anchor);
-    if (lcsResult.index >= 0) return { index: lcsResult.index, mode: 'lcs' };
-    return { index: -1, mode: 'fail' };
-}
-
-function findNormalized(text, anchor) {
-    const { normalized: normText, map } = normalizeWithMap(text);
-    const normAnchor = normalizeAnchorText(anchor);
-    if (!normAnchor) return { index: -1 };
-    const at = normText.indexOf(normAnchor);
-    if (at === -1) return { index: -1 };
-    const endOrig = map[at + normAnchor.length - 1];
-    if (endOrig == null) return { index: -1 };
-    return { index: endOrig + 1 };
-}
-
-function normalizeAnchorText(s) {
-    return s
-        .replace(/\s+/g, '')
-        .replace(/[，。！？、；：""''「」『』（）【】《》,.!?;:'"()\[\]{}]/g, '')
-        .toLowerCase();
-}
-
-function normalizeWithMap(text) {
-    const map = [];
-    const chars = [];
-    const lower = text.toLowerCase();
-    for (let i = 0; i < text.length; i += 1) {
-        const ch = lower[i];
-        if (/\s/.test(ch)) continue;
-        if (/[，。！？、；：""''「」『』（）【】《》,.!?;:'"()\[\]{}]/.test(ch)) continue;
-        chars.push(ch);
-        map.push(i);
-    }
-    return { normalized: chars.join(''), map };
-}
-
-function findByLongestCommonSubstring(text, anchor) {
-    const a = text.toLowerCase();
-    const b = anchor.toLowerCase();
-    if (!a || !b) return { index: -1 };
-    const minLen = Math.max(4, Math.ceil(b.length * 0.4));
-    let bestLen = 0;
-    let bestEndInText = -1;
-    let prev = new Array(b.length + 1).fill(0);
-    let curr = new Array(b.length + 1).fill(0);
-    for (let i = 1; i <= a.length; i += 1) {
-        for (let j = 1; j <= b.length; j += 1) {
-            if (a[i - 1] === b[j - 1]) {
-                curr[j] = prev[j - 1] + 1;
-                if (curr[j] > bestLen) {
-                    bestLen = curr[j];
-                    bestEndInText = i;
-                }
-            } else {
-                curr[j] = 0;
-            }
-        }
-        const tmp = prev;
-        prev = curr;
-        curr = tmp;
-        curr.fill(0);
-    }
-    if (bestLen < minLen || bestEndInText < 0) return { index: -1 };
-    return { index: bestEndInText };
-}
-
-// 同一段里可以有多句生成点。按句尾插入，不按整段，避免四张标记叠在同一处。
-function insertMarkersAtAnchors(raw, slots) {
-    const source = String(raw || '');
-    const placed = [];
-    for (const slot of Array.isArray(slots) ? slots : []) {
-        if (!slot) continue;
-        const found = findAnchorInsertIndex(source, slot.anchorSentence);
-        if (found.index < 0) continue;
-        placed.push({ index: found.index, slot: Number(slot.slot) || placed.length + 1 });
-    }
-    placed.sort((a, b) => b.index - a.index || b.slot - a.slot);
-    let text = source;
-    for (const item of placed) {
-        text = insertTokenOnOwnLine(text, item.index, `[igs-img:${item.slot}]`);
-    }
-    return text;
-}
-
-function insertTokenOnOwnLine(text, index, token) {
-    const at = Math.max(0, Math.min(text.length, Number(index) || 0));
-    const before = text.slice(0, at);
-    const after = text.slice(at);
-    const lead = before.length === 0 || before.endsWith('\n') ? '' : '\n';
-    const trail = after.length === 0 || after.startsWith('\n') ? '' : '\n';
-    return before + lead + token + trail + after;
-}
-function insertMarkers(raw, paragraphs, slots) {
-    const lines = String(raw || '').split('\n');
-    const ordered = [...slots].sort((a, b) => b.at - a.at);
-    for (const s of ordered) {
-        const p = paragraphs[s.at - 1];
-        if (!p) continue;
-        const marker = `[igs-img:${s.slot}]`;
-        const line = lines[p.lineIndex];
-        const lead = line.match(LEADING_SCENE_RE);
-        if (lead) {
-            lines[p.lineIndex] = `${lead[1].trimEnd()}${marker}${line.slice(lead[1].length)}`;
-        } else {
-            lines.splice(p.lineIndex, 0, marker);
-        }
-    }
-    return lines.join('\n');
-}
-
-/**
- * 出图期间其他插件只在正文末尾追加了内容（平行事件、状态栏等）时，返回追加的那一截；
- * 正文没变返回 ''，正文中间被改过返回 null。原文结尾的空白允许被改写。
- * @param {string} before 开始出图时的正文
- * @param {string} after 现在的正文
- * @returns {string | null}
- */
-function appendedTail(before, after) {
-    const source = String(before || '');
-    const current = String(after || '');
-    if (current === source) return '';
-    const head = source.replace(/\s+$/, '');
-    if (!head || !current.startsWith(head)) return null;
-    return current.slice(head.length);
-}
-
-/**
- * 把插好标记的正文接回追加的那一截。没有追加时原样返回。
- * @param {string} marked 按开始时的正文插好标记的结果
- * @param {string} tail appendedTail 的返回值
- * @returns {string}
- */
-function reattachTail(marked, tail) {
-    if (!tail) return marked;
-    return String(marked || '').replace(/\s+$/, '') + tail;
-}
-
-const TRANSPLANT_MARKER_RE = /\[igs-img:(\d+)\]/g;
-const TRANSPLANT_CONTEXT = 60;
-
-function contextLine(text, fromEnd) {
-    const lines = String(text || '').replace(/\[igs-img:\d+\]/g, '').split('\n').map((line) => line.trim()).filter(Boolean);
-    const line = fromEnd ? lines[lines.length - 1] : lines[0];
-    if (!line) return '';
-    return fromEnd ? line.slice(-TRANSPLANT_CONTEXT) : line.slice(0, TRANSPLANT_CONTEXT);
-}
-
-/**
- * 出图期间正文被其他插件改过（开头、中间、content 外插了平行事件等）时，把按旧正文插好的标记搬到现在的正文上：
- * 每个标记按它前面一行（没有就按后面一行）的文字在新正文里找位置；对不上的那张丢掉，不连累整楼。
- * @param {string} marked 按旧正文插好标记的结果
- * @param {string} current 现在的正文
- * @returns {{ text: string, slots: number[] }} slots 为搬过去的标记编号
- */
-function transplantMarkers(marked, current) {
-    const source = String(marked || '');
-    const target = String(current || '');
-    const placed = [];
-    TRANSPLANT_MARKER_RE.lastIndex = 0;
-    let match;
-    while ((match = TRANSPLANT_MARKER_RE.exec(source))) {
-        const slot = Number(match[1]);
-        const before = contextLine(source.slice(0, match.index), true);
-        let index = before ? findAnchorInsertIndex(target, before).index : -1;
-        if (index < 0) {
-            const after = contextLine(source.slice(match.index + match[0].length), false);
-            const at = after ? target.indexOf(after) : -1;
-            index = at;
-        }
-        if (index >= 0) placed.push({ index, slot });
-    }
-    placed.sort((a, b) => b.index - a.index || b.slot - a.slot);
-    let text = target;
-    for (const item of placed) text = insertTokenOnOwnLine(text, item.index, `[igs-img:${item.slot}]`);
-    return { text, slots: placed.map((item) => item.slot).sort((a, b) => a - b) };
-}
-
-__igsDefine(exports, "numberParagraphs", () => numberParagraphs);
-__igsDefine(exports, "formatNumberedParagraphs", () => formatNumberedParagraphs);
-__igsDefine(exports, "paragraphNoForAnchor", () => paragraphNoForAnchor);
-__igsDefine(exports, "findAnchorInsertIndex", () => findAnchorInsertIndex);
-__igsDefine(exports, "insertMarkersAtAnchors", () => insertMarkersAtAnchors);
-__igsDefine(exports, "insertMarkers", () => insertMarkers);
-__igsDefine(exports, "appendedTail", () => appendedTail);
-__igsDefine(exports, "reattachTail", () => reattachTail);
-__igsDefine(exports, "transplantMarkers", () => transplantMarkers);
 });
 __igsRegister("src/generated-images/illustration/floor-body-length.js", function(module, exports, require) {
 // 正文空回（只剩思考、状态栏，或寥寥一两句）时不自动生图：按正文过滤规则取出阅读器会显示的正文，
@@ -71379,8 +72541,8 @@ const { fontOptionsWith, loadCustomFonts, registerCustomFonts } = require("src/m
 const { DIALOG_FONT_OPTIONS, PROMPT_RULE_OFF_HINT, PROMPT_RULE_OUTFIT_HINT, PROMPT_RULE_PRESET_HINT, scenePromptRuleOutfitHint, SETTINGS_PANEL_REQUIRED_SELECTORS, SETTINGS_PANEL_TAB_CONTRACT } = require("src/visual/igs-ui/reader-host-constants.js");
 const { PUBLIC_READER_MODES, getReaderModeLabel } = require("src/schemas/reader-mode.js");
 const { esc, toHex } = require("src/visual/igs-ui/reader-value-utils.js");
-const { checkbox, colorInput, field, renderCharacterAssetList, renderMoodGroupList, renderMoodReviewList, renderPinnedButtons, renderSceneAssetList, renderGeneratedAssetPane, countGeneratedWaiting, renderStageShakeSettings, renderChatShowSettings, renderSystemRoleSettings, renderWeatherFxSettings, renderCustomFontManager, renderTemplate, rangeInput, secretInput, segmentedInput, selectInput, textInput, textareaInput, numberInput, hiddenAttr, modelPicker, tableMultiSelect } = require("src/visual/igs-ui/settings-fields.js");
-const { normalizeSettingsTab, normalizeSpriteDefaultScale, normalizeSpriteGenderScale, SPRITE_HEIGHT_RANGE } = require("src/visual/igs-ui/settings-normalize.js");
+const { checkbox, colorInput, field, renderCharacterAssetList, renderMoodGroupList, renderMoodReviewList, renderWorldSummarySection, renderPinnedButtons, renderSceneAssetList, renderGeneratedAssetPane, countGeneratedWaiting, renderStageShakeSettings, renderChatShowSettings, renderSystemRoleSettings, renderWeatherFxSettings, renderCustomFontManager, renderTemplate, rangeInput, secretInput, segmentedInput, selectInput, textInput, textareaInput, numberInput, hiddenAttr, modelPicker, tableMultiSelect } = require("src/visual/igs-ui/settings-fields.js");
+const { normalizeSettingsTab, normalizeSpriteDefaultScale, normalizeSpriteGenderScale, SPRITE_HEIGHT_RANGE, SPRITE_SHORTER_RANGE } = require("src/visual/igs-ui/settings-normalize.js");
 const { createShujukuClient } = require("src/data/shujuku/client.js");
 const { listStatusHudTables, normalizeStatusHudSettings } = require("src/data/shujuku/status-hud-model.js");
 const { isStatusHudPhone, renderStatusHudPositionField, statusHudPositionDevice } = require("src/visual/igs-ui/status-hud-position-fields.js");
@@ -71572,7 +72734,7 @@ function createSettingsRenderer({ normalizeUnifiedSettings, options, rerenderSet
             const sourceNotes = {
                 nai: '使用你的NAI Key直接生成剧情CG、素材和重画。',
                 dbgen: '提示词、画师串和NAI Key在数据库生图插件里设置。',
-                extension: '画风沿用智绘姬；填写 NAI Key 后，生成失败时将改用 NAI。',
+                extension: '画风和尺寸沿用智绘姬，场景背景按 IGS 的背景尺寸出图；填写 NAI Key 后，生成失败时将改用 NAI。',
                 baibai: '后端与画风沿用柏宝绘；填写 NAI Key 后，生成失败时将改用 NAI。',
             };
             const contentNotes = {
@@ -71580,6 +72742,11 @@ function createSettingsRenderer({ normalizeUnifiedSettings, options, rerenderSet
                 dbgen: '当前图像来源：数据库生图插件。',
                 extension: '当前图像来源：智绘姬。',
                 baibai: '当前图像来源：柏宝绘。',
+            };
+            const spriteBackgroundNotes = {
+                auto: '按图像来源：数据库生图按它那里的「立绘透明底」开关（关了用白底），NAI V5用透明底，智绘姬、柏宝绘和其他NAI模型用浅灰底，出图后自动抠图。',
+                transparent: '底色只加 1.5::transparent background::，写词和模板里别的底色词都去掉。出图方没回透明图时照常自动抠图。',
+                matte: '底色只加 simple background, grey background, light grey background, flat color background，别的底色词都去掉，出图后自动抠图。',
             };
             const openaiDisabled = auto.llm.source !== 'openai';
             const llmReady = describeLlmReady(auto.llm);
@@ -71603,6 +72770,8 @@ function createSettingsRenderer({ normalizeUnifiedSettings, options, rerenderSet
                 sourceExtensionHidden: hiddenAttr(sourceMode !== 'extension'),
                 sourceDbgenHidden: hiddenAttr(sourceMode !== 'dbgen'),
                 dbgenSpriteTransparentField: checkbox('bridge.imageApi.dbgenSpriteTransparent', imageApi.dbgenSpriteTransparent !== false, '立绘透明底（V4.5 请关闭，关闭后改为白色背景）'),
+                spriteBackgroundField: field('bridge.autoIllustration.assets.spriteBackground', '立绘底色', segmentedInput('bridge.autoIllustration.assets.spriteBackground', auto.assets.spriteBackground, [['auto', '自动'], ['transparent', '透明底'], ['matte', '浅灰底']], '立绘底色')),
+                spriteBackgroundNote: esc(spriteBackgroundNotes[auto.assets.spriteBackground]),
                 // 分类型模型收在「图像来源 › 模型」下的折叠项里，默认收起；生成开关只在「生图 › 内容」一处。
                 kindModelFields: field('bridge.imageApi.cgModel', '剧情 CG 模型', kindModelPicker('bridge.imageApi.cgModel', imageApi.cgModel, pulledImageModels))
                     + ['sprite', 'background', 'item'].map((kind) => field(`bridge.imageApi.${kind}Model`, { sprite: '立绘模型', background: '背景模型', item: '物品模型' }[kind], kindModelPicker(`bridge.imageApi.${kind}Model`, imageApi[`${kind}Model`], pulledImageModels))).join(''),
@@ -71658,6 +72827,7 @@ function createSettingsRenderer({ normalizeUnifiedSettings, options, rerenderSet
                 autoLlmPromptAssetField: field('bridge.autoIllustration.llm.prompts.asset', '素材补全规划', autoTextarea('bridge.autoIllustration.llm.prompts.asset', auto.llm.prompts.asset, '清空即恢复内置提示词')),
                 autoLlmPromptAssetSoftField: field('bridge.autoIllustration.llm.prompts.assetSoft', '素材补全规划 · 温和重试', autoTextarea('bridge.autoIllustration.llm.prompts.assetSoft', auto.llm.prompts.assetSoft, '清空即恢复内置提示词')),
                 autoLlmContextField: field('bridge.autoIllustration.llm.contextFloors', '参考前文楼层数', numberInput('bridge.autoIllustration.llm.contextFloors', auto.llm.contextFloors, 0, 3)),
+                autoLlmContextBudgetField: field('bridge.autoIllustration.llm.contextBudget', '读取上下文', selectInput('bridge.autoIllustration.llm.contextBudget', auto.llm.contextBudget, [['standard', '标准（本楼前6000字＋前文）'], ['32k', '约3万token'], ['128k', '约12万token'], ['500k', '约50万token'], ['1000k', '约100万token']]), '剧情CG和楼内补背景、立绘时副LLM读多少正文。标准以外整层都读，前文连你的发言从近到远读满为止，资料节选也加长，超时自动放到10分钟；越大越准，也越慢越贵，模型和接口的上下文上限要够。'),
                 autoNaiTransportField: field('bridge.autoIllustration.nai.transport', '传输方式', selectInput('bridge.autoIllustration.nai.transport', auto.nai.transport, [['direct', '浏览器直连'], ['st-proxy', '酒馆CORS代理（需开启enableCorsProxy）']])),
                 autoNaiEndpointField: field('bridge.autoIllustration.nai.endpoint', '接口地址', textInput('bridge.autoIllustration.nai.endpoint', auto.nai.endpoint, '留空使用官方image.novelai.net')),
                 autoNaiKeyField: field('bridge.autoIllustration.nai.apiKey', 'NAI Key', secretInput('bridge.autoIllustration.nai.apiKey', auto.nai.apiKey, 'pst-...')),
@@ -71790,6 +72960,7 @@ function createSettingsRenderer({ normalizeUnifiedSettings, options, rerenderSet
                 spriteHeight: { sceneAssets, reader },
                 resolveUrl: resolveGenerated,
                 expressionNotes: normalizeGeneratedLibrary(sceneAssets.generated).expressionNotes,
+                spriteClear: asyncState.spriteClear || null,
                 folderSelect: (name, opts) => renderAssetFolderSelect('characters', name, assetFolders.characters, opts),
                 scopeTag,
                 isOpen: (key) => Boolean(asyncState.advancedOpen && asyncState.advancedOpen[key]),
@@ -71844,14 +73015,16 @@ function createSettingsRenderer({ normalizeUnifiedSettings, options, rerenderSet
         ${checkbox('bridge.sceneAssets.unifiedSpriteLayout', sceneAssets.unifiedSpriteLayout, '统一角色立绘位置')}
         ${checkbox('bridge.sceneAssets.spriteEnhance.enabled', spriteEnhance.enabled === true, '立绘增强（手机较耗电）')}
         ${checkbox('readerSettings.spriteGenderScale.enabled', spriteGenderScale.enabled, '按性别区分默认高度')}
-        <div class="igs-source-filter-note">根据 DNA 判断性别；已调整过的立绘和单独设置了高度的角色不受影响。</div>
+        <div class="igs-source-filter-note">根据 DNA（没有时看生成 tag）判断性别和老人、儿童；已调整过的立绘和单独设置了高度的角色不受影响。</div>
         <div class="igs-source-filter-grid">
           ${field('readerSettings.spriteDisplayScale', '立绘全局缩放', selectInput('readerSettings.spriteDisplayScale', reader.spriteDisplayScale || 100, [50, 60, 70, 80, 90, 100, 110, 120, 130, 150].map((n) => [n, `${n}%`])))}
           ${field('readerSettings.spriteDefaultScale', '立绘基准高度 %', numberInput('readerSettings.spriteDefaultScale', normalizeSpriteDefaultScale(reader.spriteDefaultScale), SPRITE_HEIGHT_RANGE[0], SPRITE_HEIGHT_RANGE[1]))}
           ${spriteGenderScale.enabled ? `
           ${field('readerSettings.spriteGenderScale.female', '女性默认高度 %', numberInput('readerSettings.spriteGenderScale.female', spriteGenderScale.female, SPRITE_HEIGHT_RANGE[0], SPRITE_HEIGHT_RANGE[1]))}
           ${field('readerSettings.spriteGenderScale.male', '男性默认高度 %', numberInput('readerSettings.spriteGenderScale.male', spriteGenderScale.male, SPRITE_HEIGHT_RANGE[0], SPRITE_HEIGHT_RANGE[1]))}
-          ${field('readerSettings.spriteGenderScale.other', '其他默认高度 %', numberInput('readerSettings.spriteGenderScale.other', spriteGenderScale.other, SPRITE_HEIGHT_RANGE[0], SPRITE_HEIGHT_RANGE[1]))}` : ''}
+          ${field('readerSettings.spriteGenderScale.other', '其他默认高度 %', numberInput('readerSettings.spriteGenderScale.other', spriteGenderScale.other, SPRITE_HEIGHT_RANGE[0], SPRITE_HEIGHT_RANGE[1]))}
+          ${field('readerSettings.spriteGenderScale.elderShorter', '老人比同性别矮', numberInput('readerSettings.spriteGenderScale.elderShorter', spriteGenderScale.elderShorter, SPRITE_SHORTER_RANGE[0], SPRITE_SHORTER_RANGE[1]))}
+          ${field('readerSettings.spriteGenderScale.childShorter', '儿童比同性别矮', numberInput('readerSettings.spriteGenderScale.childShorter', spriteGenderScale.childShorter, SPRITE_SHORTER_RANGE[0], SPRITE_SHORTER_RANGE[1]))}` : ''}
           ${spriteEnhance.enabled === true ? `
           ${field('bridge.sceneAssets.spriteEnhance.mode', '效果', selectInput('bridge.sceneAssets.spriteEnhance.mode', spriteEnhance.mode || 'outline', [['outline', '硬描边'], ['shadow', '投影式']]))}
           ${field('bridge.sceneAssets.spriteEnhance.color', '增强颜色', colorInput('bridge.sceneAssets.spriteEnhance.color', spriteEnhance.color || '#000000'))}
@@ -71887,6 +73060,7 @@ function createSettingsRenderer({ normalizeUnifiedSettings, options, rerenderSet
                     + checkbox('bridge.sceneAssets.promptAdaptive', sceneAssets.promptAdaptive !== false, '按需注入')
                     + '<div class="igs-source-filter-note">仅在需要时附上完整说明。</div></details>',
                 wardrobeSection: renderWardrobe(scopedEntries('wardrobe'), { resolveUrl: resolveGenerated, scopeTag, focus: asyncState.wardrobeFocus || '', lead: scopeFilterBar('wardrobe') }),
+                worldSection: renderWorldSummarySection(sceneAssets),
                 moodSection: checkbox('bridge.sceneAssets.moodAutoClassify', sceneAssets.moodAutoClassify === true, '自动归类（用副API）')
                     + (asyncState.moodAutoStatus ? `<div class="igs-source-filter-note" data-mood-auto-status>${esc(asyncState.moodAutoStatus)}</div>` : '')
                     + renderMoodGroupList(sceneAssets.moodGroups, { isOpen: (key) => Boolean(asyncState.advancedOpen && asyncState.advancedOpen[key]) })
@@ -72368,82 +73542,6 @@ function getReaderModeIcon(mode) {
 
 __igsDefine(exports, "getReaderModeIcon", () => getReaderModeIcon);
 __igsDefine(exports, "READER_MODE_ICONS", () => READER_MODE_ICONS);
-});
-__igsRegister("src/data/shujuku/client.js", function(module, exports, require) {
-function createShujukuClient(api) {
-    return {
-        // kept for backward compat — simulate.test.js depends on this
-        async updateRowAndRefresh(tableName, rowIndex, patch) {
-            if (!api || typeof api.updateRow !== 'function')
-                return { ok: false, reason: 'missing-update-row' };
-            const updateResult = await api.updateRow(tableName, rowIndex, patch);
-            if (!isSuccessful(updateResult))
-                return { ok: false, reason: 'update-row-failed', result: updateResult };
-            if (typeof api.refreshDataAndWorldbook === 'function') {
-                const refreshResult = await api.refreshDataAndWorldbook();
-                if (!isSuccessful(refreshResult))
-                    return { ok: false, reason: 'refresh-worldbook-failed', result: refreshResult };
-            }
-            return { ok: true, tableName, rowIndex, patch };
-        },
-
-        readTables() {
-            if (!api || typeof api.exportTableAsJson !== 'function')
-                return { ok: false, reason: 'missing-api' };
-            try {
-                return { ok: true, data: api.exportTableAsJson() };
-            } catch (e) {
-                return { ok: false, reason: String(e && e.message || 'read-failed') };
-            }
-        },
-
-        async updateCell(tableName, rowIndex, colName, value) {
-            if (!api || typeof api.updateCell !== 'function')
-                return { ok: false, reason: 'missing-api' };
-            const result = await api.updateCell(tableName, rowIndex, colName, String(value));
-            return isSuccessful(result) ? { ok: true } : { ok: false, reason: 'update-failed' };
-        },
-
-        async insertRow(tableName, rowData) {
-            if (!api || typeof api.insertRow !== 'function')
-                return { ok: false, reason: 'missing-api' };
-            const result = await api.insertRow(tableName, rowData);
-            return isSuccessful(result) ? { ok: true } : { ok: false, reason: 'insert-failed' };
-        },
-
-        async deleteRow(tableName, rowIndex) {
-            if (!api || typeof api.deleteRow !== 'function')
-                return { ok: false, reason: 'missing-api' };
-            const result = await api.deleteRow(tableName, rowIndex);
-            return isSuccessful(result) ? { ok: true } : { ok: false, reason: 'delete-failed' };
-        },
-
-        async refresh() {
-            if (!api || typeof api.refreshDataAndWorldbook !== 'function')
-                return { ok: false, reason: 'missing-api' };
-            await api.refreshDataAndWorldbook();
-            return { ok: true };
-        },
-
-        registerCallback(cb) {
-            if (api && typeof api.registerTableUpdateCallback === 'function')
-                api.registerTableUpdateCallback(cb);
-        },
-
-        unregisterCallback(cb) {
-            if (api && typeof api.unregisterTableUpdateCallback === 'function')
-                api.unregisterTableUpdateCallback(cb);
-        },
-    };
-}
-
-function isSuccessful(result) {
-    if (result == null || result === false || result === -1) return false;
-    if (typeof result === 'object' && result.success === false) return false;
-    return true;
-}
-
-__igsDefine(exports, "createShujukuClient", () => createShujukuClient);
 });
 __igsRegister("src/visual/igs-ui/asset-folder-view.js", function(module, exports, require) {
 const { esc } = require("src/visual/igs-ui/reader-value-utils.js");
@@ -73016,63 +74114,6 @@ function createReaderAutoPlay({ read, advance, sync = () => {}, timers = globalT
 
 __igsDefine(exports, "createReaderAutoPlay", () => createReaderAutoPlay);
 __igsDefine(exports, "AUTO_PLAY_SPEEDS", () => AUTO_PLAY_SPEEDS);
-});
-__igsRegister("src/data/shujuku/outfit-clues.js", function(module, exports, require) {
-const { parseTables } = require("src/data/shujuku/table-parser.js");
-const { matchesRecordTable } = require("src/data/shujuku/record-tables.js");
-const { OUTFIT_CLUE_FIELDS } = require("src/data/shujuku/record-model.js");
-const { ITEM_DESCRIPTION_FIELDS } = require("src/data/shujuku/item-catalog.js");
-// 装备表方案 A：只有表头含持有者类列才参与，不按物品名或描述猜归属。
-const ITEM_HOLDER_FIELDS = Object.freeze(['持有者', '所属角色', '拥有者', '穿戴者', '角色']);
-const WORN_STATUS_WORDS = Object.freeze(['穿着', '正在穿', '已穿戴', '已装备', '装备中']);
-const NOT_WORN_STATUS_WORDS = Object.freeze(['收纳', '脱下', '未穿戴', '未装备', '损坏', '遗失']);
-
-const cell = (row, index) => (index >= 0 && Array.isArray(row) ? String(row[index] ?? '').trim() : '');
-const indexOf = (columns, names) => columns.findIndex((column) => names.includes(String(column || '').trim()));
-function isWornStatus(status) {
-    const text = String(status || '');
-    return WORN_STATUS_WORDS.some((w) => text.includes(w)) && !NOT_WORN_STATUS_WORDS.some((w) => text.includes(w));
-}
-
-// 只读收集某角色的服装线索：角色表「穿着打扮」等列（profile）与装备表中正在穿戴的衣物（worn）。
-// 读取失败返回 read-error 与原因，不当作空数据；names 为主名与别名，按单元格全文精确匹配。
-function collectOutfitClues(readResult, names) {
-    if (!readResult || readResult.ok === false) {
-        return { status: 'read-error', reason: String((readResult && readResult.reason) || '读取失败'), profile: [], worn: [] };
-    }
-    const wanted = new Set((Array.isArray(names) ? names : [names]).map((n) => String(n || '').trim()).filter(Boolean));
-    const profile = [];
-    const worn = [];
-    for (const table of parseTables(readResult.data)) {
-        const columns = table.columns;
-        if (matchesRecordTable(table.name, 'inventory')) {
-            const holderIdx = indexOf(columns, ITEM_HOLDER_FIELDS);
-            const statusIdx = indexOf(columns, OUTFIT_CLUE_FIELDS.itemStatus);
-            if (holderIdx < 0 || statusIdx < 0) continue;
-            const textIdx = [indexOf(columns, OUTFIT_CLUE_FIELDS.itemTitle), indexOf(columns, ITEM_DESCRIPTION_FIELDS)];
-            for (const row of table.rows) {
-                if (!wanted.has(cell(row, holderIdx)) || !isWornStatus(cell(row, statusIdx))) continue;
-                const text = textIdx.map((i) => cell(row, i)).filter(Boolean).join(' ');
-                if (text) worn.push(text);
-            }
-            continue;
-        }
-        const nameIdx = indexOf(columns, OUTFIT_CLUE_FIELDS.name);
-        const outfitIdx = indexOf(columns, OUTFIT_CLUE_FIELDS.outfit);
-        if (nameIdx < 0 || outfitIdx < 0) continue;
-        for (const row of table.rows) {
-            const text = wanted.has(cell(row, nameIdx)) ? cell(row, outfitIdx) : '';
-            if (text) profile.push(text);
-        }
-    }
-    return { status: profile.length || worn.length ? 'ready' : 'empty', reason: '', profile, worn };
-}
-
-__igsDefine(exports, "isWornStatus", () => isWornStatus);
-__igsDefine(exports, "collectOutfitClues", () => collectOutfitClues);
-__igsDefine(exports, "ITEM_HOLDER_FIELDS", () => ITEM_HOLDER_FIELDS);
-__igsDefine(exports, "WORN_STATUS_WORDS", () => WORN_STATUS_WORDS);
-__igsDefine(exports, "NOT_WORN_STATUS_WORDS", () => NOT_WORN_STATUS_WORDS);
 });
 __igsRegister("src/generated-images/illustration/clear-current-cg.js", function(module, exports, require) {
 function normalizeIdentity(identity = {}) {
@@ -84028,9 +85069,21 @@ function createIllustrationMessageHost(globalObject = globalThis) {
         const ctx = context();
         const chat = ctx && Array.isArray(ctx.chat) ? ctx.chat : [];
         const out = [];
-        for (let i = Number(messageId) - 1; i >= 0 && out.length < count; i -= 1) {
+        for (let i = Math.min(Number(messageId), chat.length) - 1; i >= 0 && out.length < count; i -= 1) {
             const msg = chat[i];
             if (msg && !msg.is_user && !msg.is_system && typeof msg.mes === 'string') out.unshift(msg.mes);
+        }
+        return out;
+    }
+
+    // 本楼之前最近 count 条消息（用户和 AI，不含系统消息）：[{ isUser, text }]，旧的在前。
+    function readPreviousMessages(messageId, count) {
+        const ctx = context();
+        const chat = ctx && Array.isArray(ctx.chat) ? ctx.chat : [];
+        const out = [];
+        for (let i = Math.min(Number(messageId), chat.length) - 1; i >= 0 && out.length < count; i -= 1) {
+            const msg = chat[i];
+            if (msg && !msg.is_system && typeof msg.mes === 'string') out.unshift({ isUser: msg.is_user === true, text: msg.mes });
         }
         return out;
     }
@@ -84122,7 +85175,7 @@ function createIllustrationMessageHost(globalObject = globalThis) {
     }
 
     return {
-        getChatId, getUserName, getCharacterNames, readCharacterLore, readFloor, readPreviousAiTexts, writeFloor, on, attachPromptStrip, ensureMarkerRegexes,
+        getChatId, getUserName, getCharacterNames, readCharacterLore, readFloor, readPreviousAiTexts, readPreviousMessages, writeFloor, on, attachPromptStrip, ensureMarkerRegexes,
         destroy() { while (cleanups.length) cleanups.pop()(); },
     };
 }
@@ -84614,15 +85667,18 @@ __igsDefine(exports, "createIndexedDbCgIndexStore", () => createIndexedDbCgIndex
 __igsRegister("src/generated-images/illustration/asset-generation-service.js", function(module, exports, require) {
 const { numberParagraphs } = require("src/generated-images/illustration/marker-placer.js");
 const { MIN_AUTO_IMAGE_BODY_CHARS, floorBodyLength } = require("src/generated-images/illustration/floor-body-length.js");
+const { STANDARD_FLOOR_CHARS, contextBudgetChars, plannerLlmSettings, readPlannerContext, readableText } = require("src/generated-images/illustration/planner-context.js");
 const { buildAssetPlannerUserPrompt, parseAssetPlan, buildAssetSlot, buildDictionaryAssetItems } = require("src/generated-images/illustration/asset-prompt.js");
 const { requestWithSoftRetry } = require("src/generated-images/illustration/prompt-kit.js");
+const { writeCharacterPersona, writeWorldSummary } = require("src/generated-images/illustration/persona-writer.js");
+const { worldContextOf } = require("src/scene/worldview.js");
 const { normalizeAutoIllustrationSettings, isStrictBackgroundMatch } = require("src/generated-images/illustration/auto-illustration-settings.js");
 const { cgSizeForMode } = require("src/generated-images/illustration/auto-illustration-service.js");
 const { supportsNaiTransparentBackground } = require("src/generated-images/request-builders/nai-v4-builder.js");
 const { collectAssetNeeds, tempAssetKeyOf, GENERATED_ASSET_URL_PREFIX, generatedAssetIdOf, isGeneratedAssetUrl } = require("src/scene/asset-match.js");
 const { floorKeyOf } = require("src/media/illustration-store.js");
 const { GENERATED_IMAGE_SCHEMA_VERSION, isLegacyGeneratedImage, isQuotaError, normalizeGeneratedImageRecord } = require("src/media/generated-asset-store.js");
-const { buildCharacterAvatarDescription, buildCharacterSpriteDescription, buildDbgenAssetDescription, buildDbgenBackgroundBatchDescription, buildDbgenSpriteBatchDescription, buildExpressionDiffDescription, buildWardrobeClothingDescription, nsfwClothingBoostLine, applyCharacterDnaToCaption, applyLookToCaption, applyMoodToCaption, expressionLookTags, expressionPaintDna, expressionSpritePrompts, splitExpressionWriteBatches, splitWriteBatches, uprightSpriteCaption } = require("src/generated-images/dbgen-prompt.js");
+const { dropBackgroundTags, buildCharacterAvatarDescription, buildCharacterSpriteDescription, buildDbgenAssetDescription, buildDbgenBackgroundBatchDescription, buildDbgenSpriteBatchDescription, buildExpressionDiffDescription, buildWardrobeClothingDescription, nsfwClothingBoostLine, applyCharacterDnaToCaption, applyLookToCaption, applyMoodToCaption, expressionLookTags, expressionPaintDna, expressionSpritePrompts, splitExpressionWriteBatches, splitWriteBatches, uprightSpriteCaption } = require("src/generated-images/dbgen-prompt.js");
 const { normalizeStoredPrompt, promptFromCaption } = require("src/generated-images/generation-prompt.js");
 const { promptTimeBucket, sceneVariantCaption, sceneVariantTags } = require("src/generated-images/scene-variant-tags.js");
 const { sceneTimeBucket } = require("src/scene/time-bucket.js");
@@ -84630,6 +85686,16 @@ const { resolveCharacterKey } = require("src/scene/scene-directives.js");
 const { isCharacterDnaEmpty, resolveCharacterDna } = require("src/scene/character-dna.js");
 const GENERATED_ASSET_UPDATED_EVENT = 'igs:generated-asset-updated';
 const IMAGE_CACHE_LIMIT = 60;
+// 素材补全查前文：往前看多少层 AI 楼、每个地点 / 角色最多附多少字。
+const MENTION_FLOORS = 30;
+const MENTION_LIMIT = 800;
+// 长楼层里本楼前 EXCERPT_AFTER 字之后才出现的地点 / 角色另附本楼节选（整层都读时也附，帮副 LLM 对准那一段）：
+// 地点取场景标签前 SCENE_LEAD 字（进门、到达时的描写）和标签后 SCENE_BODY 字（刚进去时的样子），
+// 角色取提到他的段落（先出场的在前），最多 FLOOR_MENTION_LIMIT 字。
+const EXCERPT_AFTER = STANDARD_FLOOR_CHARS;
+const SCENE_LEAD = 2000;
+const SCENE_BODY = 1500;
+const FLOOR_MENTION_LIMIT = 1500;
 // 正在显示的图不淘汰：一页缩略图超过上限时，按张数硬淘汰会把刚读回的图挤掉，
 // 重绘后又缺图再读，循环闪「载入中」。近几秒内被取用过的图保留，离开页面后再按上限回收。
 const IMAGE_IN_USE_MS = 5000;
@@ -84643,10 +85709,6 @@ const ACTIVE_TEMP_STATUSES = new Set(['review', 'chat']);
 
 function randomSeed() {
     return Math.floor(Math.random() * 4294967295);
-}
-
-function toReadableText(raw) {
-    return numberParagraphs(raw).paragraphs.map((p) => p.text).join('\n');
 }
 
 // 按既有别名归约为立绘需求挂上主名 DNA；空 DNA 不挂，保持无 DNA 时的旧行为。
@@ -84801,6 +85863,16 @@ function createAssetGenerationService(deps) {
         return tempUrl(currentTempRecords().get(tempAssetKeyOf(tempChatId, { type: 'sprite', name })));
     }
 
+    // 待确认 / 仅本聊天使用的立绘生成时写的 tag（第一个是 1girl / 1boy）：{ 角色名: tags }。
+    // 这些角色通常没有 DNA，立绘默认高度据此判断性别。
+    function tempSpriteTags() {
+        const out = {};
+        for (const record of currentTempRecords().values()) {
+            if (record.type === 'sprite' && record.name && record.tags && tempUrl(record)) out[record.name] = String(record.tags);
+        }
+        return out;
+    }
+
     // 同步取图：命中内存直接返回；否则异步从 IndexedDB 补并在补完后通知重渲染。
     function resolveUrl(url) {
         if (!isGeneratedAssetUrl(url)) return String(url || '');
@@ -84907,8 +85979,8 @@ function createAssetGenerationService(deps) {
     }
 
     // 立绘图片记录 schema v2：保存不可变原图、当前透明结果、遮罩与 revision；dataUrl 仍是旧消费者读取的透明结果。
-    async function buildSpriteImageRecord(imageId, originalDataUrl, transparent, createdAt) {
-        const raw = await matte(originalDataUrl, { alreadyTransparent: transparent, detailed: true });
+    async function buildSpriteImageRecord(imageId, originalDataUrl, alreadyTransparent, createdAt) {
+        const raw = await matte(originalDataUrl, { alreadyTransparent, detailed: true });
         // 兼容旧注入：matte 只返回字符串时按旧契约处理，没有遮罩。
         const result = typeof raw === 'string'
             ? { dataUrl: raw, alphaMaskDataUrl: '' }
@@ -84945,31 +86017,40 @@ function createAssetGenerationService(deps) {
         }
     }
 
+    // 立绘底色（「生图 → 立绘底色」）：选了透明底 / 浅灰底就照选的写底色标签。自动时：数据库生图按它的「立绘透明底」开关
+    // （关了用白底），NAI V5（有立绘单独模型时看它）透明底，模板 / 画师串里写了 transparent background 也走透明底，
+    // 其余（智绘姬、柏宝绘、NAI 4.5 等）浅灰底。
+    // alreadyTransparent 只在能向出图端要原生透明（数据库生图开着透明底、NAI V5）时为真：请求带透明参数，抠图直接裁边；
+    // 智绘姬 / 柏宝绘照透明底写词也不一定真回透明图，交给抠图看四边自己判断。
+    function spriteBackgroundOf(s) {
+        const via = nai && typeof nai.describe === 'function' ? nai.describe().via : 'nai';
+        const native = via === 'dbgen'
+            ? s.dbgenSpriteTransparent !== false
+            : via === 'nai' && supportsNaiTransparentBackground(s.spriteModel || s.auto.nai.model);
+        const mode = s.auto.assets.spriteBackground;
+        const white = mode === 'auto' && via === 'dbgen' && s.dbgenSpriteTransparent === false;
+        const asked = /transparent background/i.test(`${s.auto.assets.templates.sprite} ${s.auto.nai.artistPrefix}`);
+        const transparent = mode === 'transparent' || (mode === 'auto' && !white && (native || asked));
+        return { transparent, white, alreadyTransparent: transparent && native };
+    }
+
     async function generateItem(item, s, floor, floorKey) {
         const isSprite = item.need.type === 'sprite';
-        // 智绘姬 / 柏宝绘出图不保证透明底：走它们时按浅灰底模板出图并抠图，不信任 NAI 模型的原生透明能力。
-        // 数据库生图的立绘默认打开透明底，可在图像来源里关掉（V4.5 没有原生透明底）。
-        const plannedVia = nai && typeof nai.describe === 'function' ? nai.describe().via : 'nai';
-        const dbgenTransparent = plannedVia === 'dbgen' && s.dbgenSpriteTransparent !== false;
-        const transparent = isSprite && plannedVia !== 'chatu8' && plannedVia !== 'baibai'
-            && (dbgenTransparent || (plannedVia !== 'dbgen' && supportsNaiTransparentBackground(s.spriteModel || s.auto.nai.model)));
-        const slot = buildAssetSlot(item, {
-            transparent,
-            whiteBackground: isSprite && plannedVia === 'dbgen' && !dbgenTransparent,
-            templates: s.auto.assets.templates,
-            positiveContext: s.auto.nai.artistPrefix,
-        });
+        const bg = isSprite ? spriteBackgroundOf(s) : { transparent: false, white: false, alreadyTransparent: false };
+        const slot = buildAssetSlot(item, { transparent: bg.transparent, whiteBackground: bg.white, templates: s.auto.assets.templates });
         const size = isSprite ? s.auto.assets.spriteSize : backgroundSize(s);
         // 数据库生图：描述只说明画什么。正负模板随 userPrompts 传出，出图前合并进最终 caption。
-        const userPrompts = { positive: slot.scene, negative: slot.sceneUc };
+        const userPrompts = { positive: slot.scene, negative: slot.sceneUc, ...(isSprite && { spriteBackground: true }) };
         const meta = {
-            messageId: floor.messageId, size, description: buildDbgenAssetDescription(item.need, { transparent: dbgenTransparent }), userPrompts,
+            messageId: floor.messageId, size, description: buildDbgenAssetDescription(item.need), userPrompts,
             skipRecall: true,
             imageKind: isSprite ? 'sprite' : 'background',
-            ...(dbgenTransparent && { transparent: true }),
+            ...(bg.alreadyTransparent && { transparent: true }),
         };
+        // 立绘走内置 NAI 时画师串排在最前，里面的底色标签也去掉，底色只留「立绘底色」那一组。
+        const naiSettings = { ...s.auto.nai, size, ...(isSprite && { artistPrefix: dropBackgroundTags(s.auto.nai.artistPrefix) }) };
         let result;
-        try { result = await nai.generate(slot, { ...s.auto.nai, size }, meta); } catch (error) { result = { ok: false, error: `NAI 生成失败：${(error && error.message) || error}` }; }
+        try { result = await nai.generate(slot, naiSettings, meta); } catch (error) { result = { ok: false, error: `NAI 生成失败：${(error && error.message) || error}` }; }
         const key = tempAssetKeyOf(floor.chatId, item.need);
         const base = {
             key, chatId: floor.chatId, floorKey, messageId: floor.messageId, swipeId: floor.swipeId,
@@ -84980,7 +86061,7 @@ function createAssetGenerationService(deps) {
         if (result && result.ok && result.dataUrl) {
             const imageId = newId();
             const image = isSprite
-                ? await buildSpriteImageRecord(imageId, result.dataUrl, transparent, base.createdAt)
+                ? await buildSpriteImageRecord(imageId, result.dataUrl, bg.alreadyTransparent, base.createdAt)
                 : { id: imageId, dataUrl: result.dataUrl, type: item.need.type, createdAt: base.createdAt };
             const prompt = normalizeStoredPrompt(result.prompt);
             if (prompt) image.prompt = prompt;
@@ -85104,7 +86185,7 @@ function createAssetGenerationService(deps) {
     async function generateSpriteBatch(items, s, floor, floorKey) {
         const records = [];
         let stopError = '';
-        const transparent = s.dbgenSpriteTransparent !== false;
+        const bg = spriteBackgroundOf(s);
         const putSpriteRecord = async (item, result) => {
             const key = tempAssetKeyOf(floor.chatId, item.need);
             const base = {
@@ -85115,7 +86196,7 @@ function createAssetGenerationService(deps) {
             let record;
             if (result && result.ok && result.dataUrl) {
                 const imageId = newId();
-                const image = await buildSpriteImageRecord(imageId, result.dataUrl, transparent, base.createdAt);
+                const image = await buildSpriteImageRecord(imageId, result.dataUrl, bg.alreadyTransparent, base.createdAt);
                 const prompt = normalizeStoredPrompt(result.prompt);
                 if (prompt) image.prompt = prompt;
                 const saved = await putImageWithQuotaFallback(image);
@@ -85138,7 +86219,7 @@ function createAssetGenerationService(deps) {
             let written;
             try {
                 written = await nai.writeDbgenPrompt({
-                    description: buildDbgenSpriteBatchDescription(batch.map((item) => item.need), { transparent }),
+                    description: buildDbgenSpriteBatchDescription(batch.map((item) => item.need), { world: worldContextOf(s.sceneAssets) }),
                     messageId: floor.messageId,
                 });
             } catch (error) {
@@ -85154,7 +86235,7 @@ function createAssetGenerationService(deps) {
                 const item = batch[index];
                 const found = captions.find((entry) => Number(entry.slotId) === index + 1);
                 const caption = found && found.caption;
-                const slot = buildAssetSlot(item, { transparent, whiteBackground: !transparent, templates: s.auto.assets.templates });
+                const slot = buildAssetSlot(item, { transparent: bg.transparent, whiteBackground: bg.white, templates: s.auto.assets.templates });
                 const prompts = expressionSpritePrompts(slot.scene, slot.sceneUc);
                 let result;
                 if (!caption) {
@@ -85166,8 +86247,8 @@ function createAssetGenerationService(deps) {
                             size: s.auto.assets.spriteSize,
                             imageKind: 'sprite',
                             messageId: floor.messageId,
-                            ...(transparent && { transparent: true }),
-                            userPrompts: { positive: prompts.positive, negative: prompts.negative },
+                            ...(bg.alreadyTransparent && { transparent: true }),
+                            userPrompts: { positive: prompts.positive, negative: prompts.negative, spriteBackground: true },
                         });
                     } catch (error) {
                         result = { ok: false, error: `NAI 生成失败：${(error && error.message) || error}` };
@@ -85222,6 +86303,16 @@ function createAssetGenerationService(deps) {
         const variantNeeds = backgroundNeeds.filter((need) => need.variantOf);
         const needs = [...backgroundNeeds.filter((need) => !need.variantOf), ...spriteNeeds];
         attachCharacterDna(needs, s.sceneAssets);
+        const floorText = numbered.paragraphs.map((p) => p.text).join('\n');
+        // 「读取上下文」加大预算时，规划另附全部设定资料（三成预算），前文相应少读。
+        const budget = contextBudgetChars(s.auto.llm);
+        const settingMaterial = needs.length && budget ? await readSettingMaterial(needs.map((need) => need.name), Math.floor(budget * 0.3)) : '';
+        const context = needs.length ? plannerContextOf(messageId, s, floorText.length, settingMaterial.length) : { budget: 0, floorChars: STANDARD_FLOOR_CHARS, previousText: '' };
+        await attachSources(needs, context.budget > 0);
+        attachFloorExcerpts(needs, numbered);
+        // 前文里更早提到这些地点 / 角色的段落另挂进 need.sources：标准长度时只附【前文（原文，从早到近）】里没有的；
+        // 加大预算时前文整段都读了，照样附上，帮副 LLM 对准。
+        attachMentions(needs, needs.length ? readHistory(messageId) : [], context.budget ? '' : context.previousText);
         if (!needs.length && !variantNeeds.length) {
             await store.putFloor(key, { status: 'done', count: 0, updatedAt: now() });
             return { ok: true, reason: 'nothing-missing' };
@@ -85253,8 +86344,6 @@ function createAssetGenerationService(deps) {
         } else if (needs.length) {
             report('info', `第 ${messageId} 楼缺少 ${needs.length} 项素材，正在请求副 LLM…`);
             try {
-                const previousText = messageHost.readPreviousAiTexts(messageId, s.auto.llm.contextFloors)
-                    .map(toReadableText).join('\n').slice(-1500);
                 // 没登记 DNA 的角色补酒馆里的外貌参考（用户人设、角色卡、世界书），DNA 仍优先。
                 const loreNames = needs.filter((need) => need.type === 'sprite' && !need.dna).map((need) => need.name);
                 const lore = loreNames.length && typeof messageHost.readCharacterLore === 'function'
@@ -85263,9 +86352,9 @@ function createAssetGenerationService(deps) {
                 plan = await requestWithSoftRetry(llm, {
                     system: s.auto.llm.prompts.asset,
                     softSystem: s.auto.llm.prompts.assetSoft,
-                    user: buildAssetPlannerUserPrompt({ needs, readableText: toReadableText(floor.text).slice(0, 6000), previousText, lore }),
+                    user: buildAssetPlannerUserPrompt({ needs, readableText: floorText.slice(0, context.floorChars), previousText: context.previousText, lore, settingMaterial, world: worldContextOf(s.sceneAssets) }),
                     parse: (reply) => parseAssetPlan(reply, needs),
-                }, s.auto.llm);
+                }, plannerLlmSettings(s.auto.llm));
             } catch (error) {
                 plan = { ok: false, error: '副 LLM 规划失败' };
             }
@@ -85316,6 +86405,142 @@ function createAssetGenerationService(deps) {
             result.error = `${failedCount} 项失败${count ? `（成功 ${count} 项）` : ''}：${unique.length === 1 ? unique[0] : errors.join('；')}`;
         }
         return result;
+    }
+
+    // 本楼新角色的立绘与缺的背景：附上角色卡 / 世界书 / 数据库里提到这个角色或地点的节选
+    // （宿主读：角色走 readCharacterSources，地点走 readSceneSources；没接或读不到就不附，照旧补图）。
+    // large：加大了「读取上下文」预算，节选按长的给。
+    async function attachSources(needs, large = false) {
+        for (const [type, read] of [['sprite', deps.readCharacterSources], ['background', deps.readSceneSources]]) {
+            const list = needs.filter((need) => need && need.type === type && need.name);
+            if (!list.length || typeof read !== 'function') continue;
+            let found = {};
+            try {
+                found = (await read(list.map((need) => need.name), { large })) || {};
+            } catch (error) {
+                continue;
+            }
+            for (const need of list) {
+                const text = String(found[need.name] || '').trim();
+                if (text) need.sources = text;
+            }
+        }
+    }
+
+    // 按字数取段落：从 list 头上取到 limit 字为止，最后一段截短；fromEnd 时从尾上往前取。
+    function takeParagraphs(list, limit, fromEnd = false) {
+        const ordered = fromEnd ? list.slice().reverse() : list;
+        const kept = [];
+        let used = 0;
+        for (const p of ordered) {
+            if (used >= limit) break;
+            const text = fromEnd ? p.text.slice(-(limit - used)) : p.text.slice(0, limit - used);
+            kept.push({ ...p, text });
+            used += text.length;
+        }
+        return fromEnd ? kept.reverse() : kept;
+    }
+
+    // 长楼层里副 LLM 读不到的那部分：地点附场景标签前后的正文，角色附提到他的段落，挂到 need.sources。
+    function attachFloorExcerpts(needs, numbered) {
+        let offset = 0;
+        const paragraphs = numbered.paragraphs.map((p) => {
+            const item = { ...p, end: offset + p.text.length };
+            offset += p.text.length + 1;
+            return item;
+        });
+        const unseen = paragraphs.filter((p) => p.end > EXCERPT_AFTER);
+        if (!unseen.length) return;
+        const attach = (need, label, picked) => {
+            const text = picked.filter((p) => p.end > EXCERPT_AFTER).map((p) => p.text.trim()).filter(Boolean).join('\n');
+            if (text) need.sources = [need.sources, `【本楼·${label}】\n${text}`].filter(Boolean).join('\n\n');
+        };
+        for (const need of needs) {
+            const name = String(need && need.name || '').trim();
+            if (!name) continue;
+            if (need.type === 'background') {
+                const tag = numbered.scenes.find((scene) => scene.scene === name && scene.time === need.time)
+                    || numbered.scenes.find((scene) => scene.scene === name);
+                if (!tag || !Number.isInteger(tag.lineIndex)) continue;
+                const next = numbered.scenes.find((scene) => scene.lineIndex > tag.lineIndex && scene.scene !== name);
+                const lead = takeParagraphs(paragraphs.filter((p) => p.lineIndex < tag.lineIndex), SCENE_LEAD, true);
+                const body = takeParagraphs(paragraphs.filter((p) => p.lineIndex > tag.lineIndex && (!next || p.lineIndex < next.lineIndex)), SCENE_BODY);
+                attach(need, `「${name}」前后的正文`, [...lead, ...body]);
+            } else {
+                attach(need, `提到「${name}」的段落`, takeParagraphs(unseen.filter((p) => p.text.includes(name)), FLOOR_MENTION_LIMIT));
+            }
+        }
+    }
+
+    // 本楼正文读多少、前文读哪些（见 planner-context）；读不到前文就当没有。reserved：同一份提示词里设定资料占的字数。
+    function plannerContextOf(messageId, s, floorLength, reserved = 0) {
+        try {
+            return readPlannerContext(messageHost, messageId, s.auto.llm, floorLength, reserved);
+        } catch (error) {
+            return { budget: 0, floorChars: STANDARD_FLOOR_CHARS, previousText: '' };
+        }
+    }
+
+    // 全部设定资料（宿主读：整张角色卡、所有世界书含全局、数据库），提到 names 的排前面，最多 limit 字。
+    async function readSettingMaterial(names, limit) {
+        if (!(limit > 0) || typeof deps.readSettingMaterial !== 'function') return '';
+        try {
+            return String((await deps.readSettingMaterial(names, { limit })) || '').trim();
+        } catch (error) {
+            return '';
+        }
+    }
+
+    const characterNamesOf = (name, s) => {
+        const aliases = s.sceneAssets.characterAliases && Array.isArray(s.sceneAssets.characterAliases[name]) ? s.sceneAssets.characterAliases[name] : [];
+        return [name, ...aliases];
+    };
+    const SPRITE_MATERIAL_GUIDE = (name) => `下面先给出这个故事的设定资料（角色卡、世界书、数据库）和正文原文，供你把「${name}」画准：长相、身材和固定特征以后面说明里的角色设定（DNA）为准；设定没写到的，按资料和正文里对「${name}」的描写补；穿着、发型、配饰后面说明指定了就照说明，没指定的按正文里最近的样子；身体状态（例如怀孕、受伤包扎）也按正文里最近的样子写上。资料和正文里的剧情、其他角色不要画进去。`;
+    const EXPRESSION_MATERIAL_GUIDE = (name) => `下面先给出这个故事的设定资料（角色卡、世界书、数据库）和正文原文：「${name}」每个表情的幅度和方式，照正文里这个角色说话做事的样子来定。长相和衣服按后面的说明，不要按正文改；资料和正文里的剧情、其他角色不要画进去。`;
+
+    // 设置页写立绘 / 头像 / 表情差分：「读取上下文」加大预算时，说明前面附上全部设定资料（四成预算）
+    // 和正文原文（连用户发言，从最新往前读满剩下的预算）。标准长度、或者走数据库生图插件（它自己读上下文）时原样返回。
+    async function writingMaterial(names, guide) {
+        const s = readSettings();
+        const budget = contextBudgetChars(s.auto.llm);
+        const backend = nai && typeof nai.describe === 'function' ? nai.describe() : {};
+        const unchanged = (description) => description;
+        if (!budget || backend.ownPrompts) return unchanged;
+        const setting = await readSettingMaterial(names, Math.floor(budget * 0.4));
+        const story = plannerContextOf(Number.POSITIVE_INFINITY, s, 0, setting.length).previousText;
+        if (!setting && !story) return unchanged;
+        const prefix = [guide, setting ? `【设定资料】\n${setting}` : '', story ? `【正文（原文，从早到近）】\n${story}` : ''].filter(Boolean).join('\n\n');
+        return (description) => `${prefix}\n\n【这次要写的】\n${description}`;
+    }
+
+    // 本楼之前最近 MENTION_FLOORS 层 AI 楼的正文（去掉标签），旧的在前。读不到就当没有前文。
+    function readHistory(messageId) {
+        if (typeof messageHost.readPreviousAiTexts !== 'function') return [];
+        try {
+            return (messageHost.readPreviousAiTexts(messageId, MENTION_FLOORS) || []).map(readableText);
+        } catch (error) {
+            return [];
+        }
+    }
+
+    // 长相、穿着、地点的样子常在好几层前写过：前文里提到这个名字的段落挂到 need.sources 末尾，
+    // 已经在【前文（原文，从早到近）】里的不重复，超长时留最近的。
+    function attachMentions(needs, history, shownText) {
+        const paragraphs = history.flatMap((text) => text.split('\n')).map((line) => line.trim()).filter(Boolean);
+        for (const need of needs) {
+            const name = String(need && need.name || '').trim();
+            if (!name) continue;
+            const kept = [];
+            let used = 0;
+            for (let i = paragraphs.length - 1; i >= 0; i -= 1) {
+                const line = paragraphs[i];
+                if (!line.includes(name) || shownText.includes(line)) continue;
+                if (used + line.length > MENTION_LIMIT) break;
+                kept.unshift(line);
+                used += line.length;
+            }
+            if (kept.length) need.sources = [need.sources, `【前文·提到「${name}」的段落】\n${kept.join('\n')}`].filter(Boolean).join('\n\n');
+        }
     }
 
     async function processMessage(messageId, { manual = false } = {}) {
@@ -85409,33 +86634,29 @@ function createAssetGenerationService(deps) {
         return record && record.dataUrl ? record.dataUrl : '';
     }
 
-    // 透明底只信数据库生图与支持原生透明的 NAI 模型；智绘姬 / 柏宝绘 / 其余 NAI 模型按浅灰底出图再抠图。
+    // 表情差分、默认立绘与衣柜参考图出图用的 meta；底色按「立绘底色」设置，见 spriteBackgroundOf。
     function expressionPaintMeta() {
         const s = readSettings();
-        const via = nai && typeof nai.describe === 'function' ? nai.describe().via : 'nai';
-        const dbgenTransparent = via === 'dbgen' && s.dbgenSpriteTransparent !== false;
-        const transparent = dbgenTransparent || (via === 'nai' && supportsNaiTransparentBackground(s.spriteModel || s.auto.nai.model));
+        const bg = spriteBackgroundOf(s);
         const slot = buildAssetSlot(
             { need: { type: 'sprite', name: '' }, tags: '', uc: '' },
-            {
-                transparent,
-                whiteBackground: via === 'dbgen' && !dbgenTransparent,
-                templates: s.auto.assets.templates,
-                positiveContext: s.auto.nai.artistPrefix,
-            },
+            { transparent: bg.transparent, whiteBackground: bg.white, templates: s.auto.assets.templates },
         );
         const prompts = expressionSpritePrompts(slot.scene, slot.sceneUc);
         return {
             size: s.auto.assets.spriteSize,
             imageKind: 'sprite',
-            userPrompts: { positive: prompts.positive, negative: prompts.negative },
-            transparent,
+            userPrompts: { positive: prompts.positive, negative: prompts.negative, spriteBackground: true },
+            // 能向出图端要原生透明时才带透明参数；抠图也按它决定直接裁边还是看四边判断。
+            transparent: bg.alreadyTransparent,
         };
     }
 
     // 标签顺序：DNA → 表情 → 衣服与长相 → 写词结果。exact：用户改过的词原样出图，不硬合，新图继续记为「改过」。
     async function paintExpressionCaption(name, mood, caption, dna, { look = '', seed, nsfw = false, exact = false } = {}) {
-        const upright = exact ? caption : (uprightSpriteCaption(applyCharacterDnaToCaption(applyMoodToCaption(applyLookToCaption(caption, look), mood, { nsfw }), dna)) || caption);
+        // 情绪组的 tag 设置从当前素材库读；只有打开「固定加上」的组才会放。
+        const groups = readSettings().sceneAssets.moodGroups;
+        const upright = exact ? caption : (uprightSpriteCaption(applyCharacterDnaToCaption(applyMoodToCaption(applyLookToCaption(caption, look), mood, { nsfw, groups }), dna)) || caption);
         const meta = expressionPaintMeta();
         let painted;
         try {
@@ -85471,7 +86692,7 @@ function createAssetGenerationService(deps) {
     // 一批写完并逐张出完，再写下一批；某一张失败不影响后面的。
     // 插件少给某几份时只在这一批里补写；signal 中止后已画好的图保留，还没写的批不再写。
     // 一次点击里各批共用一颗新种子：衣服、画风接近；删掉重来、补画都是新种子，不会画回旧图。
-    async function generateExpressionSet({ name, basePrompt, moods, dna, outfit, note, nsfw, onProgress, signal } = {}) {
+    async function generateExpressionSet({ name, basePrompt, moods, dna, outfit, note, nsfw, world = null, onProgress, signal } = {}) {
         const labels = (Array.isArray(moods) ? moods : []).map((item) => String(item || '').trim()).filter(Boolean);
         if (!labels.length) return { ok: false, error: '没有表情分组' };
         if (!nai || typeof nai.writeDbgenPrompt !== 'function' || typeof nai.generateDbgenCaption !== 'function') {
@@ -85484,9 +86705,14 @@ function createAssetGenerationService(deps) {
         };
         const paintDna = expressionPaintDna(dna, outfit);
         const stopped = () => Boolean(signal && signal.aborted);
+        // 资料和正文每批都一样，只读一次。
+        const withMaterial = await writingMaterial(characterNamesOf(name, readSettings()), EXPRESSION_MATERIAL_GUIDE(name));
         const items = [];
         let painted = 0;
         let writeError = '';
+        // 分批写时每批是一次独立的写词：外貌、身体状态（怀孕之类只写在正文里的）容易一批有一批没有。
+        // 后面的批次照第一批写好的第一份来。
+        let anchor = null;
         for (const batch of splitExpressionWriteBatches(labels)) {
             if (stopped()) break;
             if (writeError) {
@@ -85501,7 +86727,7 @@ function createAssetGenerationService(deps) {
                 let written;
                 try {
                     written = await nai.writeDbgenPrompt({
-                        description: buildExpressionDiffDescription(name, basePrompt, pending, dna, outfit, { note, nsfw: paint.nsfw, transparent: readSettings().dbgenSpriteTransparent !== false }),
+                        description: withMaterial(buildExpressionDiffDescription(name, basePrompt, pending, dna, outfit, { note, nsfw: paint.nsfw, world, anchor })),
                     });
                 } catch (error) {
                     const message = (error && error.message) || '写提示词失败';
@@ -85518,6 +86744,10 @@ function createAssetGenerationService(deps) {
                     break;
                 }
                 const captions = Array.isArray(written.captions) ? written.captions : [];
+                if (!anchor) {
+                    const first = captions.find((item) => item && item.caption);
+                    if (first) anchor = first.caption;
+                }
                 const missing = [];
                 for (let i = 0; i < pending.length; i += 1) {
                     if (stopped()) {
@@ -85571,7 +86801,7 @@ function createAssetGenerationService(deps) {
 
     // 单张重画：有这一格的提示词就不再写词（写词要等插件的模型，单张也得几十秒），
     // 直接叠上当前的表情、衣服、DNA 硬合再出图；显式换一颗随机种子——不传种子时插件用自己的配置，固定种子会画出同一张。
-    async function generateExpressionImage({ name, mood, caption, exact = false, basePrompt, dna, outfit, note, nsfw, onProgress } = {}) {
+    async function generateExpressionImage({ name, mood, caption, exact = false, basePrompt, dna, outfit, note, nsfw, world = null, onProgress } = {}) {
         const label = String(mood || '').trim();
         if (!label) return { ok: false, error: '没有表情' };
         if (caption) {
@@ -85580,7 +86810,7 @@ function createAssetGenerationService(deps) {
             const item = await paintExpressionCaption(name, label, caption, expressionPaintDna(dna, outfit), { look, seed: randomSeed(), nsfw: nsfw === true, exact: exact === true });
             return { ok: true, items: [item] };
         }
-        return generateExpressionSet({ name, basePrompt, moods: [label], dna, outfit, note, nsfw, onProgress });
+        return generateExpressionSet({ name, basePrompt, moods: [label], dna, outfit, note, nsfw, world, onProgress });
     }
 
     // 场景时间/天气差分：读场景原图存下的提示词，换上目标时间天气标签直接出图，不写词。
@@ -85629,7 +86859,7 @@ function createAssetGenerationService(deps) {
     }
 
     // 状态栏头像：Q 版大头，方图、不抠图，直接把图交回去，由设置页缩小后存进头像。
-    async function generateCharacterAvatar({ name, dna, onProgress } = {}) {
+    async function generateCharacterAvatar({ name, dna, world = null, sourcesText = '', onProgress } = {}) {
         const who = String(name || '').trim();
         if (!who) return { ok: false, error: '没有角色' };
         if (!nai || typeof nai.writeDbgenPrompt !== 'function' || typeof nai.generateDbgenCaption !== 'function') {
@@ -85638,7 +86868,8 @@ function createAssetGenerationService(deps) {
         reportExpressionProgress(onProgress, { phase: 'write', done: 0, total: 1, mood: '头像' });
         let written;
         try {
-            written = await nai.writeDbgenPrompt({ description: buildCharacterAvatarDescription(who, dna) });
+            const withMaterial = await writingMaterial(characterNamesOf(who, readSettings()), SPRITE_MATERIAL_GUIDE(who));
+            written = await nai.writeDbgenPrompt({ description: withMaterial(buildCharacterAvatarDescription(who, dna, { world, sourcesText })) });
         } catch (error) {
             return { ok: false, error: (error && error.message) || '写提示词失败' };
         }
@@ -85663,7 +86894,8 @@ function createAssetGenerationService(deps) {
 
     // 设置页主动出一张默认立绘：先让 LLM 写提示词，再出图，不经过楼内补图。
     // 格子里已有图的「重新生成」带着那张图的 caption 进来：不写词，换一颗新种子直接画。
-    async function generateCharacterSprite({ name, dna, nude = false, note = '', caption, exact = false, onProgress } = {}) {
+    // world 是世界观与世界设定提要；sourcesText 是角色卡 / 世界书 / 数据库里这个角色的节选，只补 DNA 没写到的。
+    async function generateCharacterSprite({ name, dna, nude = false, note = '', caption, exact = false, world = null, sourcesText = '', onProgress } = {}) {
         const who = String(name || '').trim();
         if (!who) return { ok: false, error: '没有角色' };
         if (caption) {
@@ -85679,7 +86911,8 @@ function createAssetGenerationService(deps) {
         reportExpressionProgress(onProgress, { phase: 'write', done: 0, total: 1, mood: '默认' });
         let written;
         try {
-            written = await nai.writeDbgenPrompt({ description: buildCharacterSpriteDescription(who, dna, { nude: nude === true, note, transparent: readSettings().dbgenSpriteTransparent !== false }) });
+            const withMaterial = await writingMaterial(characterNamesOf(who, readSettings()), SPRITE_MATERIAL_GUIDE(who));
+            written = await nai.writeDbgenPrompt({ description: withMaterial(buildCharacterSpriteDescription(who, dna, { nude: nude === true, note, world, sourcesText })) });
         } catch (error) {
             return { ok: false, error: (error && error.message) || '写提示词失败' };
         }
@@ -85724,14 +86957,14 @@ function createAssetGenerationService(deps) {
         return { ok: true, imageId };
     }
 
-    async function writeWardrobePrompt({ character, outfit, nsfwBoost = false } = {}) {
+    async function writeWardrobePrompt({ character, outfit, nsfwBoost = false, world = null, context = '', clues = '' } = {}) {
         const name = String(character || '').trim();
         const clothes = String(outfit || '').trim();
         if (!clothes) return { ok: false, error: '没有待确认的服装' };
         if (!nai || typeof nai.writeDbgenPrompt !== 'function') return { ok: false, error: '当前图像来源不能写服装提示词' };
         let written;
         try {
-            written = await nai.writeDbgenPrompt({ description: buildWardrobeClothingDescription(name, clothes, { nsfwBoost }) });
+            written = await nai.writeDbgenPrompt({ description: buildWardrobeClothingDescription(name, clothes, { nsfwBoost, world, context, clues }) });
         } catch (error) {
             return { ok: false, error: (error && error.message) || '写服装提示词失败' };
         }
@@ -85801,9 +87034,13 @@ function createAssetGenerationService(deps) {
     }
 
     return {
-        processMessage, resolveUrl, resolveThumbUrl, thumbSourceId, tempBackground, tempSceneTime, tempSprite, listReview, listTemp, setStatus, deleteImages, getImageDataUrl, getImagePrompt, saveImagePrompt, readStoredImage, writeStoredImage, importAssetImage,
+        processMessage, resolveUrl, resolveThumbUrl, thumbSourceId, tempBackground, tempSceneTime, tempSprite, tempSpriteTags, listReview, listTemp, setStatus, deleteImages, getImageDataUrl, getImagePrompt, saveImagePrompt, readStoredImage, writeStoredImage, importAssetImage,
         generateExpressionSet, generateExpressionImage, paintExpressionCaptions, generateSceneVariants, generateCharacterSprite, generateCharacterAvatar, writeWardrobePrompt, paintWardrobeReference,
         getEditableImage, saveMatteEdit,
+        // 表情差分写词前提炼「性格与表情习惯」：资料由调用方从角色卡 / 世界书 / 数据库收集，这里只管交给副 LLM。
+        summarizeCharacterPersona: ({ name, sourcesText } = {}) => writeCharacterPersona(llm, readSettings().auto.llm, { name, sourcesText }),
+        // 世界设定提要：资料（角色卡场景栏、世界书常驻条目）由调用方收集。
+        summarizeWorldSetting: ({ label, sourcesText } = {}) => writeWorldSummary(llm, readSettings().auto.llm, { label, sourcesText }),
         getRecord: (key) => currentTempRecords().get(key) || null,
         start() {
             if (offRendered) return;
@@ -85820,6 +87057,86 @@ function createAssetGenerationService(deps) {
 __igsDefine(exports, "attachCharacterDna", () => attachCharacterDna);
 __igsDefine(exports, "createAssetGenerationService", () => createAssetGenerationService);
 __igsDefine(exports, "GENERATED_ASSET_UPDATED_EVENT", () => GENERATED_ASSET_UPDATED_EVENT);
+});
+__igsRegister("src/generated-images/illustration/persona-writer.js", function(module, exports, require) {
+// 由副 LLM 从资料节选里提炼两种短文：角色的「性格与表情习惯」（存进角色 DNA，表情差分写词用）
+// 和故事的「世界设定提要」（存在这张卡的素材里，立绘、服装、表情差分写词用）。
+const { FICTION_FRAME, SOFT_MODE_NOTE, requestWithSoftRetry } = require("src/generated-images/illustration/prompt-kit.js");
+const { LLM_SETUP_HINT, describeLlmReady } = require("src/generated-images/illustration/caption-writer.js");
+const PERSONA_MAX_LENGTH = 400;
+const INSUFFICIENT = '资料不足';
+
+const PERSONA_RULES = [
+    '你读一个角色的资料，为立绘表情差分提炼这个角色的「性格与表情习惯」。',
+    '只写性格、气质，以及情绪外露的程度和方式：高兴、生气、委屈、害羞、难过时脸上和肢体通常是什么样；再写这个角色不会做的表情（例如不会噘嘴撒娇、不会放声大笑）。',
+    '不写外貌、服装、身世和剧情；资料里没提到的不要编。资料里有多个角色时，只写指定的那一个。',
+    `用中文写 3 到 6 句，总共不超过 200 字。资料不足以判断这个角色的性格时，只输出：${INSUFFICIENT}`,
+    '只输出正文，不要标题、不要解释、不要代码块。',
+];
+
+const WORLD_RULES = [
+    '你读一个故事的世界设定资料，为生图提炼一段「世界设定提要」，画立绘、服装和场景时参考。',
+    '只写画面用得上的：时代与地域、科技或魔法水平、社会阶层，服装与发型的风格、常见材质与配色、常见饰品和随身物品；再写这个世界里不该出现的东西（例如现代衣物、电子产品）。',
+    '不写剧情、人物关系和具体角色；资料里没提到的不要编。',
+    `用中文写 3 到 6 句，总共不超过 250 字。资料不足以判断时，只输出：${INSUFFICIENT}`,
+    '只输出正文，不要标题、不要解释、不要代码块。',
+];
+const PERSONA_WRITER_SYSTEM = [...FICTION_FRAME, ...PERSONA_RULES].join('\n');
+const PERSONA_WRITER_SOFT_SYSTEM = [...FICTION_FRAME, ...PERSONA_RULES, ...SOFT_MODE_NOTE].join('\n');
+const WORLD_WRITER_SYSTEM = [...FICTION_FRAME, ...WORLD_RULES].join('\n');
+const WORLD_WRITER_SOFT_SYSTEM = [...FICTION_FRAME, ...WORLD_RULES, ...SOFT_MODE_NOTE].join('\n');
+function buildPersonaUserPrompt(name, sourcesText) {
+    return `要提炼的角色：${String(name || '').trim()}\n\n资料：\n${String(sourcesText || '').trim()}`;
+}
+function buildWorldSummaryUserPrompt(label, sourcesText) {
+    return `IGS 里选的世界观：${String(label || '').trim() || '未选'}\n\n资料：\n${String(sourcesText || '').trim()}`;
+}
+function parsePersonaReply(text) {
+    const body = String(text || '').replace(/```[a-z]*\n?|```/gi, '').trim();
+    if (!body) return { ok: false };
+    if (body.length <= 20 && body.includes(INSUFFICIENT)) return { ok: true, insufficient: true, persona: '' };
+    const persona = body.length > PERSONA_MAX_LENGTH ? `${body.slice(0, PERSONA_MAX_LENGTH)}…` : body;
+    return { ok: true, insufficient: false, persona };
+}
+
+// 返回 { ok, persona, insufficient } 或 { ok: false, error }；世界设定提要也用 persona 字段带回正文。
+async function writeShortText(llm, llmSettings, { sourcesText, system, softSystem, user, what }) {
+    const ready = describeLlmReady(llmSettings);
+    if (!ready.ok) return { ok: false, error: ready.error };
+    if (!llm || typeof llm.request !== 'function') return { ok: false, error: `副 LLM 不可用：${LLM_SETUP_HINT}` };
+    if (!String(sourcesText || '').trim()) return { ok: false, error: '没有找到可用的资料' };
+    const result = await requestWithSoftRetry(llm, { system, softSystem, user, parse: parsePersonaReply }, llmSettings);
+    if (!result.ok) return { ok: false, error: `副 LLM 提炼${what}失败：${result.error}` };
+    return { ok: true, persona: result.persona, insufficient: result.insufficient };
+}
+function writeCharacterPersona(llm, llmSettings, { name, sourcesText } = {}) {
+    return writeShortText(llm, llmSettings, {
+        sourcesText,
+        system: PERSONA_WRITER_SYSTEM,
+        softSystem: PERSONA_WRITER_SOFT_SYSTEM,
+        user: buildPersonaUserPrompt(name, sourcesText),
+        what: '性格',
+    });
+}
+async function writeWorldSummary(llm, llmSettings, { label, sourcesText } = {}) {
+    const written = await writeShortText(llm, llmSettings, {
+        sourcesText,
+        system: WORLD_WRITER_SYSTEM,
+        softSystem: WORLD_WRITER_SOFT_SYSTEM,
+        user: buildWorldSummaryUserPrompt(label, sourcesText),
+        what: '世界设定',
+    });
+    return written.ok ? { ok: true, summary: written.persona, insufficient: written.insufficient } : written;
+}
+
+__igsDefine(exports, "buildPersonaUserPrompt", () => buildPersonaUserPrompt);
+__igsDefine(exports, "buildWorldSummaryUserPrompt", () => buildWorldSummaryUserPrompt);
+__igsDefine(exports, "parsePersonaReply", () => parsePersonaReply);
+__igsDefine(exports, "writeCharacterPersona", () => writeCharacterPersona);
+__igsDefine(exports, "writeWorldSummary", () => writeWorldSummary);
+__igsDefine(exports, "PERSONA_MAX_LENGTH", () => PERSONA_MAX_LENGTH);
+__igsDefine(exports, "PERSONA_WRITER_SYSTEM", () => PERSONA_WRITER_SYSTEM);
+__igsDefine(exports, "WORLD_WRITER_SYSTEM", () => WORLD_WRITER_SYSTEM);
 });
 __igsRegister("src/media/generated-asset-store.js", function(module, exports, require) {
 // 生成素材存储：images 存图片本体（素材库与临时素材共用，按 id 引用），
