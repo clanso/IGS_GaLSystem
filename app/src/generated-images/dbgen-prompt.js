@@ -1,4 +1,4 @@
-import { moodPresetAct, moodPresetUse, resolveMoodExpressionTags } from '../scene/mood-groups.js';
+import { moodHasNsfwVariant, moodPresetUse, resolveMoodExpressionTags } from '../scene/mood-groups.js';
 
 // 楼内补立绘一次最多写 8 份，超过则平分 2 批。
 export const EXPRESSION_WRITE_BATCH_MAX = 8;
@@ -90,6 +90,17 @@ export function splitExpressionWriteBatches(items) {
     return splitEven(list, list.length <= EXPRESSION_DIFF_BATCH_MAX * 2 ? 2 : 3);
 }
 
+// 每份表情只交代用在什么场面，不规定怎么做（固定的招牌动作会让每个角色都画成同一副套路脸）；
+// 怎么做由写词模型按角色性格和正文来定。自建组没有预设场面，只出现在最后的份数清单里。
+function moodSceneLines(moods, nsfw) {
+    const lines = moods.map((mood, index) => {
+        const use = moodPresetUse(mood);
+        const nsfwVariant = nsfw && moodHasNsfwVariant(mood) ? '这一份画 NSFW 版，情欲上来时的样子。' : '';
+        return use || nsfwVariant ? `${index + 1} ${mood}：${use ? `用在${use}。` : ''}${nsfwVariant}` : '';
+    }).filter(Boolean);
+    return lines.length ? ['各份表情用在什么场面（只说场面，怎么做按这个角色来）：', ...lines] : [];
+}
+
 // note 是用户这次临时补的要求（性格、某个情绪的特别表现），只影响写词这一步；
 // nsfw 为 true 时「动情」改用它在 NSFW 下的动作说明。
 export function buildExpressionDiffDescription(name, prompt, labels, dna, outfit, { note = '', nsfw = false, transparent = true, world = null } = {}) {
@@ -129,22 +140,17 @@ export function buildExpressionDiffDescription(name, prompt, labels, dna, outfit
         clothes && clothes.nsfwBoost && !nude ? nsfwClothingBoostLine('character') : '',
         clothesPrompt ? `服装提示词：\n${clothesPrompt}` : '',
         ...worldContextLines(world),
-        '表情依据该角色的性格、脾气与行为习惯分别撰写，禁止套用统一表情模板。',
-        persona ? `「${name || ''}」的性格与表情习惯（据此决定每个表情的幅度和方式，优先于下面的动作基准；只管表情和动作，不要据此改长相和衣服）：\n${persona}` : '',
-        '规格：大腿以上（cowboy shot）。朝向正面，直立，平视。禁止全身，禁止露出脚，禁止侧身，禁止倾斜构图。',
-        '情绪须写入肢体：手势、肩线、重心随该情绪变化。禁止仅替换面部。',
-        '各表情的动作按下面的说明写，不要把不同表情画成同一张脸。',
-        '下面的动作是基准，不是照抄的模板。先按角色的性格改幅度和形式：三无、高冷、内敛的性格幅度极小，靠眼神和嘴角的细微变化，动作克制；开朗、外向的性格按基准写；狂躁、元气、暴烈的性格幅度夸张，带动肩、手、重心，甚至打破站姿。',
+        '每个表情都按这个角色自己的性格、脾气和说话做事的习惯来写，不要套统一的表情模板。',
+        persona ? `「${name || ''}」的性格与表情习惯（据此决定每个表情怎么做、做到多大；只管表情和动作，不要据此改长相和衣服）：\n${persona}` : '',
+        '规格：大腿以上（cowboy shot），身体朝正面站着（各张差分要叠在同一个位置）。头的角度、视线方向、手和肩膀可以随情绪动。禁止全身，禁止露出脚，禁止整个身体侧过去，禁止倾斜构图。',
+        '写每一份之前，先想这个角色在那种场面里真实会怎么反应，再落到脸上（眉、眼、嘴、视线），需要时带到手和肩膀；动多少按这个角色来，内敛的人可以只有眼神和嘴角的变化。',
+        '同一种情绪，不同的人做法可以完全不同：比如委屈，有人噘嘴含泪，有人别过头一声不吭，有人反而笑着说没事。不要套最常见的动漫画法，除非这个角色本来就是这样；也不要为了表现情绪把一串同类标签堆在一起，只写这个角色这一刻真会有的那几个。',
+        '每一份要一眼看得出是哪种情绪，彼此不要撞脸，但都要像同一个人。',
         String(note || '').trim() ? `这次额外的要求：\n${String(note).trim()}` : '',
         caption ? '上面那份立绘的表情和动作不要沿用，每份的表情、嘴型、眼神和手势都按各自的情绪重写。' : '',
         spriteGroundLine(transparent),
         ...characterDnaLines(name, dna),
-        ...moods.map((mood, index) => {
-            const act = moodPresetAct(mood, { nsfw });
-            if (!act) return '';
-            const use = moodPresetUse(mood);
-            return use ? `${index + 1} ${mood}：${act}。用在${use}。` : `${index + 1} ${mood}：${act}`;
-        }).filter(Boolean),
+        ...moodSceneLines(moods, nsfw),
         `按 slotid 1 到 ${moods.length} 的顺序另写 ${moods.length} 份：${moods.map((label, index) => `${index + 1} ${label}`).join('、')}。`,
     ].filter(Boolean).join('\n');
 }
@@ -433,29 +439,14 @@ function isExpressionPoseTag(tag) {
 // 默认立绘被写成无表情时，差分照抄会带上这些词。
 const NEUTRAL_FACE_TAGS = new Set(['expressionless', 'emotionless', 'neutral expression', 'blank expression', 'blank stare', 'straight face', 'closed mouth', 'arms at sides'].map(tagKey));
 
-// 只认面部表情（不认姿势，也不认 blue eyes 这类外貌）：写词结果里有一个就算写了表情。
-// 整个 tag 是这些词才算（open mouth 这类单看是动作）；后一组表情词出现在 tag 任何位置都算（slight frown、light blush、teary eyes）。
-const EXPRESSION_FACE_RE = /^(?:serious|happy|sad|angry|annoyed|smug|shy|embarrassed|surprised|nervous|worried|scared|flustered|disgust|disdain|sobbing|scowl|sigh|sighing|open mouth|parted lips|clenched teeth|gritted teeth|biting (?:own )?lip|lip biting|closed eyes|half-closed eyes|wide-eyed|narrowed eyes|furrowed brows?|raised eyebrows?|looking (?:away|down|up|to the side)|sideways glance|:\)|:d|\^_\^)$|\b(?:smil(?:e|ing)|blush(?:ing)?|tear(?:s|ing)?|teary|expression|frown(?:ing)?|pout(?:ing)?|glar(?:e|ing)|smirk(?:ing)?|grin(?:ning)?|crying|laughing)\b/;
-
-export function captionHasExpression(caption) {
-    const pos = caption && caption.v4_prompt && caption.v4_prompt.caption;
-    if (!pos) return false;
-    const chars = Array.isArray(pos.char_captions) ? pos.char_captions : [];
-    const text = chars.length ? chars[0] && chars[0].char_caption : pos.base_caption;
-    return splitTags(text).some((tag) => {
-        const key = tagKey(tag);
-        return !NEUTRAL_FACE_TAGS.has(key) && EXPRESSION_FACE_RE.test(key);
-    });
-}
-
-// 表情组的英文表情 tag（用户改过的优先，没改用预设）放到角色 caption 最前，并去掉照抄来的无表情词。
-// 默认只兜底：写词结果（written，缺省看 caption 本身）里已经有表情就照它的来，免得把内敛角色叠成撒娇脸；
-// 组上打开「固定加上」（alwaysTags）时总是放。默认组不动；nsfw 为 true 时「动情」没改过就用 NSFW 那套预设。
-export function applyMoodToCaption(caption, mood, { nsfw = false, groups = null, written = null } = {}) {
+// 表情组的英文表情 tag（用户改过的优先，没改用预设）：只有组上打开「固定加上」（alwaysTags）才放到角色 caption 最前，
+// 并去掉照抄来的无表情词；没打开就完全按写词结果，不兜底（预设 tag 是通用画法，叠上去容易变成套路脸）。
+// 默认组不动；nsfw 为 true 时「动情」没改过就用 NSFW 那套预设。
+export function applyMoodToCaption(caption, mood, { nsfw = false, groups = null } = {}) {
     const label = String(mood || '').trim();
     if (label === '默认') return caption;
     const { tags, always } = resolveMoodExpressionTags(label, groups, { nsfw });
-    if (!tags || (!always && captionHasExpression(written || caption))) return caption;
+    if (!tags || !always) return caption;
     return prependCharTags(caption, tags, (tag) => !NEUTRAL_FACE_TAGS.has(tagKey(tag)));
 }
 

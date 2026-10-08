@@ -3667,7 +3667,7 @@ export async function handleSettingsAction(action, ctx) {
         return rerenderSettings();
     }
 
-    // 情绪组的表情 tag：开关决定表情差分出图时是总是放到最前，还是只在写词漏写表情时兜底；tag 清空回到预设。
+    // 情绪组的表情 tag：开关打开时表情差分出图总是放到最前，关着就不加；tag 清空回到预设。
     if (normalizedAction.startsWith('mood-group-always:') || normalizedAction.startsWith('mood-group-tags:')) {
         const always = normalizedAction.startsWith('mood-group-always:');
         const [rawLabel, rawValue] = normalizedAction.slice(always ? 'mood-group-always:'.length : 'mood-group-tags:'.length).split(':');
