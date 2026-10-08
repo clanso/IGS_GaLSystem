@@ -26,7 +26,7 @@ test('gate:persona:expression-description-carries-persona-and-only-scene-of-each
     const withPersona = buildExpressionDiffDescription('冬月', null, ['委屈', '动情'], { identity: '1girl', persona: PERSONA }, null, { nsfw: true });
     assert.match(withPersona, /「冬月」的性格与表情习惯（据此决定每个表情怎么做、做到多大；只管表情和动作，不要据此改长相和衣服）：\n高雅内敛/);
     // 每份只交代场面，不给固定的招牌动作；要求先想这个角色真实会怎么反应，不套动漫画法。
-    assert.match(withPersona, /各份表情用在什么场面（只说场面，怎么做按这个角色来）：\n1 委屈：用在被冤枉、被凶了想讨说法的时候。\n2 动情：用在告白前后、接吻前、距离一下子拉近的时候。这一份画 NSFW 版，情欲上来时的样子。/);
+    assert.match(withPersona, /各份表情用在什么场面（只说场面，怎么做按这个角色来）：\n1 委屈：用在被冤枉、被凶了想讨说法，或者摔了、哪里碰疼了想撒娇求安慰的时候。\n2 动情：用在告白前后、接吻前、距离一下子拉近的时候。这一份画 NSFW 版，情欲上来时的样子。/);
     assert.doesNotMatch(withPersona, /噘嘴，眼眶含泪忍着不掉|动作是基准|禁止仅替换面部|平视/);
     assert.match(withPersona, /先想这个角色在那种场面里真实会怎么反应/);
     assert.match(withPersona, /不要套最常见的动漫画法/);
