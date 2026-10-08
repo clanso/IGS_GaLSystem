@@ -368,6 +368,8 @@ export function createImageBackend({ nai, getBridge, global: globalObject = glob
         return { ok: true, via: 'baibai', dataUrl: result.dataUrl, prompt: promptFromText(result.prompt, '') };
     }
 
+    // 场景背景（meta.background）带上 IGS 的背景尺寸：智绘姬常设成竖的立绘尺寸，不带就会出竖图背景。
+    // 剧情 CG、立绘与物品图照旧沿用智绘姬自己设的尺寸。
     async function viaChatu8(slot, naiSettings, meta = {}) {
         const fallback = (reason) => naiFallback(slot, naiSettings, reason);
         const host = findChatu8();
@@ -375,7 +377,8 @@ export function createImageBackend({ nai, getBridge, global: globalObject = glob
         const floorTag = await pluginFloorTag('chatu8', CHATU8_LABEL, meta);
         const prompt = floorTag ? floorTag.tag : buildChatu8Prompt(slot);
         if (!prompt) return { ok: false, error: `没有可交给${CHATU8_LABEL}的提示词` };
-        const result = await requestChatu8(host, prompt);
+        const size = meta.background === true ? parseSize(naiSettings && naiSettings.size) : null;
+        const result = await requestChatu8(host, prompt, size || {});
         if (!result || !result.ok) return fallback((result && result.error) || `${CHATU8_LABEL}出图失败`);
         try {
             return { ok: true, via: 'chatu8', dataUrl: await chatu8ImageToDataUrl(result.imageData, host.win || globalObject), prompt: promptFromText(prompt, '') };

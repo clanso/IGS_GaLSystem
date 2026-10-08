@@ -302,6 +302,7 @@ export function createAssetGenerationService(deps) {
             messageId: floor.messageId, size, description: buildDbgenAssetDescription(item.need), userPrompts,
             skipRecall: true,
             ...(isSprite && { transparent: bg.transparent }),
+            ...(!isSprite && { background: true }),
         };
         // 立绘走内置 NAI 时画师串排在最前，里面的底色标签也去掉，底色只留「立绘底色」那一组。
         const naiSettings = { ...s.auto.nai, size, ...(isSprite && { artistPrefix: dropBackgroundTags(s.auto.nai.artistPrefix) }) };
@@ -351,7 +352,7 @@ export function createAssetGenerationService(deps) {
         } else {
             let result;
             try {
-                result = await nai.generateDbgenCaption({ caption, size: backgroundSize(s), seed: randomSeed() });
+                result = await nai.generateDbgenCaption({ caption, size: backgroundSize(s), seed: randomSeed(), background: true });
             } catch (error) {
                 result = { ok: false, error: `出图失败：${(error && error.message) || error}` };
             }
@@ -927,7 +928,7 @@ export function createAssetGenerationService(deps) {
             }
             let painted;
             try {
-                painted = await nai.generateDbgenCaption({ caption, size: backgroundSize(s), seed });
+                painted = await nai.generateDbgenCaption({ caption, size: backgroundSize(s), seed, background: true });
             } catch (error) {
                 painted = { ok: false, error: (error && error.message) || '出图失败' };
             }
