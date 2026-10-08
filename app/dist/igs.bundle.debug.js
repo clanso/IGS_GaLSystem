@@ -92,7 +92,7 @@ const { createReaderImageService } = require("src/generated-images/reader-image-
 const { createPromptInjector } = require("src/host/prompt-injector.js");
 const { createIllustrationMessageHost } = require("src/host/illustration-message-host.js");
 const { createSecondaryLlm } = require("src/host/secondary-llm.js");
-const { formatCharacterSources, pickCharacterSources, readSourceMaterial } = require("src/host/character-sources.js");
+const { formatCharacterSources, pickCharacterSources, pickSceneSources, readSourceMaterial } = require("src/host/character-sources.js");
 const { createImageBackend, mergeLegacyNaiSettings } = require("src/generated-images/image-backend.js");
 const { createNaiOfficialClient } = require("src/generated-images/nai-official-client.js");
 const { createImageJobLog } = require("src/generated-images/image-job-log.js");
@@ -115,6 +115,17 @@ const SCENE_ASSETS_INJECTION_RETRY_MS = 1500;
 const SCENE_ASSETS_INJECTION_MAX_ATTEMPTS = 5;
 // 楼内补立绘给副 LLM 的角色资料节选：每个角色限得比手动生成时短。
 const PLANNER_SOURCE_LIMITS = Object.freeze({ card: 800, worldbook: 1200, entry: 600, database: 500 });
+
+// 楼内补立绘 / 背景：一次读角色卡 / 世界书 / 数据库，再按名字挑节选（每个限得短，规划说明不膨胀）。
+async function readPlannerSources(globalObject, names, pick) {
+    const material = await readSourceMaterial(globalObject);
+    const out = {};
+    for (const name of names) {
+        const text = formatCharacterSources(pick(material, { name, limits: PLANNER_SOURCE_LIMITS }));
+        if (text) out[name] = text;
+    }
+    return out;
+}
 
 // 自动插图 / 素材补全的进度与失败原因：始终写控制台，失败与成功再按「显示提示弹窗」弹出。
 function createImageJobReporter(globalObject, getBridge, log) {
@@ -215,16 +226,10 @@ function bootstrapIGS(options = {}) {
         },
         getReaderMode: readerModeNow,
         getViewport: () => readCgViewport(globalObject, readerModeNow()),
-        // 楼内补立绘：一次读角色卡 / 世界书 / 数据库，再按名字挑节选（每人限得短，规划说明不膨胀）。
-        readCharacterSources: async (names) => {
-            const material = await readSourceMaterial(globalObject);
-            const out = {};
-            for (const name of names) {
-                const text = formatCharacterSources(pickCharacterSources(material, { name, limits: PLANNER_SOURCE_LIMITS }));
-                if (text) out[name] = text;
-            }
-            return out;
-        },
+        // 楼内补立绘：按角色名挑节选。
+        readCharacterSources: (names) => readPlannerSources(globalObject, names, pickCharacterSources),
+        // 楼内补背景：同样按地点名挑角色卡描述 / 场景栏、世界书、数据库节选。
+        readSceneSources: (names) => readPlannerSources(globalObject, names, pickSceneSources),
         events,
         report: reportImageJob,
     });
@@ -41704,15 +41709,18 @@ function buildAssetPlannerUserPrompt({ needs = [], readableText = '', previousTe
         return `${id}｜${line}`;
     });
     const worldLines = worldContextLines(world);
-    // 角色卡 / 世界书 / 数据库里提到这个角色的节选，由调用方挂在 need.sources 上。
-    const sources = needs.map((need, index) => (need.type === 'sprite' && String(need.sources || '').trim()
+    // 角色卡 / 世界书 / 数据库 / 前文里提到这个角色或地点的节选，由调用方挂在 need.sources 上。
+    const sourcesOf = (type) => needs.map((need, index) => (need.type === type && String(need.sources || '').trim()
         ? `${describeAssetNeed(need, index).id}「${need.name}」：\n${String(need.sources).trim()}` : '')).filter(Boolean);
+    const sources = sourcesOf('sprite');
+    const sceneSources = sourcesOf('background');
     return [
         `【需要生成的素材】\n${listed.join('\n')}`,
         worldLines.length ? `【世界观】\n${worldLines.join('\n')}` : '',
         needs.some((need) => need.type === 'sprite' && need.dna)
             ? '【角色 DNA】标注了固定身份或默认外观的立绘，tags 不得改变这些特征，只补充正文中额外交代的内容。' : '',
-        sources.length ? `【角色资料】下面是角色卡、世界书和数据库里提到这些角色的节选。长相和服装以 DNA 为准；DNA 没写到的按资料补，只取长相、穿着和身份气质，资料里的剧情不要画进去。\n${sources.join('\n')}` : '',
+        sources.length ? `【角色资料】下面是提到这些角色的节选，每段开头标了出处（角色卡、世界书、数据库或前文）。长相和服装以 DNA 为准；DNA 没写到的按资料补，只取长相、穿着和身份气质，资料里的剧情不要画进去。\n${sources.join('\n')}` : '',
+        sceneSources.length ? `【场景资料】下面是提到这些地点的节选，每段开头标了出处。背景 tags 要写出资料里地点的档次、规模、建筑风格、年代、陈设和氛围；资料里的人物和剧情不要画进去。\n${sceneSources.join('\n')}` : '',
         previousText ? `【前文摘要】\n${previousText}` : '',
         `【本楼正文】\n${readableText}`,
         '请直接按输出格式给出字段。',
@@ -42182,7 +42190,17 @@ function characterSourceLines(name, sourcesText) {
     const text = String(sourcesText || '').trim();
     if (!text) return [];
     return [
-        `下面是「${name || ''}」在角色卡、世界书和数据库里的资料节选。长相和服装以角色设定（DNA）为准；设定没写到的按这些资料补，只取长相、穿着和身份气质，资料里的剧情不要画进去：`,
+        `下面是「${name || ''}」的资料节选（每段开头标了出处：角色卡、世界书、数据库或前文）。长相和服装以角色设定（DNA）为准；设定没写到的按这些资料补，只取长相、穿着和身份气质，资料里的剧情不要画进去：`,
+        text,
+    ];
+}
+
+// 背景：角色卡 / 世界书 / 数据库 / 前文里提到这个地点的节选，只取地点本身的样子。
+function sceneSourceLines(name, sourcesText) {
+    const text = String(sourcesText || '').trim();
+    if (!text) return [];
+    return [
+        `下面是地点「${name || ''}」的资料节选（每段开头标了出处）。只取地点本身：档次、规模、建筑风格、年代、陈设和氛围；资料里的人物和剧情不要画进去：`,
         text,
     ];
 }
@@ -42277,10 +42295,17 @@ function buildDbgenBackgroundBatchDescription(needs = []) {
         return `${index + 1}. ${need && need.name ? need.name : ''}${when ? `（${when}）` : ''}`;
     });
     const count = list.length;
+    const profiles = (Array.isArray(needs) ? needs : [])
+        .map((need, index) => {
+            const lines = sceneSourceLines(need && need.name, need && need.sources);
+            return lines.length ? [`第 ${index + 1} 份：`, ...lines].join('\n') : '';
+        })
+        .filter(Boolean);
     return [
         `为本楼写${count}张背景的提示词，按下面的顺序各一份，slotid 从 1 数到 ${count}。`,
         list.join('\n'),
         '地点陈设、光线与氛围依据楼层正文补充。',
+        ...profiles,
         '不要写生成点，不要从正文摘挂载句。',
     ].join('\n');
 }
@@ -42293,12 +42318,14 @@ function buildDbgenAssetDescription(need = {}) {
             SPRITE_NO_BACKGROUND_LINE,
             SPRITE_DAILY_POSE_LINE,
             ...characterDnaLines(need.name, need.dna),
+            ...characterSourceLines(need.name, need.sources),
         ].join('\n');
     }
     if (need.type === 'background') {
         return [
             `画场景「${need.name || ''}」${when ? `（${when}）` : ''}的背景图。`,
             '地点陈设、光线与氛围依据楼层正文补充。',
+            ...sceneSourceLines(need.name, need.sources),
         ].join('\n');
     }
     return '';
@@ -42495,6 +42522,7 @@ __igsDefine(exports, "expressionSpritePrompts", () => expressionSpritePrompts);
 __igsDefine(exports, "uprightSpriteCaption", () => uprightSpriteCaption);
 __igsDefine(exports, "worldContextLines", () => worldContextLines);
 __igsDefine(exports, "characterSourceLines", () => characterSourceLines);
+__igsDefine(exports, "sceneSourceLines", () => sceneSourceLines);
 __igsDefine(exports, "buildCharacterSpriteDescription", () => buildCharacterSpriteDescription);
 __igsDefine(exports, "buildCharacterAvatarDescription", () => buildCharacterAvatarDescription);
 __igsDefine(exports, "nsfwClothingBoostLine", () => nsfwClothingBoostLine);
@@ -65490,14 +65518,18 @@ function nameList(name, aliases) {
     return [...new Set([name, ...(Array.isArray(aliases) ? aliases : [])].map((item) => String(item || '').trim()).filter(Boolean))];
 }
 
+const CARD_FIELD_LABELS = Object.freeze({ description: '描述', personality: '性格', scenario: '场景' });
+
 // 卡名就是这个角色时描述、性格整段保留；多角色卡只留提到他的段落（按空行分段）。
-function pickCardText(card, names, limit = CHARACTER_SOURCE_LIMITS.card) {
+// fields 换成描述、场景栏时用来找地点：地点名不会是卡名，只留提到它的段落。
+function pickCardText(card, names, limit = CHARACTER_SOURCE_LIMITS.card, fields = ['description', 'personality']) {
     if (!card || typeof card !== 'object') return '';
     const data = card.data && typeof card.data === 'object' ? card.data : {};
     const own = names.includes(String(card.name || data.name || '').trim());
     const parts = [];
-    for (const [label, raw] of [['描述', card.description ?? data.description], ['性格', card.personality ?? data.personality]]) {
-        const text = String(raw || '').trim();
+    for (const field of fields) {
+        const label = CARD_FIELD_LABELS[field];
+        const text = String(card[field] ?? data[field] ?? '').trim();
         if (!text) continue;
         const kept = own ? text : text.split(/\n\s*\n/).filter((block) => mentions(block, names)).join('\n\n');
         if (kept) parts.push(`【角色卡·${label}】\n${kept}`);
@@ -65506,13 +65538,14 @@ function pickCardText(card, names, limit = CHARACTER_SOURCE_LIMITS.card) {
 }
 
 // 已启用、关键词或内容提到这个角色的条目；关键词命中的排前面。关键词可能是正则，按字面比较。
-function pickWorldbookText(books, names, limits = CHARACTER_SOURCE_LIMITS) {
+// keyInName：关键词被名字包含也算命中（地点名常比关键词长：「金华酒店大堂」对上关键词「金华酒店」），单字关键词不算。
+function pickWorldbookText(books, names, limits = CHARACTER_SOURCE_LIMITS, { keyInName = false } = {}) {
     const picked = [];
     for (const { name: book, entries } of Array.isArray(books) ? books : []) {
         for (const entry of Array.isArray(entries) ? entries : []) {
             if (!entry || entry.enabled === false || !String(entry.content || '').trim()) continue;
-            const keys = entry.strategy && Array.isArray(entry.strategy.keys) ? entry.strategy.keys.map((key) => String(key)) : [];
-            const keyHit = keys.some((key) => names.some((name) => key.includes(name)));
+            const keys = entry.strategy && Array.isArray(entry.strategy.keys) ? entry.strategy.keys.map((key) => String(key).trim()) : [];
+            const keyHit = keys.some((key) => names.some((name) => key.includes(name) || (keyInName && key.length >= 2 && name.includes(key))));
             if (!keyHit && !mentions(entry.content, names)) continue;
             picked.push({ keyHit, text: `【世界书·${book}·${entry.name || '条目'}】\n${clip(entry.content, limits.entry)}` });
         }
@@ -65598,6 +65631,19 @@ function pickCharacterSources(material, { name, aliases = [], limits = CHARACTER
         notes,
     };
 }
+
+// 素材补全的背景：角色卡描述 / 场景栏、世界书、数据库里提到这个地点的节选，用来画出地点的档次、风格和陈设。
+function pickSceneSources(material, { name, limits = CHARACTER_SOURCE_LIMITS } = {}) {
+    const names = nameList(name);
+    const notes = material && Array.isArray(material.notes) ? material.notes.slice() : [];
+    if (!names.length || !material) return { card: '', worldbook: '', database: '', notes };
+    return {
+        card: pickCardText(material.card, names, limits.card, ['description', 'scenario']),
+        worldbook: material.books.length ? pickWorldbookText(material.books, names, limits, { keyInName: true }) : '',
+        database: material.tables ? pickDatabaseText(material.tables, names, limits.database) : '',
+        notes,
+    };
+}
 async function collectCharacterSources(globalObject, { name, aliases = [], limits = CHARACTER_SOURCE_LIMITS } = {}) {
     if (!nameList(name, aliases).length) return { card: '', worldbook: '', database: '', notes: [] };
     return pickCharacterSources(await readSourceMaterial(globalObject), { name, aliases, limits });
@@ -65653,6 +65699,7 @@ __igsDefine(exports, "pickWorldbookText", () => pickWorldbookText);
 __igsDefine(exports, "pickDatabaseText", () => pickDatabaseText);
 __igsDefine(exports, "readSourceMaterial", () => readSourceMaterial);
 __igsDefine(exports, "pickCharacterSources", () => pickCharacterSources);
+__igsDefine(exports, "pickSceneSources", () => pickSceneSources);
 __igsDefine(exports, "collectCharacterSources", () => collectCharacterSources);
 __igsDefine(exports, "pickWorldText", () => pickWorldText);
 __igsDefine(exports, "pickOutfitContext", () => pickOutfitContext);
@@ -76403,6 +76450,9 @@ const { resolveCharacterKey } = require("src/scene/scene-directives.js");
 const { isCharacterDnaEmpty, resolveCharacterDna } = require("src/scene/character-dna.js");
 const GENERATED_ASSET_UPDATED_EVENT = 'igs:generated-asset-updated';
 const IMAGE_CACHE_LIMIT = 60;
+// 素材补全查前文：往前看多少层 AI 楼、每个地点 / 角色最多附多少字。
+const MENTION_FLOORS = 30;
+const MENTION_LIMIT = 800;
 // 正在显示的图不淘汰：一页缩略图超过上限时，按张数硬淘汰会把刚读回的图挤掉，
 // 重绘后又缺图再读，循环闪「载入中」。近几秒内被取用过的图保留，离开页面后再按上限回收。
 const IMAGE_IN_USE_MS = 5000;
@@ -76919,7 +76969,11 @@ function createAssetGenerationService(deps) {
         const variantNeeds = backgroundNeeds.filter((need) => need.variantOf);
         const needs = [...backgroundNeeds.filter((need) => !need.variantOf), ...spriteNeeds];
         attachCharacterDna(needs, s.sceneAssets);
-        await attachCharacterSources(needs);
+        await attachSources(needs);
+        // 前文：【前文摘要】是最近 contextFloors 层的末尾；更早提到这些地点 / 角色的段落另挂进 need.sources。
+        const history = needs.length ? readHistory(messageId) : [];
+        const previousText = s.auto.llm.contextFloors > 0 ? history.slice(-s.auto.llm.contextFloors).join('\n').slice(-1500) : '';
+        attachMentions(needs, history, previousText);
         if (!needs.length && !variantNeeds.length) {
             await store.putFloor(key, { status: 'done', count: 0, updatedAt: now() });
             return { ok: true, reason: 'nothing-missing' };
@@ -76951,8 +77005,6 @@ function createAssetGenerationService(deps) {
         } else if (needs.length) {
             report('info', `第 ${messageId} 楼缺少 ${needs.length} 项素材，正在请求副 LLM…`);
             try {
-                const previousText = messageHost.readPreviousAiTexts(messageId, s.auto.llm.contextFloors)
-                    .map(toReadableText).join('\n').slice(-1500);
                 plan = await requestWithSoftRetry(llm, {
                     system: s.auto.llm.prompts.asset,
                     softSystem: s.auto.llm.prompts.assetSoft,
@@ -77011,19 +77063,52 @@ function createAssetGenerationService(deps) {
         return result;
     }
 
-    // 本楼新角色的立绘：附上角色卡 / 世界书 / 数据库里提到他的节选（宿主读；没接或读不到就不附，照旧补图）。
-    async function attachCharacterSources(needs) {
-        const sprites = needs.filter((need) => need && need.type === 'sprite' && need.name);
-        if (!sprites.length || typeof deps.readCharacterSources !== 'function') return;
-        let found = {};
-        try {
-            found = (await deps.readCharacterSources(sprites.map((need) => need.name))) || {};
-        } catch (error) {
-            return;
+    // 本楼新角色的立绘与缺的背景：附上角色卡 / 世界书 / 数据库里提到这个角色或地点的节选
+    // （宿主读：角色走 readCharacterSources，地点走 readSceneSources；没接或读不到就不附，照旧补图）。
+    async function attachSources(needs) {
+        for (const [type, read] of [['sprite', deps.readCharacterSources], ['background', deps.readSceneSources]]) {
+            const list = needs.filter((need) => need && need.type === type && need.name);
+            if (!list.length || typeof read !== 'function') continue;
+            let found = {};
+            try {
+                found = (await read(list.map((need) => need.name))) || {};
+            } catch (error) {
+                continue;
+            }
+            for (const need of list) {
+                const text = String(found[need.name] || '').trim();
+                if (text) need.sources = text;
+            }
         }
-        for (const need of sprites) {
-            const text = String(found[need.name] || '').trim();
-            if (text) need.sources = text;
+    }
+
+    // 本楼之前最近 MENTION_FLOORS 层 AI 楼的正文（去掉标签），旧的在前。读不到就当没有前文。
+    function readHistory(messageId) {
+        if (typeof messageHost.readPreviousAiTexts !== 'function') return [];
+        try {
+            return (messageHost.readPreviousAiTexts(messageId, MENTION_FLOORS) || []).map(toReadableText);
+        } catch (error) {
+            return [];
+        }
+    }
+
+    // 长相、穿着、地点的样子常在好几层前写过：前文里提到这个名字的段落挂到 need.sources 末尾，
+    // 已经在【前文摘要】里的不重复，超长时留最近的。
+    function attachMentions(needs, history, shownText) {
+        const paragraphs = history.flatMap((text) => text.split('\n')).map((line) => line.trim()).filter(Boolean);
+        for (const need of needs) {
+            const name = String(need && need.name || '').trim();
+            if (!name) continue;
+            const kept = [];
+            let used = 0;
+            for (let i = paragraphs.length - 1; i >= 0; i -= 1) {
+                const line = paragraphs[i];
+                if (!line.includes(name) || shownText.includes(line)) continue;
+                if (used + line.length > MENTION_LIMIT) break;
+                kept.unshift(line);
+                used += line.length;
+            }
+            if (kept.length) need.sources = [need.sources, `【前文·提到「${name}」的段落】\n${kept.join('\n')}`].filter(Boolean).join('\n\n');
         }
     }
 
