@@ -10,6 +10,7 @@ import { normalizeRenderQualitySetting } from './render-quality.js';
 import { spriteIdentity } from '../../scene/character-outfits.js';
 import { normalizeImageCacheCount } from '../../media/tavern-image-cache.js';
 import { normalizeStatusHudPercent } from '../../data/shujuku/status-hud-model.js';
+import { SPRITE_BACKGROUND_MODES } from '../../generated-images/illustration/auto-illustration-settings.js';
 
 
 export function normalizeReaderMode(mode, bridge) {
@@ -106,6 +107,7 @@ export function normalizeSettingsValue(path, value) {
     if (/^bridge\.autoIllustration\.(nsfwEnabled|interludeEnabled|assets\.(spriteEnabled|backgroundEnabled|strictMatch))$/.test(path)) {
         return value === true || value === 'true' || value === 1 || value === '1';
     }
+    if (path === 'bridge.autoIllustration.assets.spriteBackground') return SPRITE_BACKGROUND_MODES.includes(value) ? value : 'auto';
     if (/^bridge\.autoIllustration\.assets\.(spriteSize|backgroundSize|templates\.(background|backgroundNegative|sprite|spriteNegative|nsfwExtra))$/.test(path)) {
         return String(value || '');
     }

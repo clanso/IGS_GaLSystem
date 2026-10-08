@@ -105,6 +105,11 @@ const IMAGE_SOURCE_TEMPLATE = `
     <div class="igs-settings-row"><button class="igs-settings-action" data-action="test-image" type="button">{{imageTestActionLabel}}</button><button class="igs-settings-action" data-action="open-dbgen-settings" type="button"{{sourceDbgenHidden}}>插件设置</button></div>
     <div class="igs-settings-result" data-result="image">{{imageTestHelp}}</div>
   </div>
+  <div class="igs-source-filter" data-image-feature="sprite-background">
+    <div class="igs-source-filter-title">立绘底色<span class="igs-outfit-muted">立绘、表情差分与衣柜参考图</span></div>
+    {{spriteBackgroundField}}
+    <div class="igs-source-filter-note">{{spriteBackgroundNote}}</div>
+  </div>
 </div>
 `.trim();
 
