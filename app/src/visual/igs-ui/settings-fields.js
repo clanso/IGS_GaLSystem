@@ -783,7 +783,7 @@ export function renderMoodGroupList(groups, options = {}) {
     const have = new Set(list.map((group) => String(group.label || '').trim()));
     const missing = MOOD_PRESET.map((entry) => entry.label).filter((label) => !have.has(label));
     const missingHtml = missing.length
-        ? `<div class="igs-source-filter-note igs-mood-missing">表情差分最多画 20 种表情，这里还缺 ${missing.length} 组：${esc(missing.join('、'))}。缺的组在正文里认不出来，画了也用不上。`
+        ? `<div class="igs-source-filter-note igs-mood-missing">预设情绪组一共 ${MOOD_PRESET.length} 组（默认加 ${MOOD_PRESET.length - 1} 种表情差分），这里还缺 ${missing.length} 组：${esc(missing.join('、'))}。缺的组在正文里认不出来，画了也用不上。`
             + `<button type="button" class="igs-review-link" data-action="mood-fill-presets">补上缺的 ${missing.length} 组</button></div>`
         : '';
     return `<div class="igs-mood-groups" data-mood-group-count="${list.length}">`
