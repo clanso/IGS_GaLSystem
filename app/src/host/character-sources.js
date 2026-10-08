@@ -16,14 +16,18 @@ function nameList(name, aliases) {
     return [...new Set([name, ...(Array.isArray(aliases) ? aliases : [])].map((item) => String(item || '').trim()).filter(Boolean))];
 }
 
+const CARD_FIELD_LABELS = Object.freeze({ description: '描述', personality: '性格', scenario: '场景' });
+
 // 卡名就是这个角色时描述、性格整段保留；多角色卡只留提到他的段落（按空行分段）。
-export function pickCardText(card, names, limit = CHARACTER_SOURCE_LIMITS.card) {
+// fields 换成描述、场景栏时用来找地点：地点名不会是卡名，只留提到它的段落。
+export function pickCardText(card, names, limit = CHARACTER_SOURCE_LIMITS.card, fields = ['description', 'personality']) {
     if (!card || typeof card !== 'object') return '';
     const data = card.data && typeof card.data === 'object' ? card.data : {};
     const own = names.includes(String(card.name || data.name || '').trim());
     const parts = [];
-    for (const [label, raw] of [['描述', card.description ?? data.description], ['性格', card.personality ?? data.personality]]) {
-        const text = String(raw || '').trim();
+    for (const field of fields) {
+        const label = CARD_FIELD_LABELS[field];
+        const text = String(card[field] ?? data[field] ?? '').trim();
         if (!text) continue;
         const kept = own ? text : text.split(/\n\s*\n/).filter((block) => mentions(block, names)).join('\n\n');
         if (kept) parts.push(`【角色卡·${label}】\n${kept}`);
@@ -32,13 +36,14 @@ export function pickCardText(card, names, limit = CHARACTER_SOURCE_LIMITS.card) 
 }
 
 // 已启用、关键词或内容提到这个角色的条目；关键词命中的排前面。关键词可能是正则，按字面比较。
-export function pickWorldbookText(books, names, limits = CHARACTER_SOURCE_LIMITS) {
+// keyInName：关键词被名字包含也算命中（地点名常比关键词长：「金华酒店大堂」对上关键词「金华酒店」），单字关键词不算。
+export function pickWorldbookText(books, names, limits = CHARACTER_SOURCE_LIMITS, { keyInName = false } = {}) {
     const picked = [];
     for (const { name: book, entries } of Array.isArray(books) ? books : []) {
         for (const entry of Array.isArray(entries) ? entries : []) {
             if (!entry || entry.enabled === false || !String(entry.content || '').trim()) continue;
-            const keys = entry.strategy && Array.isArray(entry.strategy.keys) ? entry.strategy.keys.map((key) => String(key)) : [];
-            const keyHit = keys.some((key) => names.some((name) => key.includes(name)));
+            const keys = entry.strategy && Array.isArray(entry.strategy.keys) ? entry.strategy.keys.map((key) => String(key).trim()) : [];
+            const keyHit = keys.some((key) => names.some((name) => key.includes(name) || (keyInName && key.length >= 2 && name.includes(key))));
             if (!keyHit && !mentions(entry.content, names)) continue;
             picked.push({ keyHit, text: `【世界书·${book}·${entry.name || '条目'}】\n${clip(entry.content, limits.entry)}` });
         }
@@ -121,6 +126,19 @@ export function pickCharacterSources(material, { name, aliases = [], limits = CH
     return {
         card: pickCardText(material.card, names, limits.card),
         worldbook: material.books.length ? pickWorldbookText(material.books, names, limits) : '',
+        database: material.tables ? pickDatabaseText(material.tables, names, limits.database) : '',
+        notes,
+    };
+}
+
+// 素材补全的背景：角色卡描述 / 场景栏、世界书、数据库里提到这个地点的节选，用来画出地点的档次、风格和陈设。
+export function pickSceneSources(material, { name, limits = CHARACTER_SOURCE_LIMITS } = {}) {
+    const names = nameList(name);
+    const notes = material && Array.isArray(material.notes) ? material.notes.slice() : [];
+    if (!names.length || !material) return { card: '', worldbook: '', database: '', notes };
+    return {
+        card: pickCardText(material.card, names, limits.card, ['description', 'scenario']),
+        worldbook: material.books.length ? pickWorldbookText(material.books, names, limits, { keyInName: true }) : '',
         database: material.tables ? pickDatabaseText(material.tables, names, limits.database) : '',
         notes,
     };

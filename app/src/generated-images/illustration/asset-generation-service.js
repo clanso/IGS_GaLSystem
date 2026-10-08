@@ -19,6 +19,9 @@ import { isCharacterDnaEmpty, resolveCharacterDna } from '../../scene/character-
 
 export const GENERATED_ASSET_UPDATED_EVENT = 'igs:generated-asset-updated';
 const IMAGE_CACHE_LIMIT = 60;
+// 素材补全查前文：往前看多少层 AI 楼、每个地点 / 角色最多附多少字。
+const MENTION_FLOORS = 30;
+const MENTION_LIMIT = 800;
 // 正在显示的图不淘汰：一页缩略图超过上限时，按张数硬淘汰会把刚读回的图挤掉，
 // 重绘后又缺图再读，循环闪「载入中」。近几秒内被取用过的图保留，离开页面后再按上限回收。
 const IMAGE_IN_USE_MS = 5000;
@@ -612,7 +615,11 @@ export function createAssetGenerationService(deps) {
         const variantNeeds = backgroundNeeds.filter((need) => need.variantOf);
         const needs = [...backgroundNeeds.filter((need) => !need.variantOf), ...spriteNeeds];
         attachCharacterDna(needs, s.sceneAssets);
-        await attachCharacterSources(needs);
+        await attachSources(needs);
+        // 前文：【前文摘要】是最近 contextFloors 层的末尾；更早提到这些地点 / 角色的段落另挂进 need.sources。
+        const history = needs.length ? readHistory(messageId) : [];
+        const previousText = s.auto.llm.contextFloors > 0 ? history.slice(-s.auto.llm.contextFloors).join('\n').slice(-1500) : '';
+        attachMentions(needs, history, previousText);
         if (!needs.length && !variantNeeds.length) {
             await store.putFloor(key, { status: 'done', count: 0, updatedAt: now() });
             return { ok: true, reason: 'nothing-missing' };
@@ -644,8 +651,6 @@ export function createAssetGenerationService(deps) {
         } else if (needs.length) {
             report('info', `第 ${messageId} 楼缺少 ${needs.length} 项素材，正在请求副 LLM…`);
             try {
-                const previousText = messageHost.readPreviousAiTexts(messageId, s.auto.llm.contextFloors)
-                    .map(toReadableText).join('\n').slice(-1500);
                 // 没登记 DNA 的角色补酒馆里的外貌参考（用户人设、角色卡、世界书），DNA 仍优先。
                 const loreNames = needs.filter((need) => need.type === 'sprite' && !need.dna).map((need) => need.name);
                 const lore = loreNames.length && typeof messageHost.readCharacterLore === 'function'
@@ -709,19 +714,52 @@ export function createAssetGenerationService(deps) {
         return result;
     }
 
-    // 本楼新角色的立绘：附上角色卡 / 世界书 / 数据库里提到他的节选（宿主读；没接或读不到就不附，照旧补图）。
-    async function attachCharacterSources(needs) {
-        const sprites = needs.filter((need) => need && need.type === 'sprite' && need.name);
-        if (!sprites.length || typeof deps.readCharacterSources !== 'function') return;
-        let found = {};
-        try {
-            found = (await deps.readCharacterSources(sprites.map((need) => need.name))) || {};
-        } catch (error) {
-            return;
+    // 本楼新角色的立绘与缺的背景：附上角色卡 / 世界书 / 数据库里提到这个角色或地点的节选
+    // （宿主读：角色走 readCharacterSources，地点走 readSceneSources；没接或读不到就不附，照旧补图）。
+    async function attachSources(needs) {
+        for (const [type, read] of [['sprite', deps.readCharacterSources], ['background', deps.readSceneSources]]) {
+            const list = needs.filter((need) => need && need.type === type && need.name);
+            if (!list.length || typeof read !== 'function') continue;
+            let found = {};
+            try {
+                found = (await read(list.map((need) => need.name))) || {};
+            } catch (error) {
+                continue;
+            }
+            for (const need of list) {
+                const text = String(found[need.name] || '').trim();
+                if (text) need.sources = text;
+            }
         }
-        for (const need of sprites) {
-            const text = String(found[need.name] || '').trim();
-            if (text) need.sources = text;
+    }
+
+    // 本楼之前最近 MENTION_FLOORS 层 AI 楼的正文（去掉标签），旧的在前。读不到就当没有前文。
+    function readHistory(messageId) {
+        if (typeof messageHost.readPreviousAiTexts !== 'function') return [];
+        try {
+            return (messageHost.readPreviousAiTexts(messageId, MENTION_FLOORS) || []).map(toReadableText);
+        } catch (error) {
+            return [];
+        }
+    }
+
+    // 长相、穿着、地点的样子常在好几层前写过：前文里提到这个名字的段落挂到 need.sources 末尾，
+    // 已经在【前文摘要】里的不重复，超长时留最近的。
+    function attachMentions(needs, history, shownText) {
+        const paragraphs = history.flatMap((text) => text.split('\n')).map((line) => line.trim()).filter(Boolean);
+        for (const need of needs) {
+            const name = String(need && need.name || '').trim();
+            if (!name) continue;
+            const kept = [];
+            let used = 0;
+            for (let i = paragraphs.length - 1; i >= 0; i -= 1) {
+                const line = paragraphs[i];
+                if (!line.includes(name) || shownText.includes(line)) continue;
+                if (used + line.length > MENTION_LIMIT) break;
+                kept.unshift(line);
+                used += line.length;
+            }
+            if (kept.length) need.sources = [need.sources, `【前文·提到「${name}」的段落】\n${kept.join('\n')}`].filter(Boolean).join('\n\n');
         }
     }
 
