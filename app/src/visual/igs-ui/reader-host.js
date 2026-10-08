@@ -53,7 +53,7 @@ import { STAGE_CAST_MAX_SEATS, STAGE_CAST_SCAN_LIMIT, pickCastMembers, resolveCa
 import { normalizeStageCastSettings } from './stage-direction-settings.js';
 import { resolveRomanceRivalTarget } from './romance-settings.js';
 import { clearCastDom } from './stage-cast-render.js';
-import { CHARACTER_DNA_FIELDS, normalizeCharacterDnaMap, resolveCharacterDna } from '../../scene/character-dna.js';
+import { CHARACTER_DNA_FIELDS, CHARACTER_PERSONA_FIELD, normalizeCharacterDnaMap, resolveCharacterDna } from '../../scene/character-dna.js';
 import { createOutfitResolver, normalizeCharacterOutfits, normalizeWardrobe, resolveSpriteOutfit } from '../../scene/character-outfits.js';
 import { collectOutfitClues } from '../../data/shujuku/outfit-clues.js';
 import { CHARACTER_ADD_MENU, renderDnaCandidateBar, renderDnaOnlyCharacterList } from './settings-fields.js';
@@ -4774,7 +4774,7 @@ export function createIgsReaderHost(options = {}) {
             const dnaField = target.getAttribute('data-dna-field');
             if (dnaChar && dnaField) {
                 // 角色 DNA 输入只更新草稿，关闭设置时统一保存；不重绘，避免丢焦点。
-                if (!CHARACTER_DNA_FIELDS.includes(dnaField) || ['__proto__', 'constructor', 'prototype'].includes(dnaChar)) return;
+                if (!(CHARACTER_DNA_FIELDS.includes(dnaField) || dnaField === CHARACTER_PERSONA_FIELD) || ['__proto__', 'constructor', 'prototype'].includes(dnaChar)) return;
                 rememberAssetScope(state.activeSettings, getSillyTavernContext(options.global || globalThis));
                 const assets = draftAssetLibrary(state.activeSettings, { collections: ASSET_CHARACTER_FIELDS, name: dnaChar });
                 const dnaMap = assets.characterDna && typeof assets.characterDna === 'object' && !Array.isArray(assets.characterDna)
@@ -4830,6 +4830,12 @@ export function createIgsReaderHost(options = {}) {
             }
             // 角色学院 / 声线下拉：交给动作层写草稿并保存（input 监听不处理 SELECT）。
             const charSelect = event.target && event.target.getAttribute ? event.target : null;
+            // 情绪组的表情 tag：输完（失焦或回车）才保存。
+            const moodTagsGroup = charSelect ? charSelect.getAttribute('data-mood-group-tags') : null;
+            if (moodTagsGroup) {
+                controller.invoke(`mood-group-tags:${encodeURIComponent(moodTagsGroup)}:${encodeURIComponent(charSelect.value || '')}`);
+                return;
+            }
             const charHouse = charSelect ? charSelect.getAttribute('data-char-house') : null;
             if (charHouse) {
                 controller.invoke(`char-house:${encodeURIComponent(charHouse)}:${encodeURIComponent(charSelect.value || '')}`);

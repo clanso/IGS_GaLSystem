@@ -284,6 +284,7 @@ details.igs-perf-more>summary{cursor:pointer;user-select:none}
 .igs-mood-group-total,.igs-mood-group-words{color:var(--igs-settings-ink-3);font-size:12px;font-weight:500}
 .igs-mood-group-words{margin-left:auto}
 .igs-mood-group .igs-mood-word-list{padding:0 8px 8px}
+.igs-mood-group-tags{display:flex;flex-direction:column;gap:6px;padding:0 8px 8px}
 .igs-mood-word-list{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:2px 0}
 .igs-bgm-tracks{display:flex;flex-direction:column;gap:4px;margin:6px 0}
 .igs-bgm-track{display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:var(--igs-settings-radius-small);background:var(--igs-settings-field)}

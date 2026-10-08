@@ -159,10 +159,17 @@ export function spriteEntriesForNames(map, names, withMode) {
     return out;
 }
 
+// 情绪组的表情 tag 设置（tags / alwaysTags）跟着组走：已有的组保留自己的，新加进来的组带上导入的。
+const groupTagSettings = (group) => ({
+    ...(typeof group.tags === 'string' && group.tags.trim() && { tags: group.tags.trim() }),
+    ...(group.alwaysTags === true && { alwaysTags: true }),
+});
+
 export function mergeLabelGroups(current, incoming) {
     const base = (Array.isArray(current) ? current : []).map((group) => ({
         label: String(group && group.label || '').trim(),
         words: Array.isArray(group && group.words) ? group.words.map((word) => String(word || '').trim()).filter(Boolean) : [],
+        ...(group && groupTagSettings(group)),
     })).filter((group) => group.label);
     for (const group of Array.isArray(incoming) ? incoming : []) {
         const label = String(group && group.label || '').trim();
@@ -170,7 +177,7 @@ export function mergeLabelGroups(current, incoming) {
         const words = Array.isArray(group.words) ? group.words.map((word) => String(word || '').trim()).filter(Boolean) : [];
         const found = base.find((item) => item.label === label);
         if (!found) {
-            base.push({ label, words: words.length ? words : [label] });
+            base.push({ label, words: words.length ? words : [label], ...groupTagSettings(group) });
             continue;
         }
         for (const word of words) {

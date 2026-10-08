@@ -1,5 +1,5 @@
 import { esc } from './reader-value-utils.js';
-import { normalizeMoodGroups } from '../../scene/mood-groups.js';
+import { moodPresetTags, normalizeMoodGroups } from '../../scene/mood-groups.js';
 import { TOOLBAR_ACTIONS } from './reader-host-constants.js';
 import { STAGE_SHAKE_INTENSITIES } from './stage-shake-runtime.js';
 import { CHAT_SHOW_BUBBLE_RADIUS_LEVELS, CHAT_SHOW_DIM_LEVELS, CHAT_SHOW_PROMPT_RULE } from './chat-show-runtime.js';
@@ -582,7 +582,17 @@ function renderCharacterSetupPanel(charName, dna, profileRows) {
     return `<div class="igs-char-dna-panel"><div class="igs-char-dna-panel-head">角色设定`
         + `<button type="button" class="igs-review-link" data-action="scene-toggle-dna:${encSeg(charName)}">收起</button></div>`
         + profileRows
-        + `<div class="igs-char-info-row is-block"><span class="igs-char-info-label">角色DNA<span class="igs-outfit-muted">（生图时保持长相）</span></span>${renderCharacterDnaFields(charName, dna)}</div></div>`;
+        + `<div class="igs-char-info-row is-block"><span class="igs-char-info-label">角色DNA<span class="igs-outfit-muted">（生图时保持长相）</span></span>${renderCharacterDnaFields(charName, dna)}</div>`
+        + renderCharacterPersonaRow(charName, dna)
+        + `</div>`;
+}
+
+// 性格与表情习惯：跟着 DNA 存，只给表情差分写词用。空着时第一次生成表情差分会自动提炼。
+function renderCharacterPersonaRow(charName, dna) {
+    const persona = dnaValue(dna, 'persona');
+    return `<div class="igs-char-info-row is-block"><span class="igs-char-info-label">性格与表情习惯<span class="igs-outfit-muted">（只给表情差分写词用，不进画图提示词）</span></span>`
+        + `<textarea class="igs-scene-url-input igs-dna-input" rows="3" data-dna-char="${esc(charName)}" data-dna-field="persona" placeholder="例：高雅内敛，情绪很少写在脸上；委屈时垂眼抿唇，不会噘嘴撒娇。空着时第一次生成表情差分会自动从角色卡、世界书和数据库提炼。">${esc(persona)}</textarea>`
+        + `<div class="igs-settings-row"><button type="button" class="igs-settings-action" data-action="char-persona-extract:${encSeg(charName)}">${persona.trim() ? '重新从资料提炼' : '从角色卡 / 世界书 / 数据库提炼'}</button></div></div>`;
 }
 
 export function renderCharacterDnaEditor(charName, dna) {
@@ -626,6 +636,18 @@ function storedMoodGroups(value) {
     return value.filter((group) => group && String(group.label || '').trim());
 }
 
+// 表情差分用的表情 tag：开关打开就每次放到最前；关着只在写词漏写表情时兜底。输入框空着用预设（自建组没有预设）。
+function renderMoodGroupExpressionTags(group, label) {
+    const always = group.alwaysTags === true;
+    const custom = typeof group.tags === 'string' ? group.tags : '';
+    const preset = label === '默认' ? '' : moodPresetTags(label);
+    return `<div class="igs-mood-group-tags">`
+        + `<button type="button" class="igs-switch${always ? ' is-on' : ''}" data-action="mood-group-always:${encSeg(label)}" aria-pressed="${always ? 'true' : 'false'}"><i></i><span>表情差分固定加上这组 tag</span></button>`
+        + `<input class="igs-scene-url-input" data-mood-group-tags="${esc(label)}" value="${esc(custom)}" placeholder="${esc(preset || '自建组没有预设 tag，填了才会用')}" aria-label="「${esc(label)}」的表情 tag">`
+        + `<div class="igs-source-filter-note">${always ? '每张差分都放在提示词最前。' : '关着时只在写词没写表情时补上；写了就按角色性格写的来。'}清空回到预设。</div>`
+        + `</div>`;
+}
+
 // 情绪组是词库里的容器，和角色上的表情槽分开列。标题上的数字就是当前有多少组。
 export function renderMoodGroupList(groups, options = {}) {
     const list = storedMoodGroups(groups);
@@ -643,6 +665,7 @@ export function renderMoodGroupList(groups, options = {}) {
         )).join('');
         const wordsHtml = open
             ? `<div class="igs-mood-word-list">${tags || '<div class="igs-scene-empty">暂无情绪词</div>'}<button type="button" class="igs-btn-mgr-icon" data-action="mood-add-word:${encSeg(label)}" title="添加词">+</button></div>`
+                + renderMoodGroupExpressionTags(group, label)
             : '';
         return `<div class="igs-mood-group" data-mood-group="${esc(label)}">`
             + `<div class="igs-btn-mgr-row">`
