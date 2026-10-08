@@ -2581,6 +2581,7 @@ __igsDefine(exports, "PROMISE_LOOKBACK_FLOORS", () => PROMISE_LOOKBACK_FLOORS);
 });
 __igsRegister("src/scene/character-outfits.js", function(module, exports, require) {
 const { resolveCharacterKey } = require("src/scene/scene-directives.js");
+const { splitOutfitState } = require("src/scene/body-state.js");
 const OUTFIT_RESET = '默认';
 const BUILTIN_NUDE_OUTFIT = '裸体';
 const OUTFIT_BASE_WORDS = new Set([OUTFIT_RESET, '原装']);
@@ -2672,6 +2673,17 @@ function normalizeWardrobe(raw) {
         if (source.nsfwBoost === true) out[name].nsfwBoost = true;
     }
     return out;
+}
+
+// 「服装名-状态」（薄睡袍-孕晚期、裸体-孕晚期）新建时衣服跟前半段那套走：沿用它挂的衣柜，没挂就用它的名字；
+// 前半段是「裸体」就是裸体。不带状态的服装返回空串（照旧按同名衣柜）。
+function stateOutfitWardrobe(outfits, name) {
+    const { base, state } = splitOutfitState(name);
+    if (!state) return '';
+    if (isBuiltinNudeOutfit(base)) return BUILTIN_NUDE_OUTFIT;
+    const entry = (plain(outfits) || {})[base];
+    const linked = entry && typeof entry.wardrobe === 'string' ? entry.wardrobe.trim() : '';
+    return isValidOutfitName(linked) ? linked : base;
 }
 function resolveWardrobePrompt(wardrobe, outfitEntry, outfitName) {
     const map = plain(wardrobe) || {};
@@ -2925,6 +2937,7 @@ __igsDefine(exports, "isValidOutfitWord", () => isValidOutfitWord);
 __igsDefine(exports, "isValidOutfitName", () => isValidOutfitName);
 __igsDefine(exports, "normalizeCharacterOutfits", () => normalizeCharacterOutfits);
 __igsDefine(exports, "normalizeWardrobe", () => normalizeWardrobe);
+__igsDefine(exports, "stateOutfitWardrobe", () => stateOutfitWardrobe);
 __igsDefine(exports, "resolveWardrobePrompt", () => resolveWardrobePrompt);
 __igsDefine(exports, "outfitsOfCharacter", () => outfitsOfCharacter);
 __igsDefine(exports, "outfitNamesOf", () => outfitNamesOf);
@@ -3866,6 +3879,7 @@ __igsDefine(exports, "sceneTimeBucket", () => sceneTimeBucket);
 __igsDefine(exports, "TIME_WORDS", () => TIME_WORDS);
 });
 __igsRegister("src/scene/directive-tags.js", function(module, exports, require) {
+const { splitOutfitState } = require("src/scene/body-state.js");
 // igs 行内指令名的唯一登记点：分段、正文清洗、DOM 对比与聊天块收口都从这里构造正则，
 // 新增指令只改这一处，避免标签漏进正文。聊天标签（igs-chat/msg）是块级结构，由 chat-blocks 单独处理。
 const IGS_INLINE_DIRECTIVE_NAMES = Object.freeze(['scene', 'char', 'thought', 'img', 'fx']);
@@ -3926,13 +3940,24 @@ const OUTFIT_FIELDS = '\\[igs-(char|thought):([^|\\]\\n]+)\\|([^|\\]\\n]*)\\|([^
 const OUTFIT_DIRECTIVE_AT_RE = new RegExp(`^${OUTFIT_FIELDS}(?:\\]|$)`);
 const OUTFIT_DIRECTIVE_GLOBAL_SOURCE = `${OUTFIT_FIELDS}(\\]|$)`;
 const OUTFIT_LIKE_RE = /^[^\s，。！？、；：,.!?;:…—~～「」『』“”"'（）()《》<>*]{1,12}$/u;
+const OUTFIT_STATE_LIKE_RE = /^[^\s，。！？、；：,.!?;:…—~～「」『』“”"'（）()《》<>*\-－]{1,8}$/u;
 // 显示用：对白内残留的半角竖线换成全角，交给只认三栏的格式化正则时不再被当作分隔符。
 const DISPLAY_BAR = '｜';
 
+// 「服装名-状态」（薄睡袍-孕晚期）：两段分开算长度，服装名最多 12 字、状态最多 8 字。
+function isOutfitLike(token) {
+    if (OUTFIT_LIKE_RE.test(token)) return true;
+    const { base, state } = splitOutfitState(token);
+    return Boolean(state) && OUTFIT_LIKE_RE.test(base) && OUTFIT_STATE_LIKE_RE.test(state);
+}
+
+// 未登记的「服装名-状态」前半段是已登记服装时，先按那套显示（还没建这一套前不退回原装），同时照常记入待确认。
 function classifyOutfitField(outfitResolver, character, token) {
     const outfit = outfitResolver(character, token);
     if (outfit) return { kind: 'outfit', outfit };
-    return OUTFIT_LIKE_RE.test(token) ? { kind: 'unknown' } : { kind: 'text' };
+    if (!isOutfitLike(token)) return { kind: 'text' };
+    const { base, state } = splitOutfitState(token);
+    return { kind: 'unknown', outfit: state ? outfitResolver(character, base) : '' };
 }
 function matchOutfitDirectiveAt(text, outfitResolver) {
     if (typeof outfitResolver !== 'function') return null;
@@ -3943,7 +3968,7 @@ function matchOutfitDirectiveAt(text, outfitResolver) {
     const field = classifyOutfitField(outfitResolver, character, token);
     const base = { type: m[1], character, mood: m[3].trim(), outfit: '', raw: m[0] };
     if (field.kind === 'outfit') return { ...base, outfit: field.outfit, text: m[5].trim() };
-    if (field.kind === 'unknown') return { ...base, unknownOutfit: token, text: m[5].trim() };
+    if (field.kind === 'unknown') return { ...base, outfit: field.outfit || '', unknownOutfit: token, text: m[5].trim() };
     return { ...base, text: `${m[4]}|${m[5]}`.trim() };
 }
 
@@ -3969,6 +3994,79 @@ __igsDefine(exports, "IGS_INLINE_DIRECTIVE_NAMES", () => IGS_INLINE_DIRECTIVE_NA
 __igsDefine(exports, "IGS_DIRECTIVE_START_RE", () => IGS_DIRECTIVE_START_RE);
 __igsDefine(exports, "IGS_DIRECTIVE_LINE_RE", () => IGS_DIRECTIVE_LINE_RE);
 __igsDefine(exports, "IGS_DIRECTIVE_CLOSE_SOURCE", () => IGS_DIRECTIVE_CLOSE_SOURCE);
+});
+__igsRegister("src/scene/body-state.js", function(module, exports, require) {
+// 立绘的长期身体状态：服装名后面用「-」接一个状态，如「薄睡袍-孕晚期」「亚麻长裙-左臂烧伤」。
+// 同一套衣服按状态分开存立绘；衣服（衣柜）跟前半段那套走。只认最后一个「-」（全角「－」也认）。
+const OUTFIT_STATE_RE = /^(.+)[-－]([^-－]+)$/;
+function splitOutfitState(name) {
+    const text = String(name || '').trim();
+    const m = text.match(OUTFIT_STATE_RE);
+    if (!m || !m[1].trim() || !m[2].trim()) return { base: text, state: '' };
+    return { base: m[1].trim(), state: m[2].trim() };
+}
+
+const CN_DIGITS = Object.freeze({ 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 });
+// 阶段词按常见说法折成孕月：孕早期 1–3 月取 2，孕中期 4–6 月取 5，孕晚期 7–9 月取 8，临产 / 足月取 10。
+const PREGNANCY_STAGES = Object.freeze([
+    [/临产|足月|待产|快生/, 10],
+    [/孕晚期|孕后期|怀孕后期/, 8],
+    [/孕中期/, 5],
+    [/孕早期|孕初期|怀孕初期/, 2],
+]);
+const clampMonth = (n) => Math.max(1, Math.min(10, Math.round(n)));
+
+// 状态里的孕月（1–10）：认阶段词，也认「孕5月」「怀孕五个月」「孕20周」。不是怀孕、或只写了「怀孕」认不出月份时返回 0。
+function pregnancyMonthOf(state) {
+    const text = String(state || '').trim();
+    if (!text) return 0;
+    for (const [re, month] of PREGNANCY_STAGES) if (re.test(text)) return month;
+    if (!/孕|身孕|妊娠/.test(text)) return 0;
+    const weeks = text.match(/(\d{1,2})\s*周/);
+    if (weeks) return clampMonth(Math.ceil(Number(weeks[1]) / 4));
+    const months = text.match(/(\d{1,2}|[一二两三四五六七八九十])\s*个?月/);
+    if (months) return clampMonth(/\d/.test(months[1]) ? Number(months[1]) : CN_DIGITS[months[1]]);
+    return 0;
+}
+
+// 孕月 → 肚子的 tag，用 NovelAI 的权重写法控制大小。孕 1–3 月外表看不出来，不加。
+// 这些是起始值：没有逐档实测过，出图偏大偏小就改这里。
+const PREGNANCY_MONTH_TAGS = Object.freeze([
+    '', '', '', '',
+    '0.6::pregnant::',
+    '0.8::pregnant::',
+    'pregnant',
+    '1.1::pregnant::, big belly',
+    '1.2::pregnant::, big belly',
+    '1.3::pregnant::, 1.1::big belly::',
+    '1.4::pregnant::, huge belly',
+]);
+function pregnancyTagsOf(month) {
+    const n = Number(month);
+    return n >= 1 && n <= 10 ? PREGNANCY_MONTH_TAGS[Math.round(n)] : '';
+}
+
+// 给写词模型看的孕期对照：孕 1–3 月不写，之后逐月写出 tag。
+function pregnancyGuideText() {
+    const months = [];
+    for (let month = 4; month <= 10; month += 1) months.push(`孕${month}月 ${PREGNANCY_MONTH_TAGS[month]}`);
+    return `孕1–3月外表看不出来，不写怀孕的词；${months.join('；')}`;
+}
+
+// 以下按比较用的标签键（小写、去掉权重写法）判断。
+// 怀孕和肚子的词：程序按孕期统一加 tag 时，写词结果和旧立绘里带的都去掉，免得两种大小打架。
+const PREGNANCY_TAG_RE = /^(?:pregnant|pregnancy|(?:early|late) pregnancy|baby bump|(?:pregnant|big|huge|large|round|rounded|swollen|bulging|small|slightly swollen) belly)$/;
+// 一会儿就过去的身体状态：从原装立绘取长相、给分批写词当样板时去掉，不让它跟着每一份走。
+// 某个表情自己要的眼泪、脸红、汗珠由写词结果单独带，不经过这里。
+const TRANSIENT_STATE_TAG_RE = /^(?:sweat|sweating|sweaty|sweatdrop|.*\bsweat\b.*|damp.*|wet|wet .*|.* wet|soaked|drenched|steam|steaming(?: body)?|body steam|hair stuck to .*|messy hair|disheveled(?: hair| clothes)?|tousled hair|bed hair|heavy breathing|panting|out of breath|tears|teary eyes|.*\btears?\b.*|.*blush|dirty(?: face| clothes)?|.*\bstain(?:s|ed)?\b.*|mud|muddy|trembling|shaking)$/;
+
+__igsDefine(exports, "splitOutfitState", () => splitOutfitState);
+__igsDefine(exports, "pregnancyMonthOf", () => pregnancyMonthOf);
+__igsDefine(exports, "pregnancyTagsOf", () => pregnancyTagsOf);
+__igsDefine(exports, "pregnancyGuideText", () => pregnancyGuideText);
+__igsDefine(exports, "PREGNANCY_MONTH_TAGS", () => PREGNANCY_MONTH_TAGS);
+__igsDefine(exports, "PREGNANCY_TAG_RE", () => PREGNANCY_TAG_RE);
+__igsDefine(exports, "TRANSIENT_STATE_TAG_RE", () => TRANSIENT_STATE_TAG_RE);
 });
 __igsRegister("src/storage/legacy-igs.js", function(module, exports, require) {
 const { LEGACY_READER_MODE_KEYS } = require("src/schemas/reader-mode.js");
@@ -20277,6 +20375,7 @@ __igsDefine(exports, "PLANNER_SOFT_SYSTEM_PROMPT", () => PLANNER_SOFT_SYSTEM_PRO
 });
 __igsRegister("src/generated-images/dbgen-prompt.js", function(module, exports, require) {
 const { moodHasNsfwVariant, moodPresetUse, resolveMoodExpressionTags } = require("src/scene/mood-groups.js");
+const { PREGNANCY_TAG_RE, TRANSIENT_STATE_TAG_RE, pregnancyGuideText, pregnancyMonthOf, pregnancyTagsOf, splitOutfitState } = require("src/scene/body-state.js");
 // 楼内补立绘一次最多写 8 份，超过则平分 2 批。
 const EXPRESSION_WRITE_BATCH_MAX = 8;
 // 表情差分：不超过 9 份一次写完；10–18 份平分 2 批；超过 18 份平分 3 批。一批写完并出完再写下一批。
@@ -20403,17 +20502,73 @@ function moodSceneLines(moods, nsfw) {
     return lines.length ? ['各份表情用在什么场面（只说场面，怎么做按这个角色来）：', ...lines] : [];
 }
 
+// 立绘会在很多场合反复用：只画长期的身体状态，一会儿就过去的不画。
+const LASTING_STATE_TEXT = '怀孕，或者烧伤、大片伤疤、打着石膏、缠着绷带的重伤、截肢这类严重的伤';
+const TRANSIENT_STATE_TEXT = '出汗、湿身、湿发贴在身上、头发凌乱、脸红、泪痕、喘气、身上沾的污渍';
+const SPRITE_LASTING_STATE_LINE = `立绘会在很多场合反复用，身体状态只画长期的：${LASTING_STATE_TEXT}。${TRANSIENT_STATE_TEXT}这类一会儿就过去的状态不要画。怀孕按孕期写肚子大小：${pregnancyGuideText()}。`;
+
+// 服装名「薄睡袍-孕晚期」后半段的状态：怀孕认得出孕月时肚子由程序加（applyPregnancyToCaption），写词不要再写；
+// 其他状态（烧伤之类）交给写词，每一份都画。
+function outfitStateLines(outfitName) {
+    const { state } = splitOutfitState(outfitName);
+    if (!state) return [];
+    const month = pregnancyMonthOf(state);
+    if (!month) return [`这一套的身体状态是「${state}」：每一份都要画出来，各份写法一致。`];
+    const tags = pregnancyTagsOf(month);
+    return [tags
+        ? `这一套是「${state}」（约孕${month}月）：肚子由程序按孕期统一加上（${tags}），你不要再写 pregnant、belly 这类词。`
+        : `这一套是「${state}」（约孕${month}月）：肚子还看不出来，不要写 pregnant、belly 这类词。`];
+}
+
+// 给写词看的样板（已有立绘、分批的第一份）去掉临时状态；这一套由程序按孕期加肚子时，怀孕的词也去掉。
+function lastingStateCaption(caption, enforcedPregnancy) {
+    const enforced = enforcedPregnancy > 0;
+    return filterCaptionTags(caption, (key) => !TRANSIENT_STATE_TAG_RE.test(key) && !(enforced && PREGNANCY_TAG_RE.test(key)));
+}
+
+// 按标签键过滤正面 caption（base 和各角色块），负面不动。
+function filterCaptionTags(caption, keep) {
+    const pos = caption && caption.v4_prompt && caption.v4_prompt.caption;
+    if (!pos) return caption;
+    const filter = (text) => splitTags(text).filter((tag) => keep(tagKey(tag))).join(', ');
+    const chars = Array.isArray(pos.char_captions) ? pos.char_captions : [];
+    return {
+        ...caption,
+        v4_prompt: {
+            ...caption.v4_prompt,
+            caption: {
+                ...pos,
+                base_caption: filter(pos.base_caption),
+                char_captions: chars.map((item) => ({ ...(item && typeof item === 'object' ? item : {}), char_caption: filter(item && item.char_caption) })),
+            },
+        },
+    };
+}
+
+// 服装名写了孕期（「薄睡袍-孕晚期」）时的孕月；没写或认不出为 0。
+function outfitPregnancyMonth(outfit) {
+    return outfit && typeof outfit === 'object' ? pregnancyMonthOf(splitOutfitState(outfit.name).state) : 0;
+}
+
+// 这一套按孕期定了肚子大小：去掉写词结果里自带的怀孕、肚子词，换成对照表里的那组（孕 1–3 月只去不加）。
+function applyPregnancyToCaption(caption, month) {
+    if (!(Number(month) > 0)) return caption;
+    const cleared = filterCaptionTags(caption, (key) => !PREGNANCY_TAG_RE.test(key));
+    return prependCharTags(cleared, pregnancyTagsOf(month));
+}
+
 // note 是用户这次临时补的要求（性格、某个情绪的特别表现），只影响写词这一步；
 // nsfw 为 true 时「动情」改用它在 NSFW 下的动作说明。
-// anchor：同一组表情分批写时，前面一批写好的一份；后面的批次外貌、服装和身体状态照它，整组才一致。
+// anchor：同一组表情分批写时，前面一批写好的一份；后面的批次外貌、服装和长期身体状态照它，整组才一致。
 function buildExpressionDiffDescription(name, prompt, labels, dna, outfit, { note = '', nsfw = false, world = null, anchor = null } = {}) {
     const moods = (Array.isArray(labels) ? labels : []).map((item) => String(item || '').trim()).filter(Boolean);
     const persona = String((dna && typeof dna === 'object' && dna.persona) || '').trim();
     const stored = prompt && typeof prompt === 'object' ? prompt : {};
-    const caption = formatReturnedCaption(stored.caption);
-    const anchored = formatReturnedCaption(anchor);
     const clothes = outfit && typeof outfit === 'object' ? outfit : null;
     const outfitName = clothes ? String(clothes.name || '').trim() : '';
+    const statedMonth = outfitPregnancyMonth(clothes);
+    const caption = formatReturnedCaption(lastingStateCaption(stored.caption, statedMonth));
+    const anchored = formatReturnedCaption(lastingStateCaption(anchor, statedMonth));
     const words = clothes && Array.isArray(clothes.words)
         ? clothes.words.map((item) => String(item || '').trim()).filter(Boolean)
         : [];
@@ -20443,8 +20598,10 @@ function buildExpressionDiffDescription(name, prompt, labels, dna, outfit, { not
         clothesLine,
         clothes && clothes.nsfwBoost && !nude ? nsfwClothingBoostLine('character') : '',
         clothesPrompt ? `服装提示词：\n${clothesPrompt}` : '',
-        anchored ? `这一组表情分几次写，下面是前面已经写好的一份。外貌、服装和身体状态要和它完全一致，只有表情和动作按各自的情绪重写：\n${anchored}` : '',
-        '正文和资料里写着的这个角色现在的身体状态（例如怀孕、受伤包扎、湿身），每一份都要写上，各份写法一致；这不算改长相。',
+        anchored ? `这一组表情分几次写，下面是前面已经写好的一份。外貌、服装和长期身体状态要和它完全一致，只有表情和动作按各自的情绪重写：\n${anchored}` : '',
+        `正文和资料里写着的长期身体状态（${LASTING_STATE_TEXT}），每一份都要写上，各份写法一致；这不算改长相。${statedMonth ? '' : `怀孕按孕期写肚子大小：${pregnancyGuideText()}。`}`,
+        `${TRANSIENT_STATE_TEXT}这类一会儿就过去的状态不要当成身体状态每份都写；某个表情本身要的（哭泣的眼泪、害羞的脸红、紧张的汗珠）只写在那一份里。`,
+        ...outfitStateLines(outfitName),
         ...worldContextLines(world),
         '每个表情都按这个角色自己的性格、脾气和说话做事的习惯来写，不要套统一的表情模板。',
         persona ? `「${name || ''}」的性格与表情习惯（据此决定每个表情怎么做、做到多大；只管表情和动作，不要据此改长相和衣服）：\n${persona}` : '',
@@ -20570,6 +20727,8 @@ function buildCharacterSpriteDescription(name, dna, options) {
         ...worldContextLines(options && options.world),
         '规格：大腿以上（cowboy shot）。朝向正面，直立，平视。禁止全身，禁止露出脚，禁止侧身，禁止倾斜构图。',
         SPRITE_DAILY_POSE_LINE,
+        SPRITE_LASTING_STATE_LINE,
+        ...outfitStateLines(options && options.outfitName),
         note ? `这次额外的要求：\n${note}` : '',
         SPRITE_NO_BACKGROUND_LINE,
         ...characterDnaLines(name, dna),
@@ -20587,6 +20746,7 @@ function buildCharacterAvatarDescription(name, dna, { world = null, sourcesText 
         '肩膀以下绝对不要出现：不画胸口以下的身体，不画腰、腿、脚，也不要画手。',
         '发色、瞳色、发型和头上的饰品按下面的角色设定来画，不能改；肩颈处的衣领按角色日常服装画一点即可。',
         '纯色浅底，不要背景，不要文字。',
+        `头像会一直挂着，${TRANSIENT_STATE_TEXT}这类一会儿就过去的状态不要画。`,
         ...characterDnaLines(name, dna),
         ...characterSourceLines(name, sourcesText),
         '只写一份，slotid 为 1。',
@@ -20640,6 +20800,7 @@ function buildDbgenSpriteBatchDescription(needs = [], options = {}) {
         profiles.length ? '角色外貌与服装依据正文补充；下面列了设定的角色，长相按设定写。' : '角色外貌与服装依据正文补充。',
         ...profiles,
         SPRITE_DAILY_POSE_LINE,
+        SPRITE_LASTING_STATE_LINE,
         SPRITE_NO_BACKGROUND_LINE,
         '不要写生成点，不要从正文摘挂载句。',
     ].join('\n');
@@ -20674,6 +20835,7 @@ function buildDbgenAssetDescription(need = {}) {
             '角色外貌与服装依据正文补充。',
             SPRITE_NO_BACKGROUND_LINE,
             SPRITE_DAILY_POSE_LINE,
+            SPRITE_LASTING_STATE_LINE,
             ...characterDnaLines(need.name, need.dna),
             ...characterSourceLines(need.name, need.sources),
         ].join('\n');
@@ -20774,8 +20936,9 @@ function expressionLookTags(basePrompt, outfit) {
     const clothesPrompt = clothes ? String(clothes.prompt || '').trim() : '';
     if (clothesPrompt) return dnaEnglishTags(clothesPrompt).join(', ');
     if (clothes && !clothes.ownImage) return '';
+    // 原装那张画的时候出汗、湿身之类的临时状态不跟到别的表情里。
     return splitTags(storedCharTags(basePrompt))
-        .filter((tag) => !isExpressionPoseTag(tag) && !LOOK_SKIP_TAGS.has(tagKey(tag)) && !isBackgroundTag(tag))
+        .filter((tag) => !isExpressionPoseTag(tag) && !LOOK_SKIP_TAGS.has(tagKey(tag)) && !isBackgroundTag(tag) && !TRANSIENT_STATE_TAG_RE.test(tagKey(tag)))
         .join(', ');
 }
 
@@ -20860,6 +21023,9 @@ __igsDefine(exports, "withOnlyBackground", () => withOnlyBackground);
 __igsDefine(exports, "dropMatchingTags", () => dropMatchingTags);
 __igsDefine(exports, "splitWriteBatches", () => splitWriteBatches);
 __igsDefine(exports, "splitExpressionWriteBatches", () => splitExpressionWriteBatches);
+__igsDefine(exports, "outfitStateLines", () => outfitStateLines);
+__igsDefine(exports, "outfitPregnancyMonth", () => outfitPregnancyMonth);
+__igsDefine(exports, "applyPregnancyToCaption", () => applyPregnancyToCaption);
 __igsDefine(exports, "buildExpressionDiffDescription", () => buildExpressionDiffDescription);
 __igsDefine(exports, "expressionSpritePrompts", () => expressionSpritePrompts);
 __igsDefine(exports, "uprightSpriteCaption", () => uprightSpriteCaption);
@@ -20881,6 +21047,7 @@ __igsDefine(exports, "applyLookToCaption", () => applyLookToCaption);
 __igsDefine(exports, "applyCharacterDnaToCaption", () => applyCharacterDnaToCaption);
 __igsDefine(exports, "EXPRESSION_WRITE_BATCH_MAX", () => EXPRESSION_WRITE_BATCH_MAX);
 __igsDefine(exports, "EXPRESSION_DIFF_BATCH_MAX", () => EXPRESSION_DIFF_BATCH_MAX);
+__igsDefine(exports, "SPRITE_LASTING_STATE_LINE", () => SPRITE_LASTING_STATE_LINE);
 });
 __igsRegister("src/generated-images/illustration/asset-prompt.js", function(module, exports, require) {
 // 素材补全（缺失背景 / 无名角色立绘）的 LLM 提示词与 NAI slot 组装。
@@ -20888,7 +21055,7 @@ __igsRegister("src/generated-images/illustration/asset-prompt.js", function(modu
 // 保证背景图里没有人、立绘始终是单人 3/4 身 + 一种底色（透明底、白底或可抠除的浅灰纯色底）。
 const { FICTION_FRAME, TAG_WRITING_RULES, SOFT_MODE_NOTE, DEFAULT_ASSET_TEMPLATES, MATTE_BACKGROUND_TAGS, WHITE_BACKGROUND_TAGS, SPRITE_TRANSPARENT_BACKGROUND_TAG, NSFW_NEGATIVE_GUARD, applyTemplate, buildDictionaryBackgroundTags } = require("src/generated-images/illustration/prompt-kit.js");
 const { buildCharacterDnaPromptParts, mergePromptTags } = require("src/scene/character-dna.js");
-const { dropMatchingTags, withOnlyBackground, worldContextLines } = require("src/generated-images/dbgen-prompt.js");
+const { SPRITE_LASTING_STATE_LINE, dropMatchingTags, withOnlyBackground, worldContextLines } = require("src/generated-images/dbgen-prompt.js");
 const ASSET_TASK = [
     '任务：阅读视觉小说正文，为「需要生成的素材」清单里的每一项写英文 tag。素材分两类：',
     '- 背景：给阅读器当场景背景的空镜头，画面里不能出现任何人物。',
@@ -20950,6 +21117,7 @@ function buildAssetPlannerUserPrompt({ needs = [], readableText = '', previousTe
         material ? `【设定资料】下面是角色卡、世界书和数据库的全部设定（每段开头标了出处），地点和角色的样子都以这些设定和正文为准。\n${material}` : '',
         `【需要生成的素材】\n${listed.join('\n')}`,
         worldLines.length ? `【世界观】\n${worldLines.join('\n')}` : '',
+        needs.some((need) => need.type === 'sprite') ? `【立绘的身体状态】${SPRITE_LASTING_STATE_LINE}` : '',
         needs.some((need) => need.type === 'sprite' && need.dna)
             ? '【角色 DNA】标注了固定身份或默认外观的立绘，tags 不得改变这些特征，只补充正文中额外交代的内容。' : '',
         lore.length
@@ -36224,7 +36392,7 @@ async function handleSettingsAction(action, ctx) {
         };
         const background = await spriteWritingBackground({ settingsState, service, globalObj, sceneAssets, name, onProgress: progress.onProgress, persist: persistSettingsDraft });
         try {
-            result = await service.generateCharacterSprite({ name, dna, nude: true, ...background, onProgress: progress.onProgress });
+            result = await service.generateCharacterSprite({ name, dna, nude: true, outfitName, ...background, onProgress: progress.onProgress });
         } catch (error) {
             return failed(error);
         }
@@ -45899,7 +46067,7 @@ __igsDefine(exports, "IMAGE_JOB_LOG_LEVELS", () => IMAGE_JOB_LOG_LEVELS);
 __igsDefine(exports, "DEFAULT_IMAGE_JOB_LOG_SETTINGS", () => DEFAULT_IMAGE_JOB_LOG_SETTINGS);
 });
 __igsRegister("src/visual/igs-ui/settings-outfit-actions.js", function(module, exports, require) {
-const { BUILTIN_NUDE_OUTFIT, isBuiltinNudeOutfit, isValidOutfitName, isValidOutfitWord, normalizeWardrobe, OUTFIT_RESET } = require("src/scene/character-outfits.js");
+const { BUILTIN_NUDE_OUTFIT, isBuiltinNudeOutfit, isValidOutfitName, isValidOutfitWord, normalizeWardrobe, OUTFIT_RESET, stateOutfitWardrobe } = require("src/scene/character-outfits.js");
 const { normalizeMoodGroups } = require("src/scene/mood-groups.js");
 const { classifySceneKey } = require("src/scene/scene-directives.js");
 const { clearOutfitReview, loadOutfitReview, removeOutfitReview } = require("src/scene/outfit-review-store.js");
@@ -45995,7 +46163,8 @@ function createOutfit(ctx, charName, outfits, name) {
     if (!isValidOutfitName(name)) { warn(ctx, `「${name}」不能用作服装名（不能为空、「默认」或含 | ] 换行）`); return false; }
     const owner = outfitTokenOwner(outfits, name);
     if (owner) { warn(ctx, owner === name ? `「${charName}」已有服装「${name}」（同名）` : `「${name}」已是服装「${owner}」的词`); return false; }
-    outfits[name] = isBuiltinNudeOutfit(name) ? { words: [], moods: {}, wardrobe: BUILTIN_NUDE_OUTFIT } : { words: [], moods: {} };
+    const wardrobe = isBuiltinNudeOutfit(name) ? BUILTIN_NUDE_OUTFIT : stateOutfitWardrobe(outfits, name);
+    outfits[name] = wardrobe ? { words: [], moods: {}, wardrobe } : { words: [], moods: {} };
     return true;
 }
 
@@ -85678,7 +85847,7 @@ const { supportsNaiTransparentBackground } = require("src/generated-images/reque
 const { collectAssetNeeds, tempAssetKeyOf, GENERATED_ASSET_URL_PREFIX, generatedAssetIdOf, isGeneratedAssetUrl } = require("src/scene/asset-match.js");
 const { floorKeyOf } = require("src/media/illustration-store.js");
 const { GENERATED_IMAGE_SCHEMA_VERSION, isLegacyGeneratedImage, isQuotaError, normalizeGeneratedImageRecord } = require("src/media/generated-asset-store.js");
-const { dropBackgroundTags, buildCharacterAvatarDescription, buildCharacterSpriteDescription, buildDbgenAssetDescription, buildDbgenBackgroundBatchDescription, buildDbgenSpriteBatchDescription, buildExpressionDiffDescription, buildWardrobeClothingDescription, nsfwClothingBoostLine, applyCharacterDnaToCaption, applyLookToCaption, applyMoodToCaption, expressionLookTags, expressionPaintDna, expressionSpritePrompts, splitExpressionWriteBatches, splitWriteBatches, uprightSpriteCaption } = require("src/generated-images/dbgen-prompt.js");
+const { dropBackgroundTags, buildCharacterAvatarDescription, buildCharacterSpriteDescription, buildDbgenAssetDescription, buildDbgenBackgroundBatchDescription, buildDbgenSpriteBatchDescription, buildExpressionDiffDescription, buildWardrobeClothingDescription, nsfwClothingBoostLine, applyCharacterDnaToCaption, applyLookToCaption, applyMoodToCaption, expressionLookTags, expressionPaintDna, expressionSpritePrompts, splitExpressionWriteBatches, splitWriteBatches, uprightSpriteCaption, applyPregnancyToCaption, outfitPregnancyMonth } = require("src/generated-images/dbgen-prompt.js");
 const { normalizeStoredPrompt, promptFromCaption } = require("src/generated-images/generation-prompt.js");
 const { promptTimeBucket, sceneVariantCaption, sceneVariantTags } = require("src/generated-images/scene-variant-tags.js");
 const { sceneTimeBucket } = require("src/scene/time-bucket.js");
@@ -86652,11 +86821,11 @@ function createAssetGenerationService(deps) {
         };
     }
 
-    // 标签顺序：DNA → 表情 → 衣服与长相 → 写词结果。exact：用户改过的词原样出图，不硬合，新图继续记为「改过」。
-    async function paintExpressionCaption(name, mood, caption, dna, { look = '', seed, nsfw = false, exact = false } = {}) {
+    // 标签顺序：DNA → 孕期肚子 → 表情 → 衣服与长相 → 写词结果。exact：用户改过的词原样出图，不硬合，新图继续记为「改过」。
+    async function paintExpressionCaption(name, mood, caption, dna, { look = '', seed, nsfw = false, exact = false, pregnancy = 0 } = {}) {
         // 情绪组的 tag 设置从当前素材库读；只有打开「固定加上」的组才会放。
         const groups = readSettings().sceneAssets.moodGroups;
-        const upright = exact ? caption : (uprightSpriteCaption(applyCharacterDnaToCaption(applyMoodToCaption(applyLookToCaption(caption, look), mood, { nsfw, groups }), dna)) || caption);
+        const upright = exact ? caption : (uprightSpriteCaption(applyCharacterDnaToCaption(applyPregnancyToCaption(applyMoodToCaption(applyLookToCaption(caption, look), mood, { nsfw, groups }), pregnancy), dna)) || caption);
         const meta = expressionPaintMeta();
         let painted;
         try {
@@ -86702,6 +86871,7 @@ function createAssetGenerationService(deps) {
             look: expressionLookTags(basePrompt, outfit),
             seed: randomSeed(),
             nsfw: nsfw === true,
+            pregnancy: outfitPregnancyMonth(outfit),
         };
         const paintDna = expressionPaintDna(dna, outfit);
         const stopped = () => Boolean(signal && signal.aborted);
@@ -86783,7 +86953,7 @@ function createAssetGenerationService(deps) {
         const list = (Array.isArray(items) ? items : []).filter((item) => item && item.mood && item.caption);
         if (!list.length) return { ok: false, error: '没有写好词、还没出图的表情' };
         if (!nai || typeof nai.generateDbgenCaption !== 'function') return { ok: false, error: '当前图像来源不能出图' };
-        const paint = { look: expressionLookTags(basePrompt, outfit), seed: randomSeed(), nsfw: nsfw === true };
+        const paint = { look: expressionLookTags(basePrompt, outfit), seed: randomSeed(), nsfw: nsfw === true, pregnancy: outfitPregnancyMonth(outfit) };
         const paintDna = expressionPaintDna(dna, outfit);
         const stopped = () => Boolean(signal && signal.aborted);
         const results = [];
@@ -86807,7 +86977,7 @@ function createAssetGenerationService(deps) {
         if (caption) {
             reportExpressionProgress(onProgress, { phase: 'paint', done: 1, total: 1, mood: label });
             const look = expressionLookTags(basePrompt, outfit);
-            const item = await paintExpressionCaption(name, label, caption, expressionPaintDna(dna, outfit), { look, seed: randomSeed(), nsfw: nsfw === true, exact: exact === true });
+            const item = await paintExpressionCaption(name, label, caption, expressionPaintDna(dna, outfit), { look, seed: randomSeed(), nsfw: nsfw === true, exact: exact === true, pregnancy: outfitPregnancyMonth(outfit) });
             return { ok: true, items: [item] };
         }
         return generateExpressionSet({ name, basePrompt, moods: [label], dna, outfit, note, nsfw, world, onProgress });
@@ -86895,13 +87065,15 @@ function createAssetGenerationService(deps) {
     // 设置页主动出一张默认立绘：先让 LLM 写提示词，再出图，不经过楼内补图。
     // 格子里已有图的「重新生成」带着那张图的 caption 进来：不写词，换一颗新种子直接画。
     // world 是世界观与世界设定提要；sourcesText 是角色卡 / 世界书 / 数据库里这个角色的节选，只补 DNA 没写到的。
-    async function generateCharacterSprite({ name, dna, nude = false, note = '', caption, exact = false, world = null, sourcesText = '', onProgress } = {}) {
+    // outfitName：给某一套服装画底图时（「裸体-孕晚期」的裸体立绘）传进来，服装名里的身体状态照样生效。
+    async function generateCharacterSprite({ name, dna, nude = false, note = '', caption, exact = false, world = null, sourcesText = '', outfitName = '', onProgress } = {}) {
         const who = String(name || '').trim();
         if (!who) return { ok: false, error: '没有角色' };
+        const pregnancy = outfitPregnancyMonth({ name: outfitName });
         if (caption) {
             if (!nai || typeof nai.generateDbgenCaption !== 'function') return { ok: false, error: '当前图像来源不能画立绘' };
             reportExpressionProgress(onProgress, { phase: 'paint', done: 1, total: 1, mood: '默认' });
-            const repainted = await paintExpressionCaption(who, '默认', caption, dna, { seed: randomSeed(), exact: exact === true });
+            const repainted = await paintExpressionCaption(who, '默认', caption, dna, { seed: randomSeed(), exact: exact === true, pregnancy });
             if (!repainted.ok) return { ok: false, error: repainted.error || '出图失败', prompt: repainted.prompt };
             return { ok: true, imageId: repainted.imageId, prompt: repainted.prompt };
         }
@@ -86912,7 +87084,7 @@ function createAssetGenerationService(deps) {
         let written;
         try {
             const withMaterial = await writingMaterial(characterNamesOf(who, readSettings()), SPRITE_MATERIAL_GUIDE(who));
-            written = await nai.writeDbgenPrompt({ description: withMaterial(buildCharacterSpriteDescription(who, dna, { nude: nude === true, note, world, sourcesText })) });
+            written = await nai.writeDbgenPrompt({ description: withMaterial(buildCharacterSpriteDescription(who, dna, { nude: nude === true, note, world, sourcesText, outfitName })) });
         } catch (error) {
             return { ok: false, error: (error && error.message) || '写提示词失败' };
         }
@@ -86920,7 +87092,7 @@ function createAssetGenerationService(deps) {
             return { ok: false, error: (written && written.error) || '写提示词失败' };
         }
         reportExpressionProgress(onProgress, { phase: 'paint', done: 1, total: 1, mood: '默认' });
-        const painted = await paintExpressionCaption(who, '默认', written.caption, dna);
+        const painted = await paintExpressionCaption(who, '默认', written.caption, dna, { pregnancy });
         if (!painted.ok) return { ok: false, error: painted.error || '出图失败', prompt: painted.prompt };
         return { ok: true, imageId: painted.imageId, prompt: painted.prompt };
     }
