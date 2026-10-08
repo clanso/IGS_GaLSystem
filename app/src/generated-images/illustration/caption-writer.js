@@ -46,7 +46,8 @@ export function parseCaptionSlots(text) {
             return m ? m[1].trim() : '';
         };
         const scene = read('scene');
-        const char = read('char');
+        // 说明里的已有立绘是「char: x,y | tags」，模型有时照抄这种写法（偶尔还带角色名）：去掉开头的坐标，免得 0.5, 0.5 混进标签。
+        const char = read('char').replace(/^(?:[^|,]*\|\s*)?-?\d*\.?\d+\s*,\s*-?\d*\.?\d+\s*\|\s*/, '');
         if (!scene && !char) return null;
         const hasChar = Boolean(char);
         return { slotId, caption: { v4_prompt: side(scene, hasChar ? char : null), v4_negative_prompt: side(read('uc'), hasChar ? '' : null) } };
