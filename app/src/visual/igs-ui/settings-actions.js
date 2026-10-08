@@ -597,6 +597,42 @@ function applyMoodPreset(groups) {
     return before !== after;
 }
 
+// 补上缺的预设组：旧版默认只有 8 组，表情差分却按 20 档预设画；正文里写「委屈」「哭泣」时找不到组，那几张立绘永远用不上。
+// 只加还没有的预设组（带预设词），已有的组不重置。新组的组名和预设词如果在别的预设组里，挪到新组
+// （不挪的话正文里的这个词还是先归到旧组）；用户自建组里的词不动，新组就不带这些词。返回 { added, moved }。
+export function planMissingMoodPresets(groups) {
+    const list = Array.isArray(groups) ? groups : [];
+    const have = new Set(list.map((group) => String(group && group.label || '').trim()));
+    const presetLabels = new Set(MOOD_PRESET.map((entry) => entry.label));
+    const missing = MOOD_PRESET.filter((entry) => !have.has(entry.label));
+    const customWords = new Set(list
+        .filter((group) => group && !presetLabels.has(String(group.label || '').trim()))
+        .flatMap((group) => (Array.isArray(group.words) ? group.words : []).map((word) => String(word || '').trim())));
+    const added = missing.map((entry) => ({ label: entry.label, words: entry.words.filter((word) => !customWords.has(word)) }));
+    const moved = [];
+    for (const entry of added) {
+        const words = new Set([entry.label, ...entry.words]);
+        for (const group of list) {
+            const label = String(group && group.label || '').trim();
+            if (!presetLabels.has(label)) continue;
+            for (const word of Array.isArray(group.words) ? group.words : []) {
+                if (words.has(String(word || '').trim())) moved.push({ word: String(word).trim(), from: label, to: entry.label });
+            }
+        }
+    }
+    return { added, moved };
+}
+
+function applyMissingMoodPresets(groups, plan) {
+    for (const { word, from, to } of plan.moved) {
+        const group = groups.find((item) => item && String(item.label || '').trim() === from);
+        if (group && Array.isArray(group.words)) group.words = group.words.filter((item) => String(item || '').trim() !== word);
+        const target = plan.added.find((item) => item.label === to);
+        if (target && word !== to && !target.words.includes(word)) target.words.push(word);
+    }
+    groups.push(...plan.added.map((item) => ({ label: item.label, words: item.words.slice() })));
+}
+
 function generatedOperationFailure(dialogs, globalObj, message, reason) {
     pageAlert(dialogs, globalObj, message);
     return { ok: false, reason };
@@ -3600,6 +3636,21 @@ export async function handleSettingsAction(action, ctx) {
         const looked = await dialogs.confirm(applyMoodPreset(groups)
             ? '已按预设整理词库：补齐缺少的组，并将词归回所属的组；自行添加的组和词均已保留。'
             : '词库已与预设一致。');
+        return rerenderSettings();
+    }
+
+    if (normalizedAction === 'mood-fill-presets') {
+        const groups = ensureMoodGroups(settingsState);
+        const plan = planMissingMoodPresets(groups);
+        if (!plan.added.length) return rerenderSettings();
+        const movedText = plan.moved.length
+            ? `\n这些词会从原来的组挪到新组（不挪的话正文里写这个词还是先归到旧组）：${plan.moved.map((item) => `「${item.word}」${item.from}→${item.to}`).join('、')}。`
+            : '';
+        const message = `补上 ${plan.added.length} 个预设情绪组：${plan.added.map((item) => item.label).join('、')}。\n已有的组和你加的词不重置。${movedText}`;
+        if (typeof dialogs.confirm === 'function' && !(await dialogs.confirm(message, { okLabel: '补上' }))) return rerenderSettings();
+        applyMissingMoodPresets(groups, plan);
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
         return rerenderSettings();
     }
 
