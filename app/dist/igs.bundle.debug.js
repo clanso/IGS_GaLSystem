@@ -113,15 +113,18 @@ const IGS_VERSION = '0.34.78';
 const SCENE_ASSETS_INJECTION_INITIAL_DELAY_MS = 3000;
 const SCENE_ASSETS_INJECTION_RETRY_MS = 1500;
 const SCENE_ASSETS_INJECTION_MAX_ATTEMPTS = 5;
-// 楼内补立绘给副 LLM 的角色资料节选：每个角色限得比手动生成时短。
+// 副 LLM 规划（楼内补立绘 / 背景、剧情 CG）的资料节选：标准长度时每项限得比手动生成时短；
+// 「读取上下文」加大预算时（large）给长的，世界书相关条目尽量整条带上。
 const PLANNER_SOURCE_LIMITS = Object.freeze({ card: 800, worldbook: 1200, entry: 600, database: 500 });
+const LARGE_PLANNER_SOURCE_LIMITS = Object.freeze({ card: 8000, worldbook: 20000, entry: 5000, database: 5000 });
 
-// 楼内补立绘 / 背景：一次读角色卡 / 世界书 / 数据库，再按名字挑节选（每个限得短，规划说明不膨胀）。
-async function readPlannerSources(globalObject, names, pick) {
+// 一次读角色卡 / 世界书 / 数据库，再按名字挑节选。
+async function readPlannerSources(globalObject, names, pick, { large = false } = {}) {
     const material = await readSourceMaterial(globalObject);
+    const limits = large ? LARGE_PLANNER_SOURCE_LIMITS : PLANNER_SOURCE_LIMITS;
     const out = {};
     for (const name of names) {
-        const text = formatCharacterSources(pick(material, { name, limits: PLANNER_SOURCE_LIMITS }));
+        const text = formatCharacterSources(pick(material, { name, limits }));
         if (text) out[name] = text;
     }
     return out;
@@ -208,6 +211,8 @@ function bootstrapIGS(options = {}) {
         getReaderMode: readerModeNow,
         getViewport: () => readCgViewport(globalObject, readerModeNow()),
         getSceneAssets: () => sceneAssetsNow(readImageBridge().sceneAssets),
+        // 剧情 CG 规划：出场角色的角色卡 / 世界书 / 数据库节选。
+        readCharacterSources: (names, sourceOptions) => readPlannerSources(globalObject, names, pickCharacterSources, sourceOptions),
         events,
         random: options.random,
         report: reportImageJob,
@@ -227,9 +232,9 @@ function bootstrapIGS(options = {}) {
         getReaderMode: readerModeNow,
         getViewport: () => readCgViewport(globalObject, readerModeNow()),
         // 楼内补立绘：按角色名挑节选。
-        readCharacterSources: (names) => readPlannerSources(globalObject, names, pickCharacterSources),
+        readCharacterSources: (names, options) => readPlannerSources(globalObject, names, pickCharacterSources, options),
         // 楼内补背景：同样按地点名挑角色卡描述 / 场景栏、世界书、数据库节选。
-        readSceneSources: (names) => readPlannerSources(globalObject, names, pickSceneSources),
+        readSceneSources: (names, options) => readPlannerSources(globalObject, names, pickSceneSources, options),
         events,
         report: reportImageJob,
     });
@@ -10376,6 +10381,7 @@ const SETTINGS_PANEL_TAB_CONTRACT = Object.freeze({
             'bridge.autoIllustration.llm.apiKey',
             'bridge.autoIllustration.llm.model',
             'bridge.autoIllustration.llm.contextFloors',
+            'bridge.autoIllustration.llm.contextBudget',
             'bridge.autoIllustration.llm.prompts.illustration',
             'bridge.autoIllustration.llm.prompts.illustrationSoft',
             'bridge.autoIllustration.llm.prompts.asset',
@@ -14451,6 +14457,7 @@ function createIgsReaderHost(options = {}) {
                 autoLlmPromptAssetField: field('bridge.autoIllustration.llm.prompts.asset', '素材补全规划', autoTextarea('bridge.autoIllustration.llm.prompts.asset', auto.llm.prompts.asset, '清空即恢复内置提示词')),
                 autoLlmPromptAssetSoftField: field('bridge.autoIllustration.llm.prompts.assetSoft', '素材补全规划 · 温和重试', autoTextarea('bridge.autoIllustration.llm.prompts.assetSoft', auto.llm.prompts.assetSoft, '清空即恢复内置提示词')),
                 autoLlmContextField: field('bridge.autoIllustration.llm.contextFloors', '参考前文楼层数', numberInput('bridge.autoIllustration.llm.contextFloors', auto.llm.contextFloors, 0, 3)),
+                autoLlmContextBudgetField: field('bridge.autoIllustration.llm.contextBudget', '读取上下文', selectInput('bridge.autoIllustration.llm.contextBudget', auto.llm.contextBudget, [['standard', '标准（本楼前6000字＋前文）'], ['32k', '约3万token'], ['128k', '约12万token'], ['500k', '约50万token'], ['1000k', '约100万token']]), '剧情CG和楼内补背景、立绘时副LLM读多少正文。标准以外整层都读，前文连你的发言从近到远读满为止，资料节选也加长，超时自动放到10分钟；越大越准，也越慢越贵，模型和接口的上下文上限要够。'),
                 autoNaiTransportField: field('bridge.autoIllustration.nai.transport', '传输方式', selectInput('bridge.autoIllustration.nai.transport', auto.nai.transport, [['direct', '浏览器直连'], ['st-proxy', '酒馆CORS代理（需开启enableCorsProxy）']])),
                 autoNaiEndpointField: field('bridge.autoIllustration.nai.endpoint', '接口地址', textInput('bridge.autoIllustration.nai.endpoint', auto.nai.endpoint, '留空使用官方image.novelai.net')),
                 autoNaiKeyField: field('bridge.autoIllustration.nai.apiKey', 'NAI Key', secretInput('bridge.autoIllustration.nai.apiKey', auto.nai.apiKey, 'pst-...')),
@@ -39370,6 +39377,7 @@ const { normalizeRenderQualitySetting } = require("src/visual/igs-ui/render-qual
 const { spriteIdentity } = require("src/scene/character-outfits.js");
 const { normalizeImageCacheCount } = require("src/media/tavern-image-cache.js");
 const { SPRITE_BACKGROUND_MODES } = require("src/generated-images/illustration/auto-illustration-settings.js");
+const { CONTEXT_BUDGETS } = require("src/generated-images/illustration/planner-context.js");
 function normalizeReaderMode(mode, bridge) {
     if (mode === 'default') return 'default';
     const resolved = resolveLegacyReaderMode(mode, '', bridge || {});
@@ -39458,6 +39466,7 @@ function normalizeSettingsValue(path, value) {
     if (/^bridge\.autoIllustration\.(nsfwCount|interludeProbability|interludeMaxCount|assets\.maxPerFloor|llm\.contextFloors|llm\.timeoutMs|nai\.steps|nai\.scale|nai\.timeoutMs)$/.test(path)) {
         return Number(value);
     }
+    if (path === 'bridge.autoIllustration.llm.contextBudget') return Object.keys(CONTEXT_BUDGETS).includes(value) ? value : 'standard';
     if (path === 'bridge.autoIllustration.llm.source' || path === 'bridge.autoIllustration.nai.transport') {
         return String(value || '');
     }
@@ -39813,7 +39822,7 @@ const IMAGE_LLM_TEMPLATE = `
     <div class="igs-source-filter-note">{{autoLlmNote}}</div>
     <div class="igs-source-filter-note" data-image-feature="llm-warn"{{autoLlmWarnHidden}}>{{autoLlmWarn}}</div>
     <div class="igs-source-filter-grid">
-      {{autoLlmSourceField}}{{autoLlmContextField}}
+      {{autoLlmSourceField}}{{autoLlmContextField}}{{autoLlmContextBudgetField}}
     </div>
     <div class="igs-settings-sub"{{autoLlmApiHidden}}>
       <div class="igs-source-filter-grid">
@@ -41124,6 +41133,7 @@ const { NAI_DEFAULT_SETTINGS } = require("src/generated-images/request-builders/
 const { DEFAULT_ASSET_TEMPLATES } = require("src/generated-images/illustration/prompt-kit.js");
 const { PLANNER_SYSTEM_PROMPT, PLANNER_SOFT_SYSTEM_PROMPT } = require("src/generated-images/illustration/planner-prompt.js");
 const { ASSET_PLANNER_SYSTEM_PROMPT, ASSET_PLANNER_SOFT_SYSTEM_PROMPT } = require("src/generated-images/illustration/asset-prompt.js");
+const { CONTEXT_BUDGETS } = require("src/generated-images/illustration/planner-context.js");
 // 副 LLM 系统提示词：留空即使用内置版本，保证内置提示词升级后未改动的用户能跟着更新。
 const DEFAULT_LLM_PROMPTS = Object.freeze({
     illustration: PLANNER_SYSTEM_PROMPT,
@@ -41197,6 +41207,7 @@ function normalizeAutoIllustrationSettings(value) {
             source: llm.source === 'openai' ? 'openai' : 'tavern',
             endpoint: str(llm.endpoint), apiKey: str(llm.apiKey), model: str(llm.model),
             contextFloors: clampInt(llm.contextFloors, 0, 3, 1),
+            contextBudget: Object.keys(CONTEXT_BUDGETS).includes(llm.contextBudget) ? llm.contextBudget : 'standard',
             timeoutMs: clampInt(llm.timeoutMs, 10000, 300000, 90000),
             prompts: normalizePrompts(llm.prompts),
             jailbreakHead: str(llm.jailbreakHead),
@@ -41573,6 +41584,7 @@ __igsDefine(exports, "SPRITE_TRANSPARENT_BACKGROUND_TAG", () => SPRITE_TRANSPARE
 });
 __igsRegister("src/generated-images/illustration/planner-prompt.js", function(module, exports, require) {
 const { FICTION_FRAME, CG_COMPOSITION_GUIDE, TAG_WRITING_RULES, SOFT_MODE_NOTE } = require("src/generated-images/illustration/prompt-kit.js");
+const { worldContextLines } = require("src/generated-images/dbgen-prompt.js");
 const PLANNER_OUTPUT_FORMAT = [
     '【输出格式】不要输出 JSON、不要代码块、不要解释。每张图按以下字段一行一个输出，多张图依次排列：',
     'slot: 图序号（从 1 开始）',
@@ -41623,8 +41635,11 @@ const PLANNER_SOFT_SYSTEM_PROMPT = [
 ].join('\n');
 
 // characterDna：[{ name, identity, defaultAppearance }]，由调用方按别名归约后提供；为空时输出与旧版一致。
-function buildPlannerUserPrompt({ numberedText, scenes, characters, previousText, want, exact, isNsfw, characterDna = [], frame = '' }) {
-    const lastScene = scenes && scenes.length ? scenes[scenes.length - 1] : null;
+// characterSources：[{ name, text }] 角色卡 / 世界书 / 数据库节选；world：世界观与世界设定提要。
+function buildPlannerUserPrompt({ numberedText, scenes, characters, previousText, want, exact, isNsfw, characterDna = [], characterSources = [], world = null, frame = '' }) {
+    const sceneLabel = (scene) => `${scene.scene}｜${scene.time}｜${scene.weather}${scene.nsfw ? '｜NSFW' : ''}`;
+    // 一楼常有好几个场景：按出现顺序列全（去掉连续重复），插图要画在对应场景的段落里。
+    const sceneList = (Array.isArray(scenes) ? scenes : []).map(sceneLabel).filter((label, index, list) => label !== list[index - 1]);
     const flat = (text) => String(text || '').replace(/\s*\n\s*/g, ' ').trim();
     const dnaLines = (Array.isArray(characterDna) ? characterDna : [])
         .filter((d) => d && d.name && (flat(d.identity) || flat(d.defaultAppearance)))
@@ -41632,17 +41647,23 @@ function buildPlannerUserPrompt({ numberedText, scenes, characters, previousText
     const dnaBlock = dnaLines.length
         ? `【角色 DNA】固定身份任何时候都不得改变；默认外观只在正文未交代换装时使用，正文明确换装时按正文写：\n${dnaLines.join('\n')}`
         : '';
-    const sceneLine = lastScene
-        ? `${lastScene.scene}｜${lastScene.time}｜${lastScene.weather}${lastScene.nsfw ? '｜NSFW' : ''}`
-        : '未标注';
+    const sceneLine = !sceneList.length ? '未标注'
+        : sceneList.length === 1 ? sceneList[0]
+            : `本楼按顺序经过：${sceneList.join(' → ')}`;
     const countLine = exact
         ? `本楼需要恰好 ${want} 张插图。`
         : `本楼需要 1 到 ${want} 张插图，按剧情判断，画面感不足时只出 1 张。`;
+    const worldLines = worldContextLines(world);
+    const sourceLines = (Array.isArray(characterSources) ? characterSources : [])
+        .filter((item) => item && item.name && String(item.text || '').trim())
+        .map((item) => `「${item.name}」：\n${String(item.text).trim()}`);
     return [
         frame ? `【画面】${frame}` : '',
+        worldLines.length ? `【世界观】\n${worldLines.join('\n')}` : '',
         `【场景】${sceneLine}`,
         `【出场角色】${characters && characters.length ? characters.join('、') : '未标注'}`,
         dnaBlock,
+        sourceLines.length ? `【角色资料】下面是提到这些角色的节选，每段开头标了出处。长相和服装以 DNA 与正文为准，没写到的按资料补；资料里的剧情不要画进去。\n${sourceLines.join('\n')}` : '',
         previousText ? `【前文摘要】\n${previousText}` : '',
         `【本楼正文（已编号）】\n${numberedText}`,
         `【要求】${countLine}${isNsfw ? '本楼为 NSFW 场景，请选择最具代表性的画面。' : ''}`,
@@ -41653,282 +41674,6 @@ function buildPlannerUserPrompt({ numberedText, scenes, characters, previousText
 __igsDefine(exports, "buildPlannerUserPrompt", () => buildPlannerUserPrompt);
 __igsDefine(exports, "PLANNER_SYSTEM_PROMPT", () => PLANNER_SYSTEM_PROMPT);
 __igsDefine(exports, "PLANNER_SOFT_SYSTEM_PROMPT", () => PLANNER_SOFT_SYSTEM_PROMPT);
-});
-__igsRegister("src/generated-images/illustration/asset-prompt.js", function(module, exports, require) {
-// 素材补全（缺失背景 / 无名角色立绘）的 LLM 提示词与 NAI slot 组装。
-// 副 LLM 只写「内容」tag（地点陈设、外貌服装）；构图、底色、禁止项走可编辑模板，
-// 保证背景图里没有人、立绘始终是单人 3/4 身 + 一种底色（透明底或可抠除的浅灰纯色底）。
-const { FICTION_FRAME, TAG_WRITING_RULES, SOFT_MODE_NOTE, DEFAULT_ASSET_TEMPLATES, MATTE_BACKGROUND_TAGS, SPRITE_TRANSPARENT_BACKGROUND_TAG, NSFW_NEGATIVE_GUARD, applyTemplate, buildDictionaryBackgroundTags } = require("src/generated-images/illustration/prompt-kit.js");
-const { buildCharacterDnaPromptParts, mergePromptTags } = require("src/scene/character-dna.js");
-const { dropMatchingTags, withOnlyBackground, worldContextLines } = require("src/generated-images/dbgen-prompt.js");
-const ASSET_TASK = [
-    '任务：阅读视觉小说正文，为「需要生成的素材」清单里的每一项写英文 tag。素材分两类：',
-    '- 背景：给阅读器当场景背景的空镜头，画面里不能出现任何人物。',
-    '- 立绘：单个角色的 3/4 身站立立绘，之后会抠成透明底叠在背景上。',
-    '',
-    '【输出格式】不要输出 JSON、不要代码块、不要解释。每项按以下字段一行一个输出，多项依次排列：',
-    'id: 清单里给出的编号（如 bg1、ch1），必须原样照抄',
-    'tags: 英文正向 tag',
-    'uc: 这一项额外不能出现的英文 tag，可留空',
-    '',
-    '【背景 tags 写法】',
-    '1. 先写地点类型（如 classroom, abandoned factory, bedroom, shrine, city street），再写建筑风格、年代与文化背景（如 japanese, western, fantasy, modern, cyberpunk）。',
-    '2. 写 3～6 个能让人一眼认出地点的陈设或地标（如 desk, chalkboard, window, bookshelf, neon sign, torii）。',
-    '3. 按清单给出的时间与天气写光线和氛围：白天 daytime, sunlight；黄昏 sunset, orange sky；夜晚 night, moonlight, dim lighting 或 artificial light；雨 rain, wet ground；雪 snow。',
-    '4. 可以写视角（indoors / outdoors, perspective），不要写人、剪影、动物、文字、招牌上的具体字、构图词。',
-    '',
-    '【立绘 tags 写法】',
-    '1. 第一个 tag 写性别与人数：1girl 或 1boy（性别不明时按正文称呼推断）。',
-    '2. 再写外观年龄（如 mature female, young man）、体型、发色、发长、发型、瞳色、特征（如 animal ears, glasses, scar）。',
-    '3. 写完整服装：上装、下装、外套、配饰，颜色写清楚；正文未交代时，按身份与场景推断合理服装（如女仆 maid outfit，学生 school uniform，骑士 armor）。服装一律写穿着完整的日常状态。',
-    '4. 表情写平静或符合其性格的常态表情（如 light smile, expressionless, serious），再写一个轻量的日常小动作（如 hand in pocket, hands behind back, hand on own hip, adjusting hair），不要双手僵直下垂；不要写大幅动作、道具、镜头、背景、底色、其他角色。',
-    '',
-    '【通用规则】',
-    ...TAG_WRITING_RULES.map((rule, i) => `${i + 1}. ${rule}`),
-    `${TAG_WRITING_RULES.length + 1}. 清单里的每一项都必须输出，不要增减项目。`,
-];
-const ASSET_PLANNER_SYSTEM_PROMPT = [...FICTION_FRAME, ...ASSET_TASK].join('\n');
-const ASSET_PLANNER_SOFT_SYSTEM_PROMPT = [...FICTION_FRAME, ...ASSET_TASK, '', ...SOFT_MODE_NOTE].join('\n');
-function describeAssetNeed(need, index) {
-    if (need.type === 'background') {
-        const parts = [`场景：${need.name}`];
-        if (need.time) parts.push(`时间：${need.time}`);
-        if (need.weather) parts.push(`天气：${need.weather}`);
-        return { id: `bg${index + 1}`, line: `背景｜${parts.join('｜')}` };
-    }
-    // DNA 固定的身份与默认外观会由程序在出图前合并，这里只让副 LLM 知道、避免写出冲突 tag。
-    const flat = (text) => String(text || '').replace(/\s*\n\s*/g, ' ').trim();
-    const dnaNotes = [];
-    if (need.dna && flat(need.dna.identity)) dnaNotes.push(`固定身份：${flat(need.dna.identity)}`);
-    if (need.dna && flat(need.dna.defaultAppearance)) dnaNotes.push(`默认外观：${flat(need.dna.defaultAppearance)}`);
-    return { id: `ch${index + 1}`, line: [`立绘｜角色：${need.name}`, ...dnaNotes].join('｜') };
-}
-function buildAssetPlannerUserPrompt({ needs = [], readableText = '', previousText = '', world = null } = {}) {
-    const listed = needs.map((need, index) => {
-        const { id, line } = describeAssetNeed(need, index);
-        return `${id}｜${line}`;
-    });
-    const worldLines = worldContextLines(world);
-    // 角色卡 / 世界书 / 数据库 / 前文里提到这个角色或地点的节选，由调用方挂在 need.sources 上。
-    const sourcesOf = (type) => needs.map((need, index) => (need.type === type && String(need.sources || '').trim()
-        ? `${describeAssetNeed(need, index).id}「${need.name}」：\n${String(need.sources).trim()}` : '')).filter(Boolean);
-    const sources = sourcesOf('sprite');
-    const sceneSources = sourcesOf('background');
-    return [
-        `【需要生成的素材】\n${listed.join('\n')}`,
-        worldLines.length ? `【世界观】\n${worldLines.join('\n')}` : '',
-        needs.some((need) => need.type === 'sprite' && need.dna)
-            ? '【角色 DNA】标注了固定身份或默认外观的立绘，tags 不得改变这些特征，只补充正文中额外交代的内容。' : '',
-        sources.length ? `【角色资料】下面是提到这些角色的节选，每段开头标了出处（角色卡、世界书、数据库或前文）。长相和服装以 DNA 为准；DNA 没写到的按资料补，只取长相、穿着和身份气质，资料里的剧情不要画进去。\n${sources.join('\n')}` : '',
-        sceneSources.length ? `【场景资料】下面是提到这些地点的节选，每段开头标了出处。背景 tags 要写出资料里地点的档次、规模、建筑风格、年代、陈设和氛围；资料里的人物和剧情不要画进去。\n${sceneSources.join('\n')}` : '',
-        previousText ? `【前文摘要】\n${previousText}` : '',
-        `【本楼正文】\n${readableText}`,
-        '请直接按输出格式给出字段。',
-    ].filter(Boolean).join('\n\n');
-}
-
-const FIELD_RE = /^\s*[-*]?\s*(id|tags|uc)\s*[:：]\s*(.*)$/i;
-function parseAssetPlan(text, needs = []) {
-    const ids = needs.map((need, index) => describeAssetNeed(need, index).id);
-    const byId = new Map();
-    const ordered = [];
-    let current = null;
-    for (const line of String(text || '').replace(/```[a-zA-Z]*\s*/g, '').split(/\r?\n/)) {
-        const m = line.match(FIELD_RE);
-        if (!m) continue;
-        const key = m[1].toLowerCase();
-        const value = m[2].trim();
-        if (key === 'id') {
-            current = { id: value.toLowerCase().replace(/[^a-z0-9]/g, ''), tags: '', uc: '' };
-            ordered.push(current);
-            if (current.id) byId.set(current.id, current);
-            continue;
-        }
-        if (!current) { current = { id: '', tags: '', uc: '' }; ordered.push(current); }
-        if (key === 'tags') current.tags = value;
-        else current.uc = value;
-    }
-    const items = ids.map((id, index) => {
-        const hit = byId.get(id) || (ordered[index] && !ids.includes(ordered[index].id) ? ordered[index] : null);
-        return hit && hit.tags ? { need: needs[index], tags: hit.tags, uc: hit.uc } : null;
-    });
-    const usable = items.filter(Boolean);
-    return usable.length
-        ? { ok: true, items: usable }
-        : { ok: false, items: [], error: '副 LLM 输出中没有可用的素材字段' };
-}
-
-// LLM 整体失败时的兜底：背景按内置词典拼 tag；立绘不兜底（外貌猜错比没有立绘更糟）。
-function buildDictionaryAssetItems(needs = []) {
-    return needs
-        .filter((need) => need.type === 'background')
-        .map((need) => ({ need, tags: buildDictionaryBackgroundTags(need), uc: '', fromDictionary: true }))
-        .filter((item) => item.tags);
-}
-
-function joinTags(...parts) {
-    return parts.map((p) => String(p || '').trim().replace(/^,+|,+$/g, '').trim()).filter(Boolean).join(', ');
-}
-
-// 生成可直接交给 buildNaiV4Request 的 slot；transparent 为 true 时写透明底（V5 另走原生透明底参数）。
-// 立绘底色只留一种：透明底只用加权的 transparent background，浅灰底只用抠图的灰底词；
-// 副 LLM、DNA、模板里别的底色标签都去掉，底色接在末尾；负面里和这组底色相同的也去掉。
-function buildAssetSlot(item, { transparent = false, templates = {} } = {}) {
-    const t = { ...DEFAULT_ASSET_TEMPLATES, ...templates };
-    if (item.need.type === 'background') {
-        return {
-            scene: applyTemplate(t.background, { tags: item.tags }),
-            sceneUc: joinTags(t.backgroundNegative, item.uc),
-            chars: [],
-        };
-    }
-    // 立绘 DNA 固定顺序：triggerWords → identity → defaultAppearance → 副 LLM tag；无 DNA 时输出与旧版一致。
-    const dnaParts = item.need.dna ? buildCharacterDnaPromptParts(item.need.dna, { includeDefaultAppearance: true }) : null;
-    const tags = dnaParts && dnaParts.positive ? mergePromptTags(dnaParts.positive, item.tags) : item.tags;
-    const background = transparent ? SPRITE_TRANSPARENT_BACKGROUND_TAG : MATTE_BACKGROUND_TAGS;
-    return {
-        scene: withOnlyBackground(applyTemplate(t.sprite, { tags, matte: '' }), background),
-        sceneUc: dropMatchingTags(joinTags(t.spriteNegative, dnaParts ? dnaParts.negative : '', NSFW_NEGATIVE_GUARD, item.uc), background),
-        chars: [],
-        transparent,
-    };
-}
-
-__igsDefine(exports, "describeAssetNeed", () => describeAssetNeed);
-__igsDefine(exports, "buildAssetPlannerUserPrompt", () => buildAssetPlannerUserPrompt);
-__igsDefine(exports, "parseAssetPlan", () => parseAssetPlan);
-__igsDefine(exports, "buildDictionaryAssetItems", () => buildDictionaryAssetItems);
-__igsDefine(exports, "buildAssetSlot", () => buildAssetSlot);
-__igsDefine(exports, "ASSET_PLANNER_SYSTEM_PROMPT", () => ASSET_PLANNER_SYSTEM_PROMPT);
-__igsDefine(exports, "ASSET_PLANNER_SOFT_SYSTEM_PROMPT", () => ASSET_PLANNER_SOFT_SYSTEM_PROMPT);
-});
-__igsRegister("src/scene/character-dna.js", function(module, exports, require) {
-// 角色 DNA：结构化文本角色资料的规范化、别名解析与提示词片段合并。
-// 数据位于 sceneAssets.characterDna，与情绪槽映射 sceneAssets.characters 并列，互不混入。
-const CHARACTER_DNA_FIELDS = Object.freeze(['identity', 'defaultAppearance', 'negative', 'triggerWords']);
-
-// 预设与导入文件属于不可信输入，拒绝原型污染键。
-const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
-const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
-const plainObject = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : null);
-
-function cleanText(value) {
-    return typeof value === 'string' ? value.replace(/\r\n?/g, '\n').trim() : '';
-}
-
-// 性格与表情习惯：跟着 DNA 存（改名、删除、导入导出、本卡范围都一起走），只给表情差分写词用；
-// 不进画图提示词，也不算「DNA 已填」。空的不写这个键。
-const CHARACTER_PERSONA_FIELD = 'persona';
-function normalizeCharacterDna(raw) {
-    const source = plainObject(raw) || {};
-    const dna = {};
-    for (const field of CHARACTER_DNA_FIELDS) dna[field] = cleanText(source[field]);
-    const persona = cleanText(source[CHARACTER_PERSONA_FIELD]);
-    if (persona) dna[CHARACTER_PERSONA_FIELD] = persona;
-    return dna;
-}
-function isCharacterDnaEmpty(dna) {
-    return CHARACTER_DNA_FIELDS.every((field) => !cleanText(dna?.[field]));
-}
-
-// 空记录保留：DNA-only 角色可以先登记名字、后补资料。
-function normalizeCharacterDnaMap(raw) {
-    const out = {};
-    const source = plainObject(raw);
-    if (!source) return out;
-    for (const [key, value] of Object.entries(source)) {
-        const name = cleanText(key);
-        if (!name || FORBIDDEN_KEYS.has(name) || hasOwn(out, name)) continue;
-        out[name] = normalizeCharacterDna(value);
-    }
-    return out;
-}
-
-// resolveCanonical 由调用方注入既有别名归约，不维护第二套身份解析。
-function resolveCharacterDna(dnaMap, name, resolveCanonical) {
-    const raw = cleanText(name);
-    const map = plainObject(dnaMap);
-    if (!raw || !map) return null;
-    const mapped = typeof resolveCanonical === 'function' ? cleanText(resolveCanonical(raw)) : '';
-    const canonical = mapped || raw;
-    const key = hasOwn(map, canonical) ? canonical : (hasOwn(map, raw) ? raw : '');
-    if (!key) return null;
-    return { name: key, dna: normalizeCharacterDna(map[key]) };
-}
-
-// 改名保序迁移；目标名已有 DNA 时拒绝，避免覆盖另一角色资料。
-function renameCharacterDna(dnaMap, oldName, newName) {
-    const map = plainObject(dnaMap) || {};
-    const target = cleanText(newName);
-    if (!target || FORBIDDEN_KEYS.has(target)) return { ok: false, reason: 'invalid-name', map };
-    if (!hasOwn(map, oldName) || target === oldName) return { ok: true, map };
-    if (hasOwn(map, target)) return { ok: false, reason: 'name-exists', map };
-    const next = {};
-    for (const [key, value] of Object.entries(map)) next[key === oldName ? target : key] = value;
-    return { ok: true, map: next };
-}
-function removeCharacterDna(dnaMap, name) {
-    const map = plainObject(dnaMap) || {};
-    if (!hasOwn(map, name)) return map;
-    const next = { ...map };
-    delete next[name];
-    return next;
-}
-
-// 按顶层逗号/换行切分；括号内的逗号属于权重语法，不切分。
-function splitPromptTags(text) {
-    const tags = [];
-    let depth = 0;
-    let buf = '';
-    for (const ch of cleanText(text)) {
-        if ('([{'.includes(ch)) depth += 1;
-        else if (')]}'.includes(ch)) depth = Math.max(0, depth - 1);
-        if (depth === 0 && (ch === ',' || ch === '，' || ch === '\n')) {
-            if (buf.trim()) tags.push(buf.trim());
-            buf = '';
-        } else {
-            buf += ch;
-        }
-    }
-    if (buf.trim()) tags.push(buf.trim());
-    return tags;
-}
-
-// 保序合并并稳定去重（大小写与空白不敏感），不改写单项内容。
-function mergePromptTags(...parts) {
-    const seen = new Set();
-    const out = [];
-    for (const part of parts.flat()) {
-        for (const tag of splitPromptTags(part)) {
-            const key = tag.toLowerCase().replace(/\s+/g, ' ');
-            if (seen.has(key)) continue;
-            seen.add(key);
-            out.push(tag);
-        }
-    }
-    return out.join(', ');
-}
-
-// 固定顺序：triggerWords → identity →（立绘链才追加）defaultAppearance；空字段不注入。
-function buildCharacterDnaPromptParts(dna, { includeDefaultAppearance = false } = {}) {
-    const d = normalizeCharacterDna(dna);
-    const positive = [d.triggerWords, d.identity];
-    if (includeDefaultAppearance) positive.push(d.defaultAppearance);
-    return { positive: mergePromptTags(positive), negative: mergePromptTags(d.negative) };
-}
-
-
-__igsDefine(exports, "normalizeCharacterDna", () => normalizeCharacterDna);
-__igsDefine(exports, "isCharacterDnaEmpty", () => isCharacterDnaEmpty);
-__igsDefine(exports, "normalizeCharacterDnaMap", () => normalizeCharacterDnaMap);
-__igsDefine(exports, "resolveCharacterDna", () => resolveCharacterDna);
-__igsDefine(exports, "renameCharacterDna", () => renameCharacterDna);
-__igsDefine(exports, "removeCharacterDna", () => removeCharacterDna);
-__igsDefine(exports, "splitPromptTags", () => splitPromptTags);
-__igsDefine(exports, "mergePromptTags", () => mergePromptTags);
-__igsDefine(exports, "buildCharacterDnaPromptParts", () => buildCharacterDnaPromptParts);
-__igsDefine(exports, "CHARACTER_DNA_FIELDS", () => CHARACTER_DNA_FIELDS);
-__igsDefine(exports, "CHARACTER_PERSONA_FIELD", () => CHARACTER_PERSONA_FIELD);
 });
 __igsRegister("src/generated-images/dbgen-prompt.js", function(module, exports, require) {
 const { moodPresetAct, moodPresetUse, resolveMoodExpressionTags } = require("src/scene/mood-groups.js");
@@ -42224,7 +41969,7 @@ function buildCharacterSpriteDescription(name, dna, options) {
 }
 
 // 状态栏头像：Q 版圆脸，只画一颗头。长相按角色设定写。
-function buildCharacterAvatarDescription(name, dna, { world = null } = {}) {
+function buildCharacterAvatarDescription(name, dna, { world = null, sourcesText = '' } = {}) {
     return [
         `画角色「${name || ''}」的 Q 版头像（chibi）。`,
         ...worldContextLines(world),
@@ -42233,6 +41978,7 @@ function buildCharacterAvatarDescription(name, dna, { world = null } = {}) {
         '发色、瞳色、发型和头上的饰品按下面的角色设定来画，不能改；肩颈处的衣领按角色日常服装画一点即可。',
         '纯色浅底，不要背景，不要文字。',
         ...characterDnaLines(name, dna),
+        ...characterSourceLines(name, sourcesText),
         '只写一份，slotid 为 1。',
     ].filter(Boolean).join('\n');
 }
@@ -42539,6 +42285,579 @@ __igsDefine(exports, "applyLookToCaption", () => applyLookToCaption);
 __igsDefine(exports, "applyCharacterDnaToCaption", () => applyCharacterDnaToCaption);
 __igsDefine(exports, "EXPRESSION_WRITE_BATCH_MAX", () => EXPRESSION_WRITE_BATCH_MAX);
 __igsDefine(exports, "EXPRESSION_DIFF_BATCH_MAX", () => EXPRESSION_DIFF_BATCH_MAX);
+});
+__igsRegister("src/generated-images/illustration/asset-prompt.js", function(module, exports, require) {
+// 素材补全（缺失背景 / 无名角色立绘）的 LLM 提示词与 NAI slot 组装。
+// 副 LLM 只写「内容」tag（地点陈设、外貌服装）；构图、底色、禁止项走可编辑模板，
+// 保证背景图里没有人、立绘始终是单人 3/4 身 + 一种底色（透明底或可抠除的浅灰纯色底）。
+const { FICTION_FRAME, TAG_WRITING_RULES, SOFT_MODE_NOTE, DEFAULT_ASSET_TEMPLATES, MATTE_BACKGROUND_TAGS, SPRITE_TRANSPARENT_BACKGROUND_TAG, NSFW_NEGATIVE_GUARD, applyTemplate, buildDictionaryBackgroundTags } = require("src/generated-images/illustration/prompt-kit.js");
+const { buildCharacterDnaPromptParts, mergePromptTags } = require("src/scene/character-dna.js");
+const { dropMatchingTags, withOnlyBackground, worldContextLines } = require("src/generated-images/dbgen-prompt.js");
+const ASSET_TASK = [
+    '任务：阅读视觉小说正文，为「需要生成的素材」清单里的每一项写英文 tag。素材分两类：',
+    '- 背景：给阅读器当场景背景的空镜头，画面里不能出现任何人物。',
+    '- 立绘：单个角色的 3/4 身站立立绘，之后会抠成透明底叠在背景上。',
+    '',
+    '【输出格式】不要输出 JSON、不要代码块、不要解释。每项按以下字段一行一个输出，多项依次排列：',
+    'id: 清单里给出的编号（如 bg1、ch1），必须原样照抄',
+    'tags: 英文正向 tag',
+    'uc: 这一项额外不能出现的英文 tag，可留空',
+    '',
+    '【背景 tags 写法】',
+    '1. 先写地点类型（如 classroom, abandoned factory, bedroom, shrine, city street），再写建筑风格、年代与文化背景（如 japanese, western, fantasy, modern, cyberpunk）。',
+    '2. 写 3～6 个能让人一眼认出地点的陈设或地标（如 desk, chalkboard, window, bookshelf, neon sign, torii）。',
+    '3. 按清单给出的时间与天气写光线和氛围：白天 daytime, sunlight；黄昏 sunset, orange sky；夜晚 night, moonlight, dim lighting 或 artificial light；雨 rain, wet ground；雪 snow。',
+    '4. 可以写视角（indoors / outdoors, perspective），不要写人、剪影、动物、文字、招牌上的具体字、构图词。',
+    '',
+    '【立绘 tags 写法】',
+    '1. 第一个 tag 写性别与人数：1girl 或 1boy（性别不明时按正文称呼推断）。',
+    '2. 再写外观年龄（如 mature female, young man）、体型、发色、发长、发型、瞳色、特征（如 animal ears, glasses, scar）。',
+    '3. 写完整服装：上装、下装、外套、配饰，颜色写清楚；正文未交代时，按身份与场景推断合理服装（如女仆 maid outfit，学生 school uniform，骑士 armor）。服装一律写穿着完整的日常状态。',
+    '4. 表情写平静或符合其性格的常态表情（如 light smile, expressionless, serious），再写一个轻量的日常小动作（如 hand in pocket, hands behind back, hand on own hip, adjusting hair），不要双手僵直下垂；不要写大幅动作、道具、镜头、背景、底色、其他角色。',
+    '',
+    '【通用规则】',
+    ...TAG_WRITING_RULES.map((rule, i) => `${i + 1}. ${rule}`),
+    `${TAG_WRITING_RULES.length + 1}. 清单里的每一项都必须输出，不要增减项目。`,
+];
+const ASSET_PLANNER_SYSTEM_PROMPT = [...FICTION_FRAME, ...ASSET_TASK].join('\n');
+const ASSET_PLANNER_SOFT_SYSTEM_PROMPT = [...FICTION_FRAME, ...ASSET_TASK, '', ...SOFT_MODE_NOTE].join('\n');
+function describeAssetNeed(need, index) {
+    if (need.type === 'background') {
+        const parts = [`场景：${need.name}`];
+        if (need.time) parts.push(`时间：${need.time}`);
+        if (need.weather) parts.push(`天气：${need.weather}`);
+        return { id: `bg${index + 1}`, line: `背景｜${parts.join('｜')}` };
+    }
+    // DNA 固定的身份与默认外观会由程序在出图前合并，这里只让副 LLM 知道、避免写出冲突 tag。
+    const flat = (text) => String(text || '').replace(/\s*\n\s*/g, ' ').trim();
+    const dnaNotes = [];
+    if (need.dna && flat(need.dna.identity)) dnaNotes.push(`固定身份：${flat(need.dna.identity)}`);
+    if (need.dna && flat(need.dna.defaultAppearance)) dnaNotes.push(`默认外观：${flat(need.dna.defaultAppearance)}`);
+    return { id: `ch${index + 1}`, line: [`立绘｜角色：${need.name}`, ...dnaNotes].join('｜') };
+}
+function buildAssetPlannerUserPrompt({ needs = [], readableText = '', previousText = '', world = null } = {}) {
+    const listed = needs.map((need, index) => {
+        const { id, line } = describeAssetNeed(need, index);
+        return `${id}｜${line}`;
+    });
+    const worldLines = worldContextLines(world);
+    // 角色卡 / 世界书 / 数据库 / 前文里提到这个角色或地点的节选，由调用方挂在 need.sources 上。
+    const sourcesOf = (type) => needs.map((need, index) => (need.type === type && String(need.sources || '').trim()
+        ? `${describeAssetNeed(need, index).id}「${need.name}」：\n${String(need.sources).trim()}` : '')).filter(Boolean);
+    const sources = sourcesOf('sprite');
+    const sceneSources = sourcesOf('background');
+    return [
+        `【需要生成的素材】\n${listed.join('\n')}`,
+        worldLines.length ? `【世界观】\n${worldLines.join('\n')}` : '',
+        needs.some((need) => need.type === 'sprite' && need.dna)
+            ? '【角色 DNA】标注了固定身份或默认外观的立绘，tags 不得改变这些特征，只补充正文中额外交代的内容。' : '',
+        sources.length ? `【角色资料】下面是提到这些角色的节选，每段开头标了出处（角色卡、世界书、数据库或前文）。长相和服装以 DNA 为准；DNA 没写到的按资料补，只取长相、穿着和身份气质，资料里的剧情不要画进去。\n${sources.join('\n')}` : '',
+        sceneSources.length ? `【场景资料】下面是提到这些地点的节选，每段开头标了出处。背景 tags 要写出资料里地点的档次、规模、建筑风格、年代、陈设和氛围；资料里的人物和剧情不要画进去。\n${sceneSources.join('\n')}` : '',
+        previousText ? `【前文摘要】\n${previousText}` : '',
+        `【本楼正文】\n${readableText}`,
+        '请直接按输出格式给出字段。',
+    ].filter(Boolean).join('\n\n');
+}
+
+const FIELD_RE = /^\s*[-*]?\s*(id|tags|uc)\s*[:：]\s*(.*)$/i;
+function parseAssetPlan(text, needs = []) {
+    const ids = needs.map((need, index) => describeAssetNeed(need, index).id);
+    const byId = new Map();
+    const ordered = [];
+    let current = null;
+    for (const line of String(text || '').replace(/```[a-zA-Z]*\s*/g, '').split(/\r?\n/)) {
+        const m = line.match(FIELD_RE);
+        if (!m) continue;
+        const key = m[1].toLowerCase();
+        const value = m[2].trim();
+        if (key === 'id') {
+            current = { id: value.toLowerCase().replace(/[^a-z0-9]/g, ''), tags: '', uc: '' };
+            ordered.push(current);
+            if (current.id) byId.set(current.id, current);
+            continue;
+        }
+        if (!current) { current = { id: '', tags: '', uc: '' }; ordered.push(current); }
+        if (key === 'tags') current.tags = value;
+        else current.uc = value;
+    }
+    const items = ids.map((id, index) => {
+        const hit = byId.get(id) || (ordered[index] && !ids.includes(ordered[index].id) ? ordered[index] : null);
+        return hit && hit.tags ? { need: needs[index], tags: hit.tags, uc: hit.uc } : null;
+    });
+    const usable = items.filter(Boolean);
+    return usable.length
+        ? { ok: true, items: usable }
+        : { ok: false, items: [], error: '副 LLM 输出中没有可用的素材字段' };
+}
+
+// LLM 整体失败时的兜底：背景按内置词典拼 tag；立绘不兜底（外貌猜错比没有立绘更糟）。
+function buildDictionaryAssetItems(needs = []) {
+    return needs
+        .filter((need) => need.type === 'background')
+        .map((need) => ({ need, tags: buildDictionaryBackgroundTags(need), uc: '', fromDictionary: true }))
+        .filter((item) => item.tags);
+}
+
+function joinTags(...parts) {
+    return parts.map((p) => String(p || '').trim().replace(/^,+|,+$/g, '').trim()).filter(Boolean).join(', ');
+}
+
+// 生成可直接交给 buildNaiV4Request 的 slot；transparent 为 true 时写透明底（V5 另走原生透明底参数）。
+// 立绘底色只留一种：透明底只用加权的 transparent background，浅灰底只用抠图的灰底词；
+// 副 LLM、DNA、模板里别的底色标签都去掉，底色接在末尾；负面里和这组底色相同的也去掉。
+function buildAssetSlot(item, { transparent = false, templates = {} } = {}) {
+    const t = { ...DEFAULT_ASSET_TEMPLATES, ...templates };
+    if (item.need.type === 'background') {
+        return {
+            scene: applyTemplate(t.background, { tags: item.tags }),
+            sceneUc: joinTags(t.backgroundNegative, item.uc),
+            chars: [],
+        };
+    }
+    // 立绘 DNA 固定顺序：triggerWords → identity → defaultAppearance → 副 LLM tag；无 DNA 时输出与旧版一致。
+    const dnaParts = item.need.dna ? buildCharacterDnaPromptParts(item.need.dna, { includeDefaultAppearance: true }) : null;
+    const tags = dnaParts && dnaParts.positive ? mergePromptTags(dnaParts.positive, item.tags) : item.tags;
+    const background = transparent ? SPRITE_TRANSPARENT_BACKGROUND_TAG : MATTE_BACKGROUND_TAGS;
+    return {
+        scene: withOnlyBackground(applyTemplate(t.sprite, { tags, matte: '' }), background),
+        sceneUc: dropMatchingTags(joinTags(t.spriteNegative, dnaParts ? dnaParts.negative : '', NSFW_NEGATIVE_GUARD, item.uc), background),
+        chars: [],
+        transparent,
+    };
+}
+
+__igsDefine(exports, "describeAssetNeed", () => describeAssetNeed);
+__igsDefine(exports, "buildAssetPlannerUserPrompt", () => buildAssetPlannerUserPrompt);
+__igsDefine(exports, "parseAssetPlan", () => parseAssetPlan);
+__igsDefine(exports, "buildDictionaryAssetItems", () => buildDictionaryAssetItems);
+__igsDefine(exports, "buildAssetSlot", () => buildAssetSlot);
+__igsDefine(exports, "ASSET_PLANNER_SYSTEM_PROMPT", () => ASSET_PLANNER_SYSTEM_PROMPT);
+__igsDefine(exports, "ASSET_PLANNER_SOFT_SYSTEM_PROMPT", () => ASSET_PLANNER_SOFT_SYSTEM_PROMPT);
+});
+__igsRegister("src/scene/character-dna.js", function(module, exports, require) {
+// 角色 DNA：结构化文本角色资料的规范化、别名解析与提示词片段合并。
+// 数据位于 sceneAssets.characterDna，与情绪槽映射 sceneAssets.characters 并列，互不混入。
+const CHARACTER_DNA_FIELDS = Object.freeze(['identity', 'defaultAppearance', 'negative', 'triggerWords']);
+
+// 预设与导入文件属于不可信输入，拒绝原型污染键。
+const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
+const plainObject = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : null);
+
+function cleanText(value) {
+    return typeof value === 'string' ? value.replace(/\r\n?/g, '\n').trim() : '';
+}
+
+// 性格与表情习惯：跟着 DNA 存（改名、删除、导入导出、本卡范围都一起走），只给表情差分写词用；
+// 不进画图提示词，也不算「DNA 已填」。空的不写这个键。
+const CHARACTER_PERSONA_FIELD = 'persona';
+function normalizeCharacterDna(raw) {
+    const source = plainObject(raw) || {};
+    const dna = {};
+    for (const field of CHARACTER_DNA_FIELDS) dna[field] = cleanText(source[field]);
+    const persona = cleanText(source[CHARACTER_PERSONA_FIELD]);
+    if (persona) dna[CHARACTER_PERSONA_FIELD] = persona;
+    return dna;
+}
+function isCharacterDnaEmpty(dna) {
+    return CHARACTER_DNA_FIELDS.every((field) => !cleanText(dna?.[field]));
+}
+
+// 空记录保留：DNA-only 角色可以先登记名字、后补资料。
+function normalizeCharacterDnaMap(raw) {
+    const out = {};
+    const source = plainObject(raw);
+    if (!source) return out;
+    for (const [key, value] of Object.entries(source)) {
+        const name = cleanText(key);
+        if (!name || FORBIDDEN_KEYS.has(name) || hasOwn(out, name)) continue;
+        out[name] = normalizeCharacterDna(value);
+    }
+    return out;
+}
+
+// resolveCanonical 由调用方注入既有别名归约，不维护第二套身份解析。
+function resolveCharacterDna(dnaMap, name, resolveCanonical) {
+    const raw = cleanText(name);
+    const map = plainObject(dnaMap);
+    if (!raw || !map) return null;
+    const mapped = typeof resolveCanonical === 'function' ? cleanText(resolveCanonical(raw)) : '';
+    const canonical = mapped || raw;
+    const key = hasOwn(map, canonical) ? canonical : (hasOwn(map, raw) ? raw : '');
+    if (!key) return null;
+    return { name: key, dna: normalizeCharacterDna(map[key]) };
+}
+
+// 改名保序迁移；目标名已有 DNA 时拒绝，避免覆盖另一角色资料。
+function renameCharacterDna(dnaMap, oldName, newName) {
+    const map = plainObject(dnaMap) || {};
+    const target = cleanText(newName);
+    if (!target || FORBIDDEN_KEYS.has(target)) return { ok: false, reason: 'invalid-name', map };
+    if (!hasOwn(map, oldName) || target === oldName) return { ok: true, map };
+    if (hasOwn(map, target)) return { ok: false, reason: 'name-exists', map };
+    const next = {};
+    for (const [key, value] of Object.entries(map)) next[key === oldName ? target : key] = value;
+    return { ok: true, map: next };
+}
+function removeCharacterDna(dnaMap, name) {
+    const map = plainObject(dnaMap) || {};
+    if (!hasOwn(map, name)) return map;
+    const next = { ...map };
+    delete next[name];
+    return next;
+}
+
+// 按顶层逗号/换行切分；括号内的逗号属于权重语法，不切分。
+function splitPromptTags(text) {
+    const tags = [];
+    let depth = 0;
+    let buf = '';
+    for (const ch of cleanText(text)) {
+        if ('([{'.includes(ch)) depth += 1;
+        else if (')]}'.includes(ch)) depth = Math.max(0, depth - 1);
+        if (depth === 0 && (ch === ',' || ch === '，' || ch === '\n')) {
+            if (buf.trim()) tags.push(buf.trim());
+            buf = '';
+        } else {
+            buf += ch;
+        }
+    }
+    if (buf.trim()) tags.push(buf.trim());
+    return tags;
+}
+
+// 保序合并并稳定去重（大小写与空白不敏感），不改写单项内容。
+function mergePromptTags(...parts) {
+    const seen = new Set();
+    const out = [];
+    for (const part of parts.flat()) {
+        for (const tag of splitPromptTags(part)) {
+            const key = tag.toLowerCase().replace(/\s+/g, ' ');
+            if (seen.has(key)) continue;
+            seen.add(key);
+            out.push(tag);
+        }
+    }
+    return out.join(', ');
+}
+
+// 固定顺序：triggerWords → identity →（立绘链才追加）defaultAppearance；空字段不注入。
+function buildCharacterDnaPromptParts(dna, { includeDefaultAppearance = false } = {}) {
+    const d = normalizeCharacterDna(dna);
+    const positive = [d.triggerWords, d.identity];
+    if (includeDefaultAppearance) positive.push(d.defaultAppearance);
+    return { positive: mergePromptTags(positive), negative: mergePromptTags(d.negative) };
+}
+
+
+__igsDefine(exports, "normalizeCharacterDna", () => normalizeCharacterDna);
+__igsDefine(exports, "isCharacterDnaEmpty", () => isCharacterDnaEmpty);
+__igsDefine(exports, "normalizeCharacterDnaMap", () => normalizeCharacterDnaMap);
+__igsDefine(exports, "resolveCharacterDna", () => resolveCharacterDna);
+__igsDefine(exports, "renameCharacterDna", () => renameCharacterDna);
+__igsDefine(exports, "removeCharacterDna", () => removeCharacterDna);
+__igsDefine(exports, "splitPromptTags", () => splitPromptTags);
+__igsDefine(exports, "mergePromptTags", () => mergePromptTags);
+__igsDefine(exports, "buildCharacterDnaPromptParts", () => buildCharacterDnaPromptParts);
+__igsDefine(exports, "CHARACTER_DNA_FIELDS", () => CHARACTER_DNA_FIELDS);
+__igsDefine(exports, "CHARACTER_PERSONA_FIELD", () => CHARACTER_PERSONA_FIELD);
+});
+__igsRegister("src/generated-images/illustration/planner-context.js", function(module, exports, require) {
+// 副 LLM 规划（剧情 CG、楼内补背景 / 立绘）读多少上下文：「副 LLM → 读取上下文」。
+// standard：原来的长度——本楼正文前 6000 字；前文是最近 contextFloors 层 AI 楼合起来的末尾 1500 字。
+// 其余档按 token 估算成字数（中日文约 1 字 1 token，留三成余量）：本楼正文整层读，
+// 前文从近到远尽量多读，连用户发言一起（用户常在发言里交代地点和打算），读满预算为止。
+const { numberParagraphs } = require("src/generated-images/illustration/marker-placer.js");
+const CONTEXT_BUDGETS = Object.freeze({ standard: 0, '32k': 32000, '128k': 128000, '500k': 500000, '1000k': 1000000 });
+const STANDARD_FLOOR_CHARS = 6000;
+const STANDARD_PREVIOUS_CHARS = 1500;
+const CHARS_PER_TOKEN = 0.7;
+// 读得多，副 LLM 回得慢：加大预算时请求超时至少放到 10 分钟（比设置里能填的 5 分钟上限还长）。
+const LARGE_CONTEXT_TIMEOUT_MS = 600000;
+function contextBudgetChars(llm) {
+    const tokens = CONTEXT_BUDGETS[llm && llm.contextBudget] || 0;
+    return Math.floor(tokens * CHARS_PER_TOKEN);
+}
+function plannerLlmSettings(llm) {
+    if (!contextBudgetChars(llm)) return llm;
+    return { ...llm, timeoutMs: Math.max(Number(llm.timeoutMs) || 0, LARGE_CONTEXT_TIMEOUT_MS) };
+}
+function readableText(raw) {
+    return numberParagraphs(raw).paragraphs.map((p) => p.text).join('\n');
+}
+
+const stripHtml = (text) => String(text || '').replace(/<[^>]*>/g, ' ').replace(/[ \t]+\n/g, '\n').trim();
+
+// 前文消息：宿主有 readPreviousMessages 就连用户发言一起读，没有就只读 AI 楼。旧的在前。
+function previousMessages(messageHost, messageId, count) {
+    if (typeof messageHost.readPreviousMessages === 'function') {
+        return (messageHost.readPreviousMessages(messageId, count) || []).map((msg) => (msg && msg.isUser
+            ? `（用户）${stripHtml(msg.text)}`
+            : readableText(msg && msg.text)));
+    }
+    if (typeof messageHost.readPreviousAiTexts === 'function') return (messageHost.readPreviousAiTexts(messageId, count) || []).map(readableText);
+    return [];
+}
+
+// 返回 { budget, floorChars, previousText }：floorChars 是本楼正文最多读几个字。
+function readPlannerContext(messageHost, messageId, llm, floorLength = 0) {
+    const budget = contextBudgetChars(llm);
+    if (!budget) {
+        const floors = llm.contextFloors > 0 && typeof messageHost.readPreviousAiTexts === 'function'
+            ? (messageHost.readPreviousAiTexts(messageId, llm.contextFloors) || []).map(readableText) : [];
+        return { budget, floorChars: STANDARD_FLOOR_CHARS, previousText: floors.join('\n').slice(-STANDARD_PREVIOUS_CHARS) };
+    }
+    // 本楼最多占一半；资料节选另外加，所以前文只用到预算的九成。
+    const floorChars = Math.floor(budget / 2);
+    let left = Math.floor(budget * 0.9) - Math.min(floorLength, floorChars);
+    const kept = [];
+    const messages = previousMessages(messageHost, messageId, Number.MAX_SAFE_INTEGER);
+    for (let i = messages.length - 1; i >= 0 && left > 0; i -= 1) {
+        const text = String(messages[i] || '').trim();
+        if (!text) continue;
+        const piece = text.length > left ? text.slice(-left) : text;
+        kept.unshift(piece);
+        left -= piece.length + 1;
+    }
+    return { budget, floorChars, previousText: kept.join('\n') };
+}
+
+__igsDefine(exports, "contextBudgetChars", () => contextBudgetChars);
+__igsDefine(exports, "plannerLlmSettings", () => plannerLlmSettings);
+__igsDefine(exports, "readableText", () => readableText);
+__igsDefine(exports, "readPlannerContext", () => readPlannerContext);
+__igsDefine(exports, "CONTEXT_BUDGETS", () => CONTEXT_BUDGETS);
+__igsDefine(exports, "STANDARD_FLOOR_CHARS", () => STANDARD_FLOOR_CHARS);
+__igsDefine(exports, "STANDARD_PREVIOUS_CHARS", () => STANDARD_PREVIOUS_CHARS);
+__igsDefine(exports, "LARGE_CONTEXT_TIMEOUT_MS", () => LARGE_CONTEXT_TIMEOUT_MS);
+});
+__igsRegister("src/generated-images/illustration/marker-placer.js", function(module, exports, require) {
+const { stripOutfitFields } = require("src/scene/directive-tags.js");
+const SCENE_RE = /\[igs-scene:([^|\]\n]+)\|([^|\]\n]+)\|([^|\]\n]+)(?:\|([^\]\n]*))?\]/g;
+const CHAR_RE = /\[igs-char:([^|\]\n]+)\|(?:([^|\]\n]*)\|)?([^|\]\n]+)\]?/g;
+const THOUGHT_RE = /\[igs-thought:([^|\]\n]+)\|(?:([^|\]\n]*)\|)?([^|\]\n]+)\]?/g;
+const IMG_RE = /(?:\[igs-img:\s*\d+\s*\]|<IMG>\s*\d+\s*<\/IMG>)/gi;
+const LEADING_SCENE_RE = /^(\s*(?:\[igs-scene:[^\]\n]*\]\s*)+)/;
+
+// 一段正文里可以有多段 <content>。只认第一段会漏掉后面的场景标签。
+function contentSpans(lines) {
+    const spans = [];
+    let start = -1;
+    for (let i = 0; i < lines.length; i += 1) {
+        const line = lines[i];
+        if (start < 0 && /<content\b[^>]*>/i.test(line)) start = i;
+        if (start >= 0 && /<\/content>/i.test(line)) {
+            spans.push([start, i]);
+            start = -1;
+        }
+    }
+    if (start >= 0) spans.push([start, lines.length - 1]);
+    return spans.length ? spans : [[0, lines.length - 1]];
+}
+
+function lineInSpans(index, spans) {
+    return spans.some(([from, to]) => index >= from && index <= to);
+}
+
+function readableLine(line) {
+    return String(line || '')
+        .replace(IMG_RE, '')
+        .replace(SCENE_RE, '')
+        .replace(CHAR_RE, (_, name, _mood, text) => `${name.trim()}：「${text.trim()}」`)
+        .replace(THOUGHT_RE, (_, name, _mood, text) => `${name.trim()}（心想）：${text.trim()}`)
+        // 柏宝绘 / 智绘姬写回楼层的生图词不是正文。
+        .replace(/<bbi_image>[\s\S]*?<\/bbi_image>|<image>[\s\S]*?<\/image>|image###[\s\S]*?###/gi, '')
+        .replace(/<\/?[a-zA-Z][^>]*>/g, '')
+        .trim();
+}
+function numberParagraphs(raw, options = {}) {
+    const lines = String(raw || '').split('\n');
+    const spans = contentSpans(lines);
+    const paragraphs = [];
+    const scenes = [];
+    const characters = new Set();
+    for (let i = 0; i < lines.length; i += 1) {
+        const line = stripOutfitFields(lines[i], options && options.outfitResolver);
+        // 场景标签整楼都认。写在第一段 </content> 之后的转场也要算进 NSFW 和背景。
+        for (const m of line.matchAll(SCENE_RE)) {
+            scenes.push({ scene: m[1].trim(), time: m[2].trim(), weather: m[3].trim(), nsfw: String(m[4] || '').trim().toLowerCase() === 'nsfw', lineIndex: i });
+        }
+        if (!lineInSpans(i, spans)) continue;
+        for (const m of line.matchAll(CHAR_RE)) characters.add(m[1].trim());
+        for (const m of line.matchAll(THOUGHT_RE)) characters.add(m[1].trim());
+        const text = readableLine(line);
+        if (text) paragraphs.push({ no: paragraphs.length + 1, lineIndex: i, text });
+    }
+    return { paragraphs, scenes, characters: Array.from(characters), isNsfw: scenes.some((s) => s.nsfw) };
+}
+function formatNumberedParagraphs(paragraphs, maxChars = 6000) {
+    const out = [];
+    let total = 0;
+    for (const p of paragraphs) {
+        const line = `${p.no}. ${p.text}`;
+        total += line.length + 1;
+        if (total > maxChars) break;
+        out.push(line);
+    }
+    return out.join('\n');
+}
+
+/**
+ * 与数据库生图插件的生成点定位相同：精确 → 去掉空白和标点 → 最长公共子串。
+ * 命中后落回本插件的段落编号，标记仍插在该段前面。
+ * @param {string} raw
+ * @param {Array<{ no: number, lineIndex: number }>} paragraphs
+ * @param {string} anchor
+ * @returns {number}
+ */
+function paragraphNoForAnchor(raw, paragraphs, anchor) {
+    const source = String(raw || '');
+    const found = findAnchorInsertIndex(source, anchor);
+    if (found.index < 0) return 0;
+    const lineIndex = source.slice(0, Math.max(0, found.index - 1)).split('\n').length - 1;
+    const list = Array.isArray(paragraphs) ? paragraphs : [];
+    const exact = list.find((paragraph) => paragraph.lineIndex === lineIndex);
+    if (exact) return exact.no;
+    let before = null;
+    for (const paragraph of list) {
+        if (paragraph.lineIndex <= lineIndex) before = paragraph;
+        else break;
+    }
+    if (before) return before.no;
+    return list.length ? list[0].no : 0;
+}
+
+/**
+ * 在 text 中定位 anchor，返回插入下标（anchor 结束之后）；找不到返回 -1。
+ * @param {string} text
+ * @param {string} anchorSentence
+ * @returns {{ index: number, mode: string }}
+ */
+function findAnchorInsertIndex(text, anchorSentence) {
+    const source = typeof text === 'string' ? text : '';
+    const anchor = typeof anchorSentence === 'string' ? anchorSentence : '';
+    if (!anchor) return { index: -1, mode: 'fail' };
+    const exact = source.indexOf(anchor);
+    if (exact !== -1) return { index: exact + anchor.length, mode: 'exact' };
+    const normResult = findNormalized(source, anchor);
+    if (normResult.index >= 0) return { index: normResult.index, mode: 'normalized' };
+    const lcsResult = findByLongestCommonSubstring(source, anchor);
+    if (lcsResult.index >= 0) return { index: lcsResult.index, mode: 'lcs' };
+    return { index: -1, mode: 'fail' };
+}
+
+function findNormalized(text, anchor) {
+    const { normalized: normText, map } = normalizeWithMap(text);
+    const normAnchor = normalizeAnchorText(anchor);
+    if (!normAnchor) return { index: -1 };
+    const at = normText.indexOf(normAnchor);
+    if (at === -1) return { index: -1 };
+    const endOrig = map[at + normAnchor.length - 1];
+    if (endOrig == null) return { index: -1 };
+    return { index: endOrig + 1 };
+}
+
+function normalizeAnchorText(s) {
+    return s
+        .replace(/\s+/g, '')
+        .replace(/[，。！？、；：""''「」『』（）【】《》,.!?;:'"()\[\]{}]/g, '')
+        .toLowerCase();
+}
+
+function normalizeWithMap(text) {
+    const map = [];
+    const chars = [];
+    const lower = text.toLowerCase();
+    for (let i = 0; i < text.length; i += 1) {
+        const ch = lower[i];
+        if (/\s/.test(ch)) continue;
+        if (/[，。！？、；：""''「」『』（）【】《》,.!?;:'"()\[\]{}]/.test(ch)) continue;
+        chars.push(ch);
+        map.push(i);
+    }
+    return { normalized: chars.join(''), map };
+}
+
+function findByLongestCommonSubstring(text, anchor) {
+    const a = text.toLowerCase();
+    const b = anchor.toLowerCase();
+    if (!a || !b) return { index: -1 };
+    const minLen = Math.max(4, Math.ceil(b.length * 0.4));
+    let bestLen = 0;
+    let bestEndInText = -1;
+    let prev = new Array(b.length + 1).fill(0);
+    let curr = new Array(b.length + 1).fill(0);
+    for (let i = 1; i <= a.length; i += 1) {
+        for (let j = 1; j <= b.length; j += 1) {
+            if (a[i - 1] === b[j - 1]) {
+                curr[j] = prev[j - 1] + 1;
+                if (curr[j] > bestLen) {
+                    bestLen = curr[j];
+                    bestEndInText = i;
+                }
+            } else {
+                curr[j] = 0;
+            }
+        }
+        const tmp = prev;
+        prev = curr;
+        curr = tmp;
+        curr.fill(0);
+    }
+    if (bestLen < minLen || bestEndInText < 0) return { index: -1 };
+    return { index: bestEndInText };
+}
+
+// 同一段里可以有多句生成点。按句尾插入，不按整段，避免四张标记叠在同一处。
+function insertMarkersAtAnchors(raw, slots) {
+    const source = String(raw || '');
+    const placed = [];
+    for (const slot of Array.isArray(slots) ? slots : []) {
+        if (!slot) continue;
+        const found = findAnchorInsertIndex(source, slot.anchorSentence);
+        if (found.index < 0) continue;
+        placed.push({ index: found.index, slot: Number(slot.slot) || placed.length + 1 });
+    }
+    placed.sort((a, b) => b.index - a.index || b.slot - a.slot);
+    let text = source;
+    for (const item of placed) {
+        text = insertTokenOnOwnLine(text, item.index, `[igs-img:${item.slot}]`);
+    }
+    return text;
+}
+
+function insertTokenOnOwnLine(text, index, token) {
+    const at = Math.max(0, Math.min(text.length, Number(index) || 0));
+    const before = text.slice(0, at);
+    const after = text.slice(at);
+    const lead = before.length === 0 || before.endsWith('\n') ? '' : '\n';
+    const trail = after.length === 0 || after.startsWith('\n') ? '' : '\n';
+    return before + lead + token + trail + after;
+}
+function insertMarkers(raw, paragraphs, slots) {
+    const lines = String(raw || '').split('\n');
+    const ordered = [...slots].sort((a, b) => b.at - a.at);
+    for (const s of ordered) {
+        const p = paragraphs[s.at - 1];
+        if (!p) continue;
+        const marker = `[igs-img:${s.slot}]`;
+        const line = lines[p.lineIndex];
+        const lead = line.match(LEADING_SCENE_RE);
+        if (lead) {
+            lines[p.lineIndex] = `${lead[1].trimEnd()}${marker}${line.slice(lead[1].length)}`;
+        } else {
+            lines.splice(p.lineIndex, 0, marker);
+        }
+    }
+    return lines.join('\n');
+}
+
+__igsDefine(exports, "numberParagraphs", () => numberParagraphs);
+__igsDefine(exports, "formatNumberedParagraphs", () => formatNumberedParagraphs);
+__igsDefine(exports, "paragraphNoForAnchor", () => paragraphNoForAnchor);
+__igsDefine(exports, "findAnchorInsertIndex", () => findAnchorInsertIndex);
+__igsDefine(exports, "insertMarkersAtAnchors", () => insertMarkersAtAnchors);
+__igsDefine(exports, "insertMarkers", () => insertMarkers);
 });
 __igsRegister("src/visual/igs-ui/sprite-height.js", function(module, exports, require) {
 // 立绘默认高度：没被「调整立绘」单独调过的立绘，先看角色自定义高度，再看性别默认高度（开关打开时按 DNA 判断；没有 DNA 时看生成立绘的 tag；老人、儿童在此基础上再矮一点），最后是立绘基准高度。
@@ -60688,7 +61007,9 @@ const { collectAssetZipEntries } = require("src/scene/asset-zip.js");
 const { assetOwnerKey, draftAssetLibrary, draftEffectiveAssets, effectiveSceneAssets, ensureCardLibrary, libraryHasContent, moveLibraryEntry, rememberAssetScope, sceneAssetsForContext } = require("src/scene/asset-scope.js");
 const { buildCharacterCardPack, buildImageZip, buildPresetArchive, mergeLabelGroups, parseCharacterCardPack, parsePresetArchive, parseSettingsArchive, spriteEntriesForNames } = require("src/scene/card-pack.js");
 const { getSillyTavernContext } = require("src/host/tavern-helper-adapter.js");
-const { collectCharacterSources, formatCharacterSources, pickCharacterSources, readSourceMaterial } = require("src/host/character-sources.js");
+const { collectCharacterSources, formatCharacterSources, pickCharacterSources, pickChatMentions, readSourceMaterial } = require("src/host/character-sources.js");
+const { normalizeAutoIllustrationSettings } = require("src/generated-images/illustration/auto-illustration-settings.js");
+const { contextBudgetChars } = require("src/generated-images/illustration/planner-context.js");
 const { extractWorldSummary, prepareWorldContext } = require("src/visual/igs-ui/world-context.js");
 const { localImageCacheFor } = require("src/media/tavern-image-cache.js");
 const { buildPageDiagnostic } = require("src/visual/igs-ui/page-diagnostic.js");
@@ -60881,17 +61202,27 @@ async function extractCharacterPersona({ service, globalObj, sceneAssets, name }
     return { ok: true, persona: written.persona };
 }
 
-// 画默认立绘时给写词的角色资料节选：比提炼性格时短，只补 DNA 没写到的长相和穿着。
+// 画默认立绘、头像时给写词的角色资料节选：比提炼性格时短，只补 DNA 没写到的长相和穿着。
+// 「副 LLM → 读取上下文」加大了预算就给长的，正文里提到这个角色的段落也往前多翻。
 const SPRITE_SOURCE_LIMITS = Object.freeze({ card: 2000, worldbook: 2500, entry: 1000, database: 800 });
+const LARGE_SPRITE_SOURCE_LIMITS = Object.freeze({ card: 8000, worldbook: 20000, entry: 5000, database: 5000 });
 const characterAliasesOf = (sceneAssets, name) => (sceneAssets.characterAliases && Array.isArray(sceneAssets.characterAliases[name]) ? sceneAssets.characterAliases[name] : []);
+
+// 角色卡 / 世界书 / 数据库节选，加上正文里提到这个角色的段落（长相、穿着常写在剧情里）。
+function characterSourcesText(settingsState, material, sceneAssets, name) {
+    const bridge = settingsState && settingsState.draft && settingsState.draft.bridge ? settingsState.draft.bridge : {};
+    const large = contextBudgetChars(normalizeAutoIllustrationSettings(bridge.autoIllustration).llm) > 0;
+    const sources = pickCharacterSources(material, { name, aliases: characterAliasesOf(sceneAssets, name), limits: large ? LARGE_SPRITE_SOURCE_LIMITS : SPRITE_SOURCE_LIMITS });
+    const chat = pickChatMentions(material.chat, name, large ? { floors: 300, limit: 20000 } : { floors: 30, limit: 1500 });
+    return formatCharacterSources({ ...sources, chat: chat ? `【前文·提到「${name}」的段落】\n${chat}` : '' });
+}
 
 // 画默认立绘前读一次角色卡 / 世界书 / 数据库：世界背景（还没有世界设定提要就先提炼）和这个角色的资料节选；DNA 不动。
 async function spriteWritingBackground({ settingsState, service, globalObj, sceneAssets, name, onProgress, persist }) {
     const material = await readSourceMaterial(globalObj);
     const prepared = await prepareWorldContext({ settingsState, service, globalObj, material, onProgress, persist });
     if (prepared.note) showGeneratedNotice(globalObj, prepared.note, prepared.tone);
-    const sourcesText = formatCharacterSources(pickCharacterSources(material, { name, aliases: characterAliasesOf(sceneAssets, name), limits: SPRITE_SOURCE_LIMITS }));
-    return { world: prepared.world, sourcesText };
+    return { world: prepared.world, sourcesText: characterSourcesText(settingsState, material, sceneAssets, name) };
 }
 
 // 存进这个角色的 DNA（和 DNA 一起跟着角色走）；返回更新后的 DNA。
@@ -62883,8 +63214,9 @@ async function handleSettingsAction(action, ctx) {
         let result;
         const progress = startExpressionProgress(globalObj, `${charName}·Q版头像`);
         try {
-            // 头像只带现有的世界背景，不为它单独提炼世界设定。
-            result = await service.generateCharacterAvatar({ name: charName, dna: characterExpressionDna(sceneAssets, charName), world: worldContextOf(draftEffectiveAssets(settingsState)), onProgress: progress.onProgress });
+            // 头像只带现有的世界背景，不为它单独提炼世界设定；角色资料照默认立绘那样附上，DNA 空着时发色瞳色不靠猜。
+            const sourcesText = characterSourcesText(settingsState, await readSourceMaterial(globalObj), sceneAssets, charName);
+            result = await service.generateCharacterAvatar({ name: charName, dna: characterExpressionDna(sceneAssets, charName), world: worldContextOf(draftEffectiveAssets(settingsState)), sourcesText, onProgress: progress.onProgress });
         } catch (error) {
             result = { ok: false, error: errorText(error, '') };
         }
@@ -65671,15 +66003,15 @@ function pickWorldText(material, limits = WORLD_SOURCE_LIMITS) {
     return parts.join('\n');
 }
 
-// 正文里描写这套衣服的段落：最近 floors 层（不算系统消息）里提到服装名的段落，超长时留最近的。
-function pickOutfitContext(chat, outfit, { floors = 30, limit = 1500 } = {}) {
-    const word = String(outfit || '').trim();
-    if (!word || !Array.isArray(chat)) return '';
+// 正文里提到某个词（服装名、角色名）的段落：最近 floors 层（不算系统消息）里的，去掉 HTML（状态栏之类），超长时留最近的。
+function pickChatMentions(chat, word, { floors = 30, limit = 1500 } = {}) {
+    const key = String(word || '').trim();
+    if (!key || !Array.isArray(chat)) return '';
     const paragraphs = chat.slice(-floors)
         .filter((msg) => msg && !msg.is_system && typeof msg.mes === 'string')
         .flatMap((msg) => msg.mes.split(/\n+/))
-        .map((line) => line.trim())
-        .filter((line) => line.includes(word));
+        .map((line) => line.replace(/<[^>]*>/g, ' ').replace(/\s{2,}/g, ' ').trim())
+        .filter((line) => line.includes(key));
     const kept = [];
     let used = 0;
     for (let i = paragraphs.length - 1; i >= 0; i -= 1) {
@@ -65691,7 +66023,7 @@ function pickOutfitContext(chat, outfit, { floors = 30, limit = 1500 } = {}) {
 }
 function formatCharacterSources(sources) {
     const value = sources && typeof sources === 'object' ? sources : {};
-    return [value.card, value.worldbook, value.database].map((part) => String(part || '').trim()).filter(Boolean).join('\n\n');
+    return [value.card, value.worldbook, value.database, value.chat].map((part) => String(part || '').trim()).filter(Boolean).join('\n\n');
 }
 
 __igsDefine(exports, "pickCardText", () => pickCardText);
@@ -65702,7 +66034,7 @@ __igsDefine(exports, "pickCharacterSources", () => pickCharacterSources);
 __igsDefine(exports, "pickSceneSources", () => pickSceneSources);
 __igsDefine(exports, "collectCharacterSources", () => collectCharacterSources);
 __igsDefine(exports, "pickWorldText", () => pickWorldText);
-__igsDefine(exports, "pickOutfitContext", () => pickOutfitContext);
+__igsDefine(exports, "pickChatMentions", () => pickChatMentions);
 __igsDefine(exports, "formatCharacterSources", () => formatCharacterSources);
 __igsDefine(exports, "CHARACTER_SOURCE_LIMITS", () => CHARACTER_SOURCE_LIMITS);
 __igsDefine(exports, "WORLD_SOURCE_LIMITS", () => WORLD_SOURCE_LIMITS);
@@ -66334,7 +66666,7 @@ const { migrateSpriteKeys } = require("src/visual/igs-ui/sprite-key-migration.js
 const { draftAssetLibrary, draftEffectiveAssets, rememberAssetScope } = require("src/scene/asset-scope.js");
 const { getSillyTavernContext } = require("src/host/tavern-helper-adapter.js");
 const { createSettingsDialogs } = require("src/visual/igs-ui/settings-dialog.js");
-const { pickOutfitContext, readSourceMaterial } = require("src/host/character-sources.js");
+const { pickChatMentions, readSourceMaterial } = require("src/host/character-sources.js");
 const { collectOutfitClues } = require("src/data/shujuku/outfit-clues.js");
 const { prepareWorldContext } = require("src/visual/igs-ui/world-context.js");
 const BLOCKED_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
@@ -66642,7 +66974,7 @@ async function wardrobeWritingBackground(ctx, globalObj, { character = '', outfi
     const clues = character ? collectOutfitClues(material.tables, [character, ...aliases]) : { profile: [], worn: [] };
     return {
         world: prepared.world,
-        context: pickOutfitContext(material.chat, outfit),
+        context: pickChatMentions(material.chat, outfit),
         clues: [...clues.profile, ...clues.worn].filter((line) => outfit && String(line).includes(outfit)).join('\n'),
     };
 }
@@ -71007,6 +71339,8 @@ __igsDefine(exports, "BATTLE_SFX_PARTIALS", () => BATTLE_SFX_PARTIALS);
 __igsRegister("src/generated-images/illustration/auto-illustration-service.js", function(module, exports, require) {
 const { numberParagraphs, formatNumberedParagraphs, insertMarkers, insertMarkersAtAnchors, findAnchorInsertIndex } = require("src/generated-images/illustration/marker-placer.js");
 const { buildPlannerUserPrompt } = require("src/generated-images/illustration/planner-prompt.js");
+const { STANDARD_FLOOR_CHARS, plannerLlmSettings, readPlannerContext } = require("src/generated-images/illustration/planner-context.js");
+const { worldContextOf } = require("src/scene/worldview.js");
 const { requestWithSoftRetry, DEFAULT_ASSET_TEMPLATES } = require("src/generated-images/illustration/prompt-kit.js");
 const { parseIllustrationPlan } = require("src/generated-images/illustration/planner-parser.js");
 const { normalizeAutoIllustrationSettings } = require("src/generated-images/illustration/auto-illustration-settings.js");
@@ -71137,10 +71471,6 @@ const CACHE_LIMIT = 40;
 // 否则改好 Key 或地址之后，之前失败过的楼层永远不会再发请求。
 const SETTLED_STATUSES = new Set(['done']);
 
-function toReadableText(raw) {
-    return numberParagraphs(raw).paragraphs.map((p) => p.text).join('\n');
-}
-
 // 按既有别名归约取主名 DNA；没有 DNA 映射时返回 null，调用方保持旧行为。
 function createDnaResolver(sceneAssets) {
     const dnaMap = sceneAssets && sceneAssets.characterDna;
@@ -71253,6 +71583,31 @@ function createAutoIllustrationService(deps) {
         const value = typeof deps.getSceneAssets === 'function' ? deps.getSceneAssets() : null;
         return value && typeof value === 'object' ? value : {};
     };
+
+    // 本楼正文读多少、前文读哪些（见 planner-context）；读不到前文就当没有。
+    function plannerContextOf(messageId, s, floorLength) {
+        try {
+            return readPlannerContext(messageHost, messageId, s.llm, floorLength);
+        } catch (error) {
+            return { budget: 0, floorChars: STANDARD_FLOOR_CHARS, previousText: '' };
+        }
+    }
+
+    // 出场角色的角色卡 / 世界书 / 数据库节选（宿主读）。标准长度时只给没有 DNA 的角色（有 DNA 的长相以 DNA 为准）；
+    // 加大预算时都给。没接或读不到就不附。
+    async function readCgCharacterSources(names, sceneAssets, large) {
+        if (typeof deps.readCharacterSources !== 'function') return [];
+        const resolver = createDnaResolver(sceneAssets);
+        const wanted = (Array.isArray(names) ? names : []).filter((name) => large || !resolver || !resolver.resolve(name));
+        if (!wanted.length) return [];
+        let found = {};
+        try {
+            found = (await deps.readCharacterSources(wanted, { large })) || {};
+        } catch (error) {
+            return [];
+        }
+        return wanted.map((name) => ({ name, text: String(found[name] || '').trim() })).filter((item) => item.text);
+    }
 
     function remember(key, value) {
         cache.delete(key);
@@ -71461,13 +71816,17 @@ function createAutoIllustrationService(deps) {
         await store.putFloor(key, { ...base, status: 'planning', updatedAt: now() });
         let plan;
         try {
-            const previousText = messageHost.readPreviousAiTexts(messageId, s.llm.contextFloors)
-                .map(toReadableText).join('\n').slice(-1500);
+            const floorLength = numbered.paragraphs.reduce((sum, p) => sum + p.text.length + 1, 0);
+            const context = plannerContextOf(messageId, s, floorLength);
+            const sceneAssets = readSceneAssets();
+            const characterDna = summarizeCharacterDna(numbered.characters, sceneAssets);
             const user = buildPlannerUserPrompt({
-                numberedText: formatNumberedParagraphs(numbered.paragraphs),
+                numberedText: formatNumberedParagraphs(numbered.paragraphs, context.floorChars),
                 scenes: numbered.scenes, characters: numbered.characters,
-                previousText, want: decision.want, exact: decision.exact, isNsfw: numbered.isNsfw,
-                characterDna: summarizeCharacterDna(numbered.characters, readSceneAssets()),
+                previousText: context.previousText, want: decision.want, exact: decision.exact, isNsfw: numbered.isNsfw,
+                characterDna,
+                characterSources: await readCgCharacterSources(numbered.characters, sceneAssets, context.budget > 0),
+                world: worldContextOf(sceneAssets),
                 frame: cgFramePrompt(cgSize(s)),
             });
             plan = await requestWithSoftRetry(llm, {
@@ -71475,7 +71834,7 @@ function createAutoIllustrationService(deps) {
                 softSystem: numbered.isNsfw ? s.llm.prompts.illustrationSoft : '',
                 user,
                 parse: (reply) => parseIllustrationPlan(reply, { maxSlots: decision.want, paragraphCount: numbered.paragraphs.length }),
-            }, s.llm);
+            }, plannerLlmSettings(s.llm));
             // 温和模式下 LLM 只给了构图，露骨 tag 在本地补上，不经过 LLM。
             if (plan.ok && plan.soft) {
                 const extra = s.assets.templates.nsfwExtra || DEFAULT_ASSET_TEMPLATES.nsfwExtra;
@@ -71785,234 +72144,6 @@ __igsDefine(exports, "createAutoIllustrationService", () => createAutoIllustrati
 __igsDefine(exports, "ILLUSTRATION_UPDATED_EVENT", () => ILLUSTRATION_UPDATED_EVENT);
 __igsDefine(exports, "ILLUSTRATION_PROGRESS_EVENT", () => ILLUSTRATION_PROGRESS_EVENT);
 __igsDefine(exports, "EMBEDDED_PHONE_MAX_WIDTH", () => EMBEDDED_PHONE_MAX_WIDTH);
-});
-__igsRegister("src/generated-images/illustration/marker-placer.js", function(module, exports, require) {
-const { stripOutfitFields } = require("src/scene/directive-tags.js");
-const SCENE_RE = /\[igs-scene:([^|\]\n]+)\|([^|\]\n]+)\|([^|\]\n]+)(?:\|([^\]\n]*))?\]/g;
-const CHAR_RE = /\[igs-char:([^|\]\n]+)\|(?:([^|\]\n]*)\|)?([^|\]\n]+)\]?/g;
-const THOUGHT_RE = /\[igs-thought:([^|\]\n]+)\|(?:([^|\]\n]*)\|)?([^|\]\n]+)\]?/g;
-const IMG_RE = /(?:\[igs-img:\s*\d+\s*\]|<IMG>\s*\d+\s*<\/IMG>)/gi;
-const LEADING_SCENE_RE = /^(\s*(?:\[igs-scene:[^\]\n]*\]\s*)+)/;
-
-// 一段正文里可以有多段 <content>。只认第一段会漏掉后面的场景标签。
-function contentSpans(lines) {
-    const spans = [];
-    let start = -1;
-    for (let i = 0; i < lines.length; i += 1) {
-        const line = lines[i];
-        if (start < 0 && /<content\b[^>]*>/i.test(line)) start = i;
-        if (start >= 0 && /<\/content>/i.test(line)) {
-            spans.push([start, i]);
-            start = -1;
-        }
-    }
-    if (start >= 0) spans.push([start, lines.length - 1]);
-    return spans.length ? spans : [[0, lines.length - 1]];
-}
-
-function lineInSpans(index, spans) {
-    return spans.some(([from, to]) => index >= from && index <= to);
-}
-
-function readableLine(line) {
-    return String(line || '')
-        .replace(IMG_RE, '')
-        .replace(SCENE_RE, '')
-        .replace(CHAR_RE, (_, name, _mood, text) => `${name.trim()}：「${text.trim()}」`)
-        .replace(THOUGHT_RE, (_, name, _mood, text) => `${name.trim()}（心想）：${text.trim()}`)
-        // 柏宝绘 / 智绘姬写回楼层的生图词不是正文。
-        .replace(/<bbi_image>[\s\S]*?<\/bbi_image>|<image>[\s\S]*?<\/image>|image###[\s\S]*?###/gi, '')
-        .replace(/<\/?[a-zA-Z][^>]*>/g, '')
-        .trim();
-}
-function numberParagraphs(raw, options = {}) {
-    const lines = String(raw || '').split('\n');
-    const spans = contentSpans(lines);
-    const paragraphs = [];
-    const scenes = [];
-    const characters = new Set();
-    for (let i = 0; i < lines.length; i += 1) {
-        const line = stripOutfitFields(lines[i], options && options.outfitResolver);
-        // 场景标签整楼都认。写在第一段 </content> 之后的转场也要算进 NSFW 和背景。
-        for (const m of line.matchAll(SCENE_RE)) {
-            scenes.push({ scene: m[1].trim(), time: m[2].trim(), weather: m[3].trim(), nsfw: String(m[4] || '').trim().toLowerCase() === 'nsfw' });
-        }
-        if (!lineInSpans(i, spans)) continue;
-        for (const m of line.matchAll(CHAR_RE)) characters.add(m[1].trim());
-        for (const m of line.matchAll(THOUGHT_RE)) characters.add(m[1].trim());
-        const text = readableLine(line);
-        if (text) paragraphs.push({ no: paragraphs.length + 1, lineIndex: i, text });
-    }
-    return { paragraphs, scenes, characters: Array.from(characters), isNsfw: scenes.some((s) => s.nsfw) };
-}
-function formatNumberedParagraphs(paragraphs, maxChars = 6000) {
-    const out = [];
-    let total = 0;
-    for (const p of paragraphs) {
-        const line = `${p.no}. ${p.text}`;
-        total += line.length + 1;
-        if (total > maxChars) break;
-        out.push(line);
-    }
-    return out.join('\n');
-}
-
-/**
- * 与数据库生图插件的生成点定位相同：精确 → 去掉空白和标点 → 最长公共子串。
- * 命中后落回本插件的段落编号，标记仍插在该段前面。
- * @param {string} raw
- * @param {Array<{ no: number, lineIndex: number }>} paragraphs
- * @param {string} anchor
- * @returns {number}
- */
-function paragraphNoForAnchor(raw, paragraphs, anchor) {
-    const source = String(raw || '');
-    const found = findAnchorInsertIndex(source, anchor);
-    if (found.index < 0) return 0;
-    const lineIndex = source.slice(0, Math.max(0, found.index - 1)).split('\n').length - 1;
-    const list = Array.isArray(paragraphs) ? paragraphs : [];
-    const exact = list.find((paragraph) => paragraph.lineIndex === lineIndex);
-    if (exact) return exact.no;
-    let before = null;
-    for (const paragraph of list) {
-        if (paragraph.lineIndex <= lineIndex) before = paragraph;
-        else break;
-    }
-    if (before) return before.no;
-    return list.length ? list[0].no : 0;
-}
-
-/**
- * 在 text 中定位 anchor，返回插入下标（anchor 结束之后）；找不到返回 -1。
- * @param {string} text
- * @param {string} anchorSentence
- * @returns {{ index: number, mode: string }}
- */
-function findAnchorInsertIndex(text, anchorSentence) {
-    const source = typeof text === 'string' ? text : '';
-    const anchor = typeof anchorSentence === 'string' ? anchorSentence : '';
-    if (!anchor) return { index: -1, mode: 'fail' };
-    const exact = source.indexOf(anchor);
-    if (exact !== -1) return { index: exact + anchor.length, mode: 'exact' };
-    const normResult = findNormalized(source, anchor);
-    if (normResult.index >= 0) return { index: normResult.index, mode: 'normalized' };
-    const lcsResult = findByLongestCommonSubstring(source, anchor);
-    if (lcsResult.index >= 0) return { index: lcsResult.index, mode: 'lcs' };
-    return { index: -1, mode: 'fail' };
-}
-
-function findNormalized(text, anchor) {
-    const { normalized: normText, map } = normalizeWithMap(text);
-    const normAnchor = normalizeAnchorText(anchor);
-    if (!normAnchor) return { index: -1 };
-    const at = normText.indexOf(normAnchor);
-    if (at === -1) return { index: -1 };
-    const endOrig = map[at + normAnchor.length - 1];
-    if (endOrig == null) return { index: -1 };
-    return { index: endOrig + 1 };
-}
-
-function normalizeAnchorText(s) {
-    return s
-        .replace(/\s+/g, '')
-        .replace(/[，。！？、；：""''「」『』（）【】《》,.!?;:'"()\[\]{}]/g, '')
-        .toLowerCase();
-}
-
-function normalizeWithMap(text) {
-    const map = [];
-    const chars = [];
-    const lower = text.toLowerCase();
-    for (let i = 0; i < text.length; i += 1) {
-        const ch = lower[i];
-        if (/\s/.test(ch)) continue;
-        if (/[，。！？、；：""''「」『』（）【】《》,.!?;:'"()\[\]{}]/.test(ch)) continue;
-        chars.push(ch);
-        map.push(i);
-    }
-    return { normalized: chars.join(''), map };
-}
-
-function findByLongestCommonSubstring(text, anchor) {
-    const a = text.toLowerCase();
-    const b = anchor.toLowerCase();
-    if (!a || !b) return { index: -1 };
-    const minLen = Math.max(4, Math.ceil(b.length * 0.4));
-    let bestLen = 0;
-    let bestEndInText = -1;
-    let prev = new Array(b.length + 1).fill(0);
-    let curr = new Array(b.length + 1).fill(0);
-    for (let i = 1; i <= a.length; i += 1) {
-        for (let j = 1; j <= b.length; j += 1) {
-            if (a[i - 1] === b[j - 1]) {
-                curr[j] = prev[j - 1] + 1;
-                if (curr[j] > bestLen) {
-                    bestLen = curr[j];
-                    bestEndInText = i;
-                }
-            } else {
-                curr[j] = 0;
-            }
-        }
-        const tmp = prev;
-        prev = curr;
-        curr = tmp;
-        curr.fill(0);
-    }
-    if (bestLen < minLen || bestEndInText < 0) return { index: -1 };
-    return { index: bestEndInText };
-}
-
-// 同一段里可以有多句生成点。按句尾插入，不按整段，避免四张标记叠在同一处。
-function insertMarkersAtAnchors(raw, slots) {
-    const source = String(raw || '');
-    const placed = [];
-    for (const slot of Array.isArray(slots) ? slots : []) {
-        if (!slot) continue;
-        const found = findAnchorInsertIndex(source, slot.anchorSentence);
-        if (found.index < 0) continue;
-        placed.push({ index: found.index, slot: Number(slot.slot) || placed.length + 1 });
-    }
-    placed.sort((a, b) => b.index - a.index || b.slot - a.slot);
-    let text = source;
-    for (const item of placed) {
-        text = insertTokenOnOwnLine(text, item.index, `[igs-img:${item.slot}]`);
-    }
-    return text;
-}
-
-function insertTokenOnOwnLine(text, index, token) {
-    const at = Math.max(0, Math.min(text.length, Number(index) || 0));
-    const before = text.slice(0, at);
-    const after = text.slice(at);
-    const lead = before.length === 0 || before.endsWith('\n') ? '' : '\n';
-    const trail = after.length === 0 || after.startsWith('\n') ? '' : '\n';
-    return before + lead + token + trail + after;
-}
-function insertMarkers(raw, paragraphs, slots) {
-    const lines = String(raw || '').split('\n');
-    const ordered = [...slots].sort((a, b) => b.at - a.at);
-    for (const s of ordered) {
-        const p = paragraphs[s.at - 1];
-        if (!p) continue;
-        const marker = `[igs-img:${s.slot}]`;
-        const line = lines[p.lineIndex];
-        const lead = line.match(LEADING_SCENE_RE);
-        if (lead) {
-            lines[p.lineIndex] = `${lead[1].trimEnd()}${marker}${line.slice(lead[1].length)}`;
-        } else {
-            lines.splice(p.lineIndex, 0, marker);
-        }
-    }
-    return lines.join('\n');
-}
-
-__igsDefine(exports, "numberParagraphs", () => numberParagraphs);
-__igsDefine(exports, "formatNumberedParagraphs", () => formatNumberedParagraphs);
-__igsDefine(exports, "paragraphNoForAnchor", () => paragraphNoForAnchor);
-__igsDefine(exports, "findAnchorInsertIndex", () => findAnchorInsertIndex);
-__igsDefine(exports, "insertMarkersAtAnchors", () => insertMarkersAtAnchors);
-__igsDefine(exports, "insertMarkers", () => insertMarkers);
 });
 __igsRegister("src/generated-images/illustration/planner-parser.js", function(module, exports, require) {
 const { snapToNaiGrid } = require("src/generated-images/request-builders/nai-v4-builder.js");
@@ -75900,6 +76031,18 @@ function createIllustrationMessageHost(globalObject = globalThis) {
         return out;
     }
 
+    // 本楼之前最近 count 条消息（用户和 AI，不含系统消息）：[{ isUser, text }]，旧的在前。
+    function readPreviousMessages(messageId, count) {
+        const ctx = context();
+        const chat = ctx && Array.isArray(ctx.chat) ? ctx.chat : [];
+        const out = [];
+        for (let i = Number(messageId) - 1; i >= 0 && out.length < count; i -= 1) {
+            const msg = chat[i];
+            if (msg && !msg.is_system && typeof msg.mes === 'string') out.unshift({ isUser: msg.is_user === true, text: msg.mes });
+        }
+        return out;
+    }
+
     function matchesExpectedFloor(messageId, expected, options = {}) {
         if (!expected) return true;
         const requireLatest = !options || options.requireLatest !== false;
@@ -75987,7 +76130,7 @@ function createIllustrationMessageHost(globalObject = globalThis) {
     }
 
     return {
-        getChatId, getUserName, getCharacterNames, readFloor, readPreviousAiTexts, writeFloor, on, attachPromptStrip, ensureMarkerRegexes,
+        getChatId, getUserName, getCharacterNames, readFloor, readPreviousAiTexts, readPreviousMessages, writeFloor, on, attachPromptStrip, ensureMarkerRegexes,
         destroy() { while (cleanups.length) cleanups.pop()(); },
     };
 }
@@ -76432,6 +76575,7 @@ __igsDefine(exports, "createIndexedDbCgIndexStore", () => createIndexedDbCgIndex
 });
 __igsRegister("src/generated-images/illustration/asset-generation-service.js", function(module, exports, require) {
 const { numberParagraphs } = require("src/generated-images/illustration/marker-placer.js");
+const { STANDARD_FLOOR_CHARS, plannerLlmSettings, readPlannerContext, readableText } = require("src/generated-images/illustration/planner-context.js");
 const { buildAssetPlannerUserPrompt, parseAssetPlan, buildAssetSlot, buildDictionaryAssetItems } = require("src/generated-images/illustration/asset-prompt.js");
 const { requestWithSoftRetry } = require("src/generated-images/illustration/prompt-kit.js");
 const { writeCharacterPersona, writeWorldSummary } = require("src/generated-images/illustration/persona-writer.js");
@@ -76453,6 +76597,13 @@ const IMAGE_CACHE_LIMIT = 60;
 // 素材补全查前文：往前看多少层 AI 楼、每个地点 / 角色最多附多少字。
 const MENTION_FLOORS = 30;
 const MENTION_LIMIT = 800;
+// 长楼层里本楼前 EXCERPT_AFTER 字之后才出现的地点 / 角色另附本楼节选（整层都读时也附，帮副 LLM 对准那一段）：
+// 地点取场景标签前 SCENE_LEAD 字（进门、到达时的描写）和标签后 SCENE_BODY 字（刚进去时的样子），
+// 角色取提到他的段落（先出场的在前），最多 FLOOR_MENTION_LIMIT 字。
+const EXCERPT_AFTER = STANDARD_FLOOR_CHARS;
+const SCENE_LEAD = 2000;
+const SCENE_BODY = 1500;
+const FLOOR_MENTION_LIMIT = 1500;
 // 正在显示的图不淘汰：一页缩略图超过上限时，按张数硬淘汰会把刚读回的图挤掉，
 // 重绘后又缺图再读，循环闪「载入中」。近几秒内被取用过的图保留，离开页面后再按上限回收。
 const IMAGE_IN_USE_MS = 5000;
@@ -76466,10 +76617,6 @@ const ACTIVE_TEMP_STATUSES = new Set(['review', 'chat']);
 
 function randomSeed() {
     return Math.floor(Math.random() * 4294967295);
-}
-
-function toReadableText(raw) {
-    return numberParagraphs(raw).paragraphs.map((p) => p.text).join('\n');
 }
 
 // 按既有别名归约为立绘需求挂上主名 DNA；空 DNA 不挂，保持无 DNA 时的旧行为。
@@ -76969,11 +77116,13 @@ function createAssetGenerationService(deps) {
         const variantNeeds = backgroundNeeds.filter((need) => need.variantOf);
         const needs = [...backgroundNeeds.filter((need) => !need.variantOf), ...spriteNeeds];
         attachCharacterDna(needs, s.sceneAssets);
-        await attachSources(needs);
-        // 前文：【前文摘要】是最近 contextFloors 层的末尾；更早提到这些地点 / 角色的段落另挂进 need.sources。
-        const history = needs.length ? readHistory(messageId) : [];
-        const previousText = s.auto.llm.contextFloors > 0 ? history.slice(-s.auto.llm.contextFloors).join('\n').slice(-1500) : '';
-        attachMentions(needs, history, previousText);
+        const floorText = numbered.paragraphs.map((p) => p.text).join('\n');
+        const context = needs.length ? plannerContextOf(messageId, s, floorText.length) : { budget: 0, floorChars: STANDARD_FLOOR_CHARS, previousText: '' };
+        await attachSources(needs, context.budget > 0);
+        attachFloorExcerpts(needs, numbered);
+        // 前文里更早提到这些地点 / 角色的段落另挂进 need.sources：标准长度时只附【前文摘要】里没有的；
+        // 加大预算时前文整段都读了，照样附上，帮副 LLM 对准。
+        attachMentions(needs, needs.length ? readHistory(messageId) : [], context.budget ? '' : context.previousText);
         if (!needs.length && !variantNeeds.length) {
             await store.putFloor(key, { status: 'done', count: 0, updatedAt: now() });
             return { ok: true, reason: 'nothing-missing' };
@@ -77008,9 +77157,9 @@ function createAssetGenerationService(deps) {
                 plan = await requestWithSoftRetry(llm, {
                     system: s.auto.llm.prompts.asset,
                     softSystem: s.auto.llm.prompts.assetSoft,
-                    user: buildAssetPlannerUserPrompt({ needs, readableText: toReadableText(floor.text).slice(0, 6000), previousText, world: worldContextOf(s.sceneAssets) }),
+                    user: buildAssetPlannerUserPrompt({ needs, readableText: floorText.slice(0, context.floorChars), previousText: context.previousText, world: worldContextOf(s.sceneAssets) }),
                     parse: (reply) => parseAssetPlan(reply, needs),
-                }, s.auto.llm);
+                }, plannerLlmSettings(s.auto.llm));
             } catch (error) {
                 plan = { ok: false, error: '副 LLM 规划失败' };
             }
@@ -77065,13 +77214,14 @@ function createAssetGenerationService(deps) {
 
     // 本楼新角色的立绘与缺的背景：附上角色卡 / 世界书 / 数据库里提到这个角色或地点的节选
     // （宿主读：角色走 readCharacterSources，地点走 readSceneSources；没接或读不到就不附，照旧补图）。
-    async function attachSources(needs) {
+    // large：加大了「读取上下文」预算，节选按长的给。
+    async function attachSources(needs, large = false) {
         for (const [type, read] of [['sprite', deps.readCharacterSources], ['background', deps.readSceneSources]]) {
             const list = needs.filter((need) => need && need.type === type && need.name);
             if (!list.length || typeof read !== 'function') continue;
             let found = {};
             try {
-                found = (await read(list.map((need) => need.name))) || {};
+                found = (await read(list.map((need) => need.name), { large })) || {};
             } catch (error) {
                 continue;
             }
@@ -77082,11 +77232,65 @@ function createAssetGenerationService(deps) {
         }
     }
 
+    // 按字数取段落：从 list 头上取到 limit 字为止，最后一段截短；fromEnd 时从尾上往前取。
+    function takeParagraphs(list, limit, fromEnd = false) {
+        const ordered = fromEnd ? list.slice().reverse() : list;
+        const kept = [];
+        let used = 0;
+        for (const p of ordered) {
+            if (used >= limit) break;
+            const text = fromEnd ? p.text.slice(-(limit - used)) : p.text.slice(0, limit - used);
+            kept.push({ ...p, text });
+            used += text.length;
+        }
+        return fromEnd ? kept.reverse() : kept;
+    }
+
+    // 长楼层里副 LLM 读不到的那部分：地点附场景标签前后的正文，角色附提到他的段落，挂到 need.sources。
+    function attachFloorExcerpts(needs, numbered) {
+        let offset = 0;
+        const paragraphs = numbered.paragraphs.map((p) => {
+            const item = { ...p, end: offset + p.text.length };
+            offset += p.text.length + 1;
+            return item;
+        });
+        const unseen = paragraphs.filter((p) => p.end > EXCERPT_AFTER);
+        if (!unseen.length) return;
+        const attach = (need, label, picked) => {
+            const text = picked.filter((p) => p.end > EXCERPT_AFTER).map((p) => p.text.trim()).filter(Boolean).join('\n');
+            if (text) need.sources = [need.sources, `【本楼·${label}】\n${text}`].filter(Boolean).join('\n\n');
+        };
+        for (const need of needs) {
+            const name = String(need && need.name || '').trim();
+            if (!name) continue;
+            if (need.type === 'background') {
+                const tag = numbered.scenes.find((scene) => scene.scene === name && scene.time === need.time)
+                    || numbered.scenes.find((scene) => scene.scene === name);
+                if (!tag || !Number.isInteger(tag.lineIndex)) continue;
+                const next = numbered.scenes.find((scene) => scene.lineIndex > tag.lineIndex && scene.scene !== name);
+                const lead = takeParagraphs(paragraphs.filter((p) => p.lineIndex < tag.lineIndex), SCENE_LEAD, true);
+                const body = takeParagraphs(paragraphs.filter((p) => p.lineIndex > tag.lineIndex && (!next || p.lineIndex < next.lineIndex)), SCENE_BODY);
+                attach(need, `「${name}」前后的正文`, [...lead, ...body]);
+            } else {
+                attach(need, `提到「${name}」的段落`, takeParagraphs(unseen.filter((p) => p.text.includes(name)), FLOOR_MENTION_LIMIT));
+            }
+        }
+    }
+
+    // 本楼正文读多少、前文读哪些（见 planner-context）；读不到前文就当没有。
+    function plannerContextOf(messageId, s, floorLength) {
+        try {
+            return readPlannerContext(messageHost, messageId, s.auto.llm, floorLength);
+        } catch (error) {
+            return { budget: 0, floorChars: STANDARD_FLOOR_CHARS, previousText: '' };
+        }
+    }
+
     // 本楼之前最近 MENTION_FLOORS 层 AI 楼的正文（去掉标签），旧的在前。读不到就当没有前文。
     function readHistory(messageId) {
         if (typeof messageHost.readPreviousAiTexts !== 'function') return [];
         try {
-            return (messageHost.readPreviousAiTexts(messageId, MENTION_FLOORS) || []).map(toReadableText);
+            return (messageHost.readPreviousAiTexts(messageId, MENTION_FLOORS) || []).map(readableText);
         } catch (error) {
             return [];
         }
@@ -77417,7 +77621,7 @@ function createAssetGenerationService(deps) {
     }
 
     // 状态栏头像：Q 版大头，方图、不抠图，直接把图交回去，由设置页缩小后存进头像。
-    async function generateCharacterAvatar({ name, dna, world = null, onProgress } = {}) {
+    async function generateCharacterAvatar({ name, dna, world = null, sourcesText = '', onProgress } = {}) {
         const who = String(name || '').trim();
         if (!who) return { ok: false, error: '没有角色' };
         if (!nai || typeof nai.writeDbgenPrompt !== 'function' || typeof nai.generateDbgenCaption !== 'function') {
@@ -77426,7 +77630,7 @@ function createAssetGenerationService(deps) {
         reportExpressionProgress(onProgress, { phase: 'write', done: 0, total: 1, mood: '头像' });
         let written;
         try {
-            written = await nai.writeDbgenPrompt({ description: buildCharacterAvatarDescription(who, dna, { world }) });
+            written = await nai.writeDbgenPrompt({ description: buildCharacterAvatarDescription(who, dna, { world, sourcesText }) });
         } catch (error) {
             return { ok: false, error: (error && error.message) || '写提示词失败' };
         }
