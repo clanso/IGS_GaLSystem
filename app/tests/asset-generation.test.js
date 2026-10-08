@@ -1098,7 +1098,7 @@ test('gate:assets:bind-generated-sprite-to-character-default', () => {
 });
 
 test('gate:assets:expression-set-writes-once-then-paints-eight-in-order', async () => {
-    const { DEFAULT_MOOD_GROUPS, moodTierLabels, moodPresetTags } = await import('../src/scene/mood-groups.js');
+    const { DEFAULT_MOOD_GROUPS, moodTierLabels } = await import('../src/scene/mood-groups.js');
     const { renderCharacterAssetList, renderGeneratedAssetPane } = await import('../src/visual/igs-ui/settings-fields.js');
     const { buildExpressionDiffDescription, uprightSpriteCaption } = await import('../src/generated-images/dbgen-prompt.js');
     const labels = moodTierLabels(8);
@@ -1118,15 +1118,15 @@ test('gate:assets:expression-set-writes-once-then-paints-eight-in-order', async 
         writeDbgenPrompt: async (meta) => {
             promptCalls += 1;
             assert.match(meta.description, /8 份立绘表情差分/);
-            assert.match(meta.description, /表情依据该角色的性格、脾气与行为习惯分别撰写/);
+            assert.match(meta.description, /每个表情都按这个角色自己的性格、脾气和说话做事的习惯来写/);
             assert.match(meta.description, /固定身份：\n银发，说话很冲/);
             assert.match(meta.description, /默认外观：\n白裙/);
             assert.match(meta.description, /触发词：\nfuyuko/);
             assert.match(meta.description, /不要出现：\nextra fingers/);
             assert.equal(meta.description.includes('楼层'), false);
             assert.match(meta.description, /无背景，透明底/);
-            assert.match(meta.description, /规格：大腿以上（cowboy shot）。朝向正面，直立，平视。禁止全身，禁止露出脚，禁止侧身，禁止倾斜构图。/);
-            assert.match(meta.description, /情绪须写入肢体：手势、肩线、重心随该情绪变化。禁止仅替换面部。/);
+            assert.match(meta.description, /规格：大腿以上（cowboy shot），身体朝正面站着（各张差分要叠在同一个位置）。头的角度、视线方向、手和肩膀可以随情绪动。禁止全身，禁止露出脚，禁止整个身体侧过去，禁止倾斜构图。/);
+            assert.match(meta.description, /先想这个角色在那种场面里真实会怎么反应/);
             assert.equal(meta.description.includes('表情只改脸'), false);
             assert.equal(meta.description.includes('站姿不要变'), false);
             assert.equal(meta.description.includes('已有立绘正面'), false);
@@ -1190,7 +1190,8 @@ test('gate:assets:expression-set-writes-once-then-paints-eight-in-order', async 
     assert.equal(dna.identity, '银发，说话很冲');
     assert.equal(promptCalls, 1);
     assert.equal(maxActive, 1);
-    assert.deepEqual(painted, labels.map((label) => `fuyuko, ${moodPresetTags(label)}, silver hair, expr ${label}, cowboy shot, standing, facing viewer, straight-on`));
+    // 情绪组没打开「固定加上」：不放预设表情 tag，表情全按写词的来。
+    assert.deepEqual(painted, labels.map((label) => `fuyuko, silver hair, expr ${label}, cowboy shot, standing, facing viewer, straight-on`));
     assert.equal(new Set(seeds).size, 1, 'one seed for the whole set');
     assert.ok(Number.isInteger(seeds[0]) && seeds[0] >= 0);
     const angryIndex = labels.indexOf('愤怒');
@@ -1200,7 +1201,7 @@ test('gate:assets:expression-set-writes-once-then-paints-eight-in-order', async 
     assert.equal(result.items[0].imageId, 'expr-1');
     assert.equal(result.items[angryIndex].ok, false);
     assert.equal(result.items[angryIndex].mood, '愤怒');
-    assert.equal(result.items[angryIndex].caption.v4_prompt.caption.base_caption, `fuyuko, ${moodPresetTags('愤怒')}, silver hair, expr 愤怒, cowboy shot, standing, facing viewer, straight-on`);
+    assert.equal(result.items[angryIndex].caption.v4_prompt.caption.base_caption, 'fuyuko, silver hair, expr 愤怒, cowboy shot, standing, facing viewer, straight-on');
     assert.equal(progress[0].phase, 'write');
     assert.equal(progress[0].done, 0);
     assert.equal(progress[0].total, 8);
@@ -1615,19 +1616,22 @@ test('gate:assets:expression-mood-tags-beat-copied-neutral-face-and-dna-pose', a
         v4_prompt: { caption: { base_caption: '1girl, black hair, expressionless, closed mouth, arms at sides, red hoodie', char_captions: [] } },
         v4_negative_prompt: { caption: { base_caption: '', char_captions: [] } },
     };
-    const laugh = applyMoodToCaption(caption, '大笑').v4_prompt.caption.base_caption;
+    // 只有打开「固定加上」的组才放表情 tag；放的时候去掉照抄来的无表情词。
+    const always = ['大笑', '哭泣', '喜悦'].map((label) => ({ label, words: [], alwaysTags: true }));
+    assert.equal(applyMoodToCaption(caption, '大笑'), caption, '没打开固定加上就不动');
+    const laugh = applyMoodToCaption(caption, '大笑', { groups: always }).v4_prompt.caption.base_caption;
     assert.match(laugh, /^laughing, open mouth/);
     assert.doesNotMatch(laugh, /expressionless|closed mouth|arms at sides/);
     assert.match(laugh, /red hoodie/);
     assert.equal(applyMoodToCaption(caption, '默认'), caption);
     assert.equal(applyMoodToCaption(caption, '自建组'), caption);
     const withChar = { ...caption, v4_prompt: { caption: { base_caption: 'solo', char_captions: [{ char_caption: '1girl, expressionless', centers: [{ x: 0.5, y: 0.5 }] }] } } };
-    const charOut = applyMoodToCaption(withChar, '哭泣').v4_prompt.caption;
+    const charOut = applyMoodToCaption(withChar, '哭泣', { groups: always }).v4_prompt.caption;
     assert.equal(charOut.base_caption, 'solo');
     assert.match(charOut.char_captions[0].char_caption, /^crying, tears/);
     assert.doesNotMatch(charOut.char_captions[0].char_caption, /expressionless/);
     const dna = { defaultAppearance: 'black hair, red eyes, expressionless, light smile, closed mouth, arms at sides, hands on hips, red hoodie', negative: 'smile' };
-    const merged = applyCharacterDnaToCaption(applyMoodToCaption(caption, '喜悦'), dna);
+    const merged = applyCharacterDnaToCaption(applyMoodToCaption(caption, '喜悦', { groups: always }), dna);
     const positive = merged.v4_prompt.caption.base_caption;
     assert.match(positive, /^black hair, red eyes, red hoodie, smile, happy/);
     assert.doesNotMatch(positive, /expressionless|light smile|closed mouth|arms at sides|hands on hips/);
@@ -1673,7 +1677,7 @@ test('gate:assets:reroll-paints-the-slot-prompt-with-a-fresh-seed-and-no-rewrite
     const service = createAssetGenerationService({
         messageHost: { getChatId: () => 'chat', readFloor: () => null, readPreviousAiTexts: () => [], on: () => () => {} },
         llm: {}, nai, store: createMemoryGeneratedAssetStore(),
-        getSettings: () => ({ autoIllustration: {}, sceneAssets: {} }),
+        getSettings: () => ({ autoIllustration: {}, sceneAssets: { moodGroups: [{ label: '大笑', words: [], alwaysTags: true }] } }),
         newId: () => `r-${seq += 1}`,
         matte: async (dataUrl) => dataUrl,
     });

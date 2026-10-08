@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { applyMoodToCaption, captionHasExpression } from '../src/generated-images/dbgen-prompt.js';
+import { applyMoodToCaption } from '../src/generated-images/dbgen-prompt.js';
 import { moodPresetTags, normalizeMoodGroups, resolveMoodExpressionTags } from '../src/scene/mood-groups.js';
 import { mergeLabelGroups } from '../src/scene/card-pack.js';
 
@@ -10,31 +10,19 @@ const charCaption = (text) => ({
 });
 const charText = (caption) => caption.v4_prompt.caption.char_captions[0].char_caption;
 
-test('gate:expression-tags:detects-written-face-expressions-only', () => {
-    assert.equal(captionHasExpression(charCaption('1girl, gentle smile, long hair')), true);
-    assert.equal(captionHasExpression(charCaption('1girl, slight frown, looking down')), true);
-    assert.equal(captionHasExpression(charCaption('1girl, teary eyes')), true);
-    assert.equal(captionHasExpression(charCaption('1girl, light blush')), true);
-    // 外貌、姿势和照抄来的无表情词都不算。
-    assert.equal(captionHasExpression(charCaption('1girl, blue eyes, long hair, school uniform')), false);
-    assert.equal(captionHasExpression(charCaption('1girl, crossed arms, hand on own hip, standing')), false);
-    assert.equal(captionHasExpression(charCaption('1girl, expressionless, closed mouth, arms at sides')), false);
-});
-
-test('gate:expression-tags:preset-tags-only-fill-in-when-writer-wrote-no-expression', () => {
-    // 内敛角色的委屈：写词已经写了克制的表情，不再叠上噘嘴、脸红那一套。
+test('gate:expression-tags:preset-tags-are-never-added-unless-the-group-says-always', () => {
+    // 内敛角色的委屈：写词写了克制的表情，不叠噘嘴、脸红那一套。
     const restrained = charCaption('1girl, downcast eyes, slight frown, hands clasped');
     assert.equal(applyMoodToCaption(restrained, '委屈'), restrained);
-    // 写词漏写表情（只有照抄的无表情）：照旧补上预设，并去掉无表情词。
-    const missing = applyMoodToCaption(charCaption('1girl, expressionless, black hair'), '委屈');
-    assert.match(charText(missing), new RegExp(`^${moodPresetTags('委屈').split(', ')[0]}`));
-    assert.doesNotMatch(charText(missing), /expressionless/);
-    // 判断只看写词原文：后拼进来的长相里带 light blush，不算写了表情。
-    const looked = charCaption('1girl, light blush, black hair');
-    const filled = applyMoodToCaption(looked, '委屈', { written: charCaption('1girl, black hair') });
-    assert.match(charText(filled), /^pout/);
+    // 写词漏写表情也不兜底：表情全按写词的来。
+    const missing = charCaption('1girl, expressionless, black hair');
+    assert.equal(applyMoodToCaption(missing, '委屈'), missing);
+    // 只有打开「固定加上」才放，并去掉照抄的无表情词。
+    const forced = applyMoodToCaption(missing, '委屈', { groups: [{ label: '委屈', words: [], alwaysTags: true }] });
+    assert.match(charText(forced), new RegExp(`^${moodPresetTags('委屈').split(', ')[0]}`));
+    assert.doesNotMatch(charText(forced), /expressionless/);
     const plain = charCaption('1girl');
-    assert.equal(applyMoodToCaption(plain, '默认'), plain, '默认组不动');
+    assert.equal(applyMoodToCaption(plain, '默认', { groups: [{ label: '默认', words: [], alwaysTags: true }] }), plain, '默认组不动');
 });
 
 test('gate:expression-tags:group-settings-force-or-replace-tags', () => {
@@ -42,15 +30,16 @@ test('gate:expression-tags:group-settings-force-or-replace-tags', () => {
     // 爱恋打开「固定加上」：写了表情也照样放到最前。
     const always = [{ label: '爱恋', words: [], alwaysTags: true }];
     assert.match(charText(applyMoodToCaption(written, '爱恋', { groups: always })), new RegExp(`^${moodPresetTags('爱恋')}`));
-    // 自己改过的 tag 替换预设，NSFW 下的「动情」也用改过的。
-    const custom = [{ label: '委屈', words: [], tags: 'downcast eyes, trembling lips' }, { label: '动情', words: [], tags: 'soft gaze', alwaysTags: true }];
+    // 自己改过的 tag 替换预设（开着「固定加上」才放），NSFW 下的「动情」也用改过的。
+    const custom = [{ label: '委屈', words: [], tags: 'downcast eyes, trembling lips', alwaysTags: true }, { label: '动情', words: [], tags: 'soft gaze', alwaysTags: true }];
     assert.match(charText(applyMoodToCaption(charCaption('1girl'), '委屈', { groups: custom })), /^downcast eyes, trembling lips/);
     assert.match(charText(applyMoodToCaption(written, '动情', { groups: custom, nsfw: true })), /^soft gaze/);
     assert.deepEqual(resolveMoodExpressionTags('动情', [], { nsfw: true }), { tags: moodPresetTags('动情', { nsfw: true }), always: false });
-    // 自建组没有预设，填了 tag 才会用。
+    // 自建组没有预设，填了 tag 并打开「固定加上」才会用。
     const bare = charCaption('1girl');
     assert.equal(applyMoodToCaption(bare, '发呆'), bare, '自建组没填 tag 就不动');
-    assert.match(charText(applyMoodToCaption(charCaption('1girl'), '发呆', { groups: [{ label: '发呆', words: [], tags: 'blank stare' }] })), /^blank stare/);
+    assert.equal(applyMoodToCaption(bare, '发呆', { groups: [{ label: '发呆', words: [], tags: 'blank stare' }] }), bare, '填了 tag 但没打开固定加上也不动');
+    assert.match(charText(applyMoodToCaption(charCaption('1girl'), '发呆', { groups: [{ label: '发呆', words: [], tags: 'blank stare', alwaysTags: true }] })), /^blank stare/);
 });
 
 test('gate:expression-tags:group-settings-survive-normalize-and-merge', () => {
