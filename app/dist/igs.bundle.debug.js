@@ -14360,7 +14360,7 @@ function createIgsReaderHost(options = {}) {
             const sourceNotes = {
                 nai: '使用你的NAI Key直接生成剧情CG、素材和重画。',
                 dbgen: '提示词、画师串和NAI Key在数据库生图插件里设置。',
-                extension: '画风沿用智绘姬；填了NAI Key时失败会改用NAI。',
+                extension: '画风和尺寸沿用智绘姬，场景背景按IGS的背景尺寸出图；填了NAI Key时失败会改用NAI。',
                 baibai: '后端与画风沿用柏宝绘；填了NAI Key时失败会改用NAI。',
             };
             const contentNotes = {
@@ -45777,6 +45777,8 @@ function createImageBackend({ nai, getBridge, global: globalObject = globalThis,
         return { ok: true, via: 'baibai', dataUrl: result.dataUrl, prompt: promptFromText(result.prompt, '') };
     }
 
+    // 场景背景（meta.background）带上 IGS 的背景尺寸：智绘姬常设成竖的立绘尺寸，不带就会出竖图背景。
+    // 剧情 CG、立绘与物品图照旧沿用智绘姬自己设的尺寸。
     async function viaChatu8(slot, naiSettings, meta = {}) {
         const fallback = (reason) => naiFallback(slot, naiSettings, reason);
         const host = findChatu8();
@@ -45784,7 +45786,8 @@ function createImageBackend({ nai, getBridge, global: globalObject = globalThis,
         const floorTag = await pluginFloorTag('chatu8', CHATU8_LABEL, meta);
         const prompt = floorTag ? floorTag.tag : buildChatu8Prompt(slot);
         if (!prompt) return { ok: false, error: `没有可交给${CHATU8_LABEL}的提示词` };
-        const result = await requestChatu8(host, prompt);
+        const size = meta.background === true ? parseSize(naiSettings && naiSettings.size) : null;
+        const result = await requestChatu8(host, prompt, size || {});
         if (!result || !result.ok) return fallback((result && result.error) || `${CHATU8_LABEL}出图失败`);
         try {
             return { ok: true, via: 'chatu8', dataUrl: await chatu8ImageToDataUrl(result.imageData, host.win || globalObject), prompt: promptFromText(prompt, '') };
@@ -46147,6 +46150,7 @@ function nextRequestId() {
 
 // 发一次出图请求并等待同 id 的回执。结果：{ ok: true, imageData } 或 { ok: false, reason, error }。
 // imageData 原样返回（可能是 data URL、blob URL 或同源路径），转换由调用方负责。
+// options.width / height：请求里带上宽高时，智绘姬的 NovelAI / SD / ComfyUI / RunningHub 出图优先用它，不带就用智绘姬自己设的尺寸。
 function requestChatu8Image(host, prompt, options = {}) {
     const text = String(prompt || '').trim();
     if (!host || !host.eventSource) return Promise.resolve({ ok: false, reason: 'chatu8-missing', error: '未检测到智绘姬' });
@@ -46156,6 +46160,9 @@ function requestChatu8Image(host, prompt, options = {}) {
     const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : CHATU8_DEFAULT_TIMEOUT_MS;
     const setTimer = typeof options.setTimeout === 'function' ? options.setTimeout : globalThis.setTimeout;
     const clearTimer = typeof options.clearTimeout === 'function' ? options.clearTimeout : globalThis.clearTimeout;
+    const width = Number(options.width);
+    const height = Number(options.height);
+    const size = width > 0 && height > 0 ? { width, height } : null;
 
     return new Promise((resolve) => {
         let settled = false;
@@ -46189,7 +46196,7 @@ function requestChatu8Image(host, prompt, options = {}) {
         if (timer && typeof timer.unref === 'function') timer.unref();
         try {
             // 酒馆 eventSource.emit 返回 Promise；监听器抛错时同样按失败收尾。
-            const pending = eventSource.emit(CHATU8_REQUEST_EVENT, { id, prompt: text });
+            const pending = eventSource.emit(CHATU8_REQUEST_EVENT, { id, prompt: text, ...size });
             if (pending && typeof pending.catch === 'function') {
                 pending.catch((error) => fail('chatu8-failed', `智绘姬出图失败：${(error && error.message) || error}`));
             }
@@ -76679,6 +76686,7 @@ function createAssetGenerationService(deps) {
             messageId: floor.messageId, size, description: buildDbgenAssetDescription(item.need), userPrompts,
             skipRecall: true,
             ...(isSprite && { transparent: bg.transparent }),
+            ...(!isSprite && { background: true }),
         };
         // 立绘走内置 NAI 时画师串排在最前，里面的底色标签也去掉，底色只留「立绘底色」那一组。
         const naiSettings = { ...s.auto.nai, size, ...(isSprite && { artistPrefix: dropBackgroundTags(s.auto.nai.artistPrefix) }) };
@@ -76728,7 +76736,7 @@ function createAssetGenerationService(deps) {
         } else {
             let result;
             try {
-                result = await nai.generateDbgenCaption({ caption, size: backgroundSize(s), seed: randomSeed() });
+                result = await nai.generateDbgenCaption({ caption, size: backgroundSize(s), seed: randomSeed(), background: true });
             } catch (error) {
                 result = { ok: false, error: `出图失败：${(error && error.message) || error}` };
             }
@@ -77304,7 +77312,7 @@ function createAssetGenerationService(deps) {
             }
             let painted;
             try {
-                painted = await nai.generateDbgenCaption({ caption, size: backgroundSize(s), seed });
+                painted = await nai.generateDbgenCaption({ caption, size: backgroundSize(s), seed, background: true });
             } catch (error) {
                 painted = { ok: false, error: (error && error.message) || '出图失败' };
             }
