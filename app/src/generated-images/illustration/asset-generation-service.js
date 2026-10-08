@@ -11,7 +11,7 @@ import { supportsNaiTransparentBackground } from '../request-builders/nai-v4-bui
 import { collectAssetNeeds, tempAssetKeyOf, GENERATED_ASSET_URL_PREFIX, generatedAssetIdOf, isGeneratedAssetUrl } from '../../scene/asset-match.js';
 import { floorKeyOf } from '../../media/illustration-store.js';
 import { GENERATED_IMAGE_SCHEMA_VERSION, isLegacyGeneratedImage, isQuotaError, normalizeGeneratedImageRecord } from '../../media/generated-asset-store.js';
-import { dropBackgroundTags, buildCharacterAvatarDescription, buildCharacterSpriteDescription, buildDbgenAssetDescription, buildDbgenBackgroundBatchDescription, buildDbgenSpriteBatchDescription, buildExpressionDiffDescription, buildWardrobeClothingDescription, nsfwClothingBoostLine, applyCharacterDnaToCaption, applyLookToCaption, applyMoodToCaption, expressionLookTags, expressionPaintDna, expressionSpritePrompts, splitExpressionWriteBatches, splitWriteBatches, uprightSpriteCaption } from '../dbgen-prompt.js';
+import { dropBackgroundTags, buildCharacterAvatarDescription, buildCharacterSpriteDescription, buildDbgenAssetDescription, buildDbgenBackgroundBatchDescription, buildDbgenSpriteBatchDescription, buildExpressionDiffDescription, buildWardrobeClothingDescription, nsfwClothingBoostLine, applyCharacterDnaToCaption, applyLookToCaption, applyMoodToCaption, expressionLookTags, expressionPaintDna, expressionSpritePrompts, splitExpressionWriteBatches, splitWriteBatches, uprightSpriteCaption, applyPregnancyToCaption, outfitPregnancyMonth } from '../dbgen-prompt.js';
 import { normalizeStoredPrompt, promptFromCaption } from '../generation-prompt.js';
 import { promptTimeBucket, sceneVariantCaption, sceneVariantTags } from '../scene-variant-tags.js';
 import { sceneTimeBucket } from '../../scene/time-bucket.js';
@@ -987,11 +987,11 @@ export function createAssetGenerationService(deps) {
         };
     }
 
-    // 标签顺序：DNA → 表情 → 衣服与长相 → 写词结果。exact：用户改过的词原样出图，不硬合，新图继续记为「改过」。
-    async function paintExpressionCaption(name, mood, caption, dna, { look = '', seed, nsfw = false, exact = false } = {}) {
+    // 标签顺序：DNA → 孕期肚子 → 表情 → 衣服与长相 → 写词结果。exact：用户改过的词原样出图，不硬合，新图继续记为「改过」。
+    async function paintExpressionCaption(name, mood, caption, dna, { look = '', seed, nsfw = false, exact = false, pregnancy = 0 } = {}) {
         // 情绪组的 tag 设置从当前素材库读；只有打开「固定加上」的组才会放。
         const groups = readSettings().sceneAssets.moodGroups;
-        const upright = exact ? caption : (uprightSpriteCaption(applyCharacterDnaToCaption(applyMoodToCaption(applyLookToCaption(caption, look), mood, { nsfw, groups }), dna)) || caption);
+        const upright = exact ? caption : (uprightSpriteCaption(applyCharacterDnaToCaption(applyPregnancyToCaption(applyMoodToCaption(applyLookToCaption(caption, look), mood, { nsfw, groups }), pregnancy), dna)) || caption);
         const meta = expressionPaintMeta();
         let painted;
         try {
@@ -1037,6 +1037,7 @@ export function createAssetGenerationService(deps) {
             look: expressionLookTags(basePrompt, outfit),
             seed: randomSeed(),
             nsfw: nsfw === true,
+            pregnancy: outfitPregnancyMonth(outfit),
         };
         const paintDna = expressionPaintDna(dna, outfit);
         const stopped = () => Boolean(signal && signal.aborted);
@@ -1118,7 +1119,7 @@ export function createAssetGenerationService(deps) {
         const list = (Array.isArray(items) ? items : []).filter((item) => item && item.mood && item.caption);
         if (!list.length) return { ok: false, error: '没有写好词、还没出图的表情' };
         if (!nai || typeof nai.generateDbgenCaption !== 'function') return { ok: false, error: '当前图像来源不能出图' };
-        const paint = { look: expressionLookTags(basePrompt, outfit), seed: randomSeed(), nsfw: nsfw === true };
+        const paint = { look: expressionLookTags(basePrompt, outfit), seed: randomSeed(), nsfw: nsfw === true, pregnancy: outfitPregnancyMonth(outfit) };
         const paintDna = expressionPaintDna(dna, outfit);
         const stopped = () => Boolean(signal && signal.aborted);
         const results = [];
@@ -1142,7 +1143,7 @@ export function createAssetGenerationService(deps) {
         if (caption) {
             reportExpressionProgress(onProgress, { phase: 'paint', done: 1, total: 1, mood: label });
             const look = expressionLookTags(basePrompt, outfit);
-            const item = await paintExpressionCaption(name, label, caption, expressionPaintDna(dna, outfit), { look, seed: randomSeed(), nsfw: nsfw === true, exact: exact === true });
+            const item = await paintExpressionCaption(name, label, caption, expressionPaintDna(dna, outfit), { look, seed: randomSeed(), nsfw: nsfw === true, exact: exact === true, pregnancy: outfitPregnancyMonth(outfit) });
             return { ok: true, items: [item] };
         }
         return generateExpressionSet({ name, basePrompt, moods: [label], dna, outfit, note, nsfw, world, onProgress });
@@ -1230,13 +1231,15 @@ export function createAssetGenerationService(deps) {
     // 设置页主动出一张默认立绘：先让 LLM 写提示词，再出图，不经过楼内补图。
     // 格子里已有图的「重新生成」带着那张图的 caption 进来：不写词，换一颗新种子直接画。
     // world 是世界观与世界设定提要；sourcesText 是角色卡 / 世界书 / 数据库里这个角色的节选，只补 DNA 没写到的。
-    async function generateCharacterSprite({ name, dna, nude = false, note = '', caption, exact = false, world = null, sourcesText = '', onProgress } = {}) {
+    // outfitName：给某一套服装画底图时（「裸体-孕晚期」的裸体立绘）传进来，服装名里的身体状态照样生效。
+    async function generateCharacterSprite({ name, dna, nude = false, note = '', caption, exact = false, world = null, sourcesText = '', outfitName = '', onProgress } = {}) {
         const who = String(name || '').trim();
         if (!who) return { ok: false, error: '没有角色' };
+        const pregnancy = outfitPregnancyMonth({ name: outfitName });
         if (caption) {
             if (!nai || typeof nai.generateDbgenCaption !== 'function') return { ok: false, error: '当前图像来源不能画立绘' };
             reportExpressionProgress(onProgress, { phase: 'paint', done: 1, total: 1, mood: '默认' });
-            const repainted = await paintExpressionCaption(who, '默认', caption, dna, { seed: randomSeed(), exact: exact === true });
+            const repainted = await paintExpressionCaption(who, '默认', caption, dna, { seed: randomSeed(), exact: exact === true, pregnancy });
             if (!repainted.ok) return { ok: false, error: repainted.error || '出图失败', prompt: repainted.prompt };
             return { ok: true, imageId: repainted.imageId, prompt: repainted.prompt };
         }
@@ -1247,7 +1250,7 @@ export function createAssetGenerationService(deps) {
         let written;
         try {
             const withMaterial = await writingMaterial(characterNamesOf(who, readSettings()), SPRITE_MATERIAL_GUIDE(who));
-            written = await nai.writeDbgenPrompt({ description: withMaterial(buildCharacterSpriteDescription(who, dna, { nude: nude === true, note, world, sourcesText })) });
+            written = await nai.writeDbgenPrompt({ description: withMaterial(buildCharacterSpriteDescription(who, dna, { nude: nude === true, note, world, sourcesText, outfitName })) });
         } catch (error) {
             return { ok: false, error: (error && error.message) || '写提示词失败' };
         }
@@ -1255,7 +1258,7 @@ export function createAssetGenerationService(deps) {
             return { ok: false, error: (written && written.error) || '写提示词失败' };
         }
         reportExpressionProgress(onProgress, { phase: 'paint', done: 1, total: 1, mood: '默认' });
-        const painted = await paintExpressionCaption(who, '默认', written.caption, dna);
+        const painted = await paintExpressionCaption(who, '默认', written.caption, dna, { pregnancy });
         if (!painted.ok) return { ok: false, error: painted.error || '出图失败', prompt: painted.prompt };
         return { ok: true, imageId: painted.imageId, prompt: painted.prompt };
     }

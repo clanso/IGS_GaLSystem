@@ -7,7 +7,7 @@ import {
     buildDictionaryBackgroundTags,
 } from './prompt-kit.js';
 import { buildCharacterDnaPromptParts, mergePromptTags } from '../../scene/character-dna.js';
-import { dropMatchingTags, withOnlyBackground, worldContextLines } from '../dbgen-prompt.js';
+import { SPRITE_LASTING_STATE_LINE, dropMatchingTags, withOnlyBackground, worldContextLines } from '../dbgen-prompt.js';
 
 const ASSET_TASK = [
     '任务：阅读视觉小说正文，为「需要生成的素材」清单里的每一项写英文 tag。素材分两类：',
@@ -72,6 +72,7 @@ export function buildAssetPlannerUserPrompt({ needs = [], readableText = '', pre
         material ? `【设定资料】下面是角色卡、世界书和数据库的全部设定（每段开头标了出处），地点和角色的样子都以这些设定和正文为准。\n${material}` : '',
         `【需要生成的素材】\n${listed.join('\n')}`,
         worldLines.length ? `【世界观】\n${worldLines.join('\n')}` : '',
+        needs.some((need) => need.type === 'sprite') ? `【立绘的身体状态】${SPRITE_LASTING_STATE_LINE}` : '',
         needs.some((need) => need.type === 'sprite' && need.dna)
             ? '【角色 DNA】标注了固定身份或默认外观的立绘，tags 不得改变这些特征，只补充正文中额外交代的内容。' : '',
         lore.length

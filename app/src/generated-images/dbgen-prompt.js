@@ -1,4 +1,5 @@
 import { moodHasNsfwVariant, moodPresetUse, resolveMoodExpressionTags } from '../scene/mood-groups.js';
+import { PREGNANCY_TAG_RE, TRANSIENT_STATE_TAG_RE, pregnancyGuideText, pregnancyMonthOf, pregnancyTagsOf, splitOutfitState } from '../scene/body-state.js';
 
 // 楼内补立绘一次最多写 8 份，超过则平分 2 批。
 export const EXPRESSION_WRITE_BATCH_MAX = 8;
@@ -128,17 +129,73 @@ function moodSceneLines(moods, nsfw) {
     return lines.length ? ['各份表情用在什么场面（只说场面，怎么做按这个角色来）：', ...lines] : [];
 }
 
+// 立绘会在很多场合反复用：只画长期的身体状态，一会儿就过去的不画。
+const LASTING_STATE_TEXT = '怀孕，或者烧伤、大片伤疤、打着石膏、缠着绷带的重伤、截肢这类严重的伤';
+const TRANSIENT_STATE_TEXT = '出汗、湿身、湿发贴在身上、头发凌乱、脸红、泪痕、喘气、身上沾的污渍';
+export const SPRITE_LASTING_STATE_LINE = `立绘会在很多场合反复用，身体状态只画长期的：${LASTING_STATE_TEXT}。${TRANSIENT_STATE_TEXT}这类一会儿就过去的状态不要画。怀孕按孕期写肚子大小：${pregnancyGuideText()}。`;
+
+// 服装名「薄睡袍-孕晚期」后半段的状态：怀孕认得出孕月时肚子由程序加（applyPregnancyToCaption），写词不要再写；
+// 其他状态（烧伤之类）交给写词，每一份都画。
+export function outfitStateLines(outfitName) {
+    const { state } = splitOutfitState(outfitName);
+    if (!state) return [];
+    const month = pregnancyMonthOf(state);
+    if (!month) return [`这一套的身体状态是「${state}」：每一份都要画出来，各份写法一致。`];
+    const tags = pregnancyTagsOf(month);
+    return [tags
+        ? `这一套是「${state}」（约孕${month}月）：肚子由程序按孕期统一加上（${tags}），你不要再写 pregnant、belly 这类词。`
+        : `这一套是「${state}」（约孕${month}月）：肚子还看不出来，不要写 pregnant、belly 这类词。`];
+}
+
+// 给写词看的样板（已有立绘、分批的第一份）去掉临时状态；这一套由程序按孕期加肚子时，怀孕的词也去掉。
+function lastingStateCaption(caption, enforcedPregnancy) {
+    const enforced = enforcedPregnancy > 0;
+    return filterCaptionTags(caption, (key) => !TRANSIENT_STATE_TAG_RE.test(key) && !(enforced && PREGNANCY_TAG_RE.test(key)));
+}
+
+// 按标签键过滤正面 caption（base 和各角色块），负面不动。
+function filterCaptionTags(caption, keep) {
+    const pos = caption && caption.v4_prompt && caption.v4_prompt.caption;
+    if (!pos) return caption;
+    const filter = (text) => splitTags(text).filter((tag) => keep(tagKey(tag))).join(', ');
+    const chars = Array.isArray(pos.char_captions) ? pos.char_captions : [];
+    return {
+        ...caption,
+        v4_prompt: {
+            ...caption.v4_prompt,
+            caption: {
+                ...pos,
+                base_caption: filter(pos.base_caption),
+                char_captions: chars.map((item) => ({ ...(item && typeof item === 'object' ? item : {}), char_caption: filter(item && item.char_caption) })),
+            },
+        },
+    };
+}
+
+// 服装名写了孕期（「薄睡袍-孕晚期」）时的孕月；没写或认不出为 0。
+export function outfitPregnancyMonth(outfit) {
+    return outfit && typeof outfit === 'object' ? pregnancyMonthOf(splitOutfitState(outfit.name).state) : 0;
+}
+
+// 这一套按孕期定了肚子大小：去掉写词结果里自带的怀孕、肚子词，换成对照表里的那组（孕 1–3 月只去不加）。
+export function applyPregnancyToCaption(caption, month) {
+    if (!(Number(month) > 0)) return caption;
+    const cleared = filterCaptionTags(caption, (key) => !PREGNANCY_TAG_RE.test(key));
+    return prependCharTags(cleared, pregnancyTagsOf(month));
+}
+
 // note 是用户这次临时补的要求（性格、某个情绪的特别表现），只影响写词这一步；
 // nsfw 为 true 时「动情」改用它在 NSFW 下的动作说明。
-// anchor：同一组表情分批写时，前面一批写好的一份；后面的批次外貌、服装和身体状态照它，整组才一致。
+// anchor：同一组表情分批写时，前面一批写好的一份；后面的批次外貌、服装和长期身体状态照它，整组才一致。
 export function buildExpressionDiffDescription(name, prompt, labels, dna, outfit, { note = '', nsfw = false, world = null, anchor = null } = {}) {
     const moods = (Array.isArray(labels) ? labels : []).map((item) => String(item || '').trim()).filter(Boolean);
     const persona = String((dna && typeof dna === 'object' && dna.persona) || '').trim();
     const stored = prompt && typeof prompt === 'object' ? prompt : {};
-    const caption = formatReturnedCaption(stored.caption);
-    const anchored = formatReturnedCaption(anchor);
     const clothes = outfit && typeof outfit === 'object' ? outfit : null;
     const outfitName = clothes ? String(clothes.name || '').trim() : '';
+    const statedMonth = outfitPregnancyMonth(clothes);
+    const caption = formatReturnedCaption(lastingStateCaption(stored.caption, statedMonth));
+    const anchored = formatReturnedCaption(lastingStateCaption(anchor, statedMonth));
     const words = clothes && Array.isArray(clothes.words)
         ? clothes.words.map((item) => String(item || '').trim()).filter(Boolean)
         : [];
@@ -168,8 +225,10 @@ export function buildExpressionDiffDescription(name, prompt, labels, dna, outfit
         clothesLine,
         clothes && clothes.nsfwBoost && !nude ? nsfwClothingBoostLine('character') : '',
         clothesPrompt ? `服装提示词：\n${clothesPrompt}` : '',
-        anchored ? `这一组表情分几次写，下面是前面已经写好的一份。外貌、服装和身体状态要和它完全一致，只有表情和动作按各自的情绪重写：\n${anchored}` : '',
-        '正文和资料里写着的这个角色现在的身体状态（例如怀孕、受伤包扎、湿身），每一份都要写上，各份写法一致；这不算改长相。',
+        anchored ? `这一组表情分几次写，下面是前面已经写好的一份。外貌、服装和长期身体状态要和它完全一致，只有表情和动作按各自的情绪重写：\n${anchored}` : '',
+        `正文和资料里写着的长期身体状态（${LASTING_STATE_TEXT}），每一份都要写上，各份写法一致；这不算改长相。${statedMonth ? '' : `怀孕按孕期写肚子大小：${pregnancyGuideText()}。`}`,
+        `${TRANSIENT_STATE_TEXT}这类一会儿就过去的状态不要当成身体状态每份都写；某个表情本身要的（哭泣的眼泪、害羞的脸红、紧张的汗珠）只写在那一份里。`,
+        ...outfitStateLines(outfitName),
         ...worldContextLines(world),
         '每个表情都按这个角色自己的性格、脾气和说话做事的习惯来写，不要套统一的表情模板。',
         persona ? `「${name || ''}」的性格与表情习惯（据此决定每个表情怎么做、做到多大；只管表情和动作，不要据此改长相和衣服）：\n${persona}` : '',
@@ -296,6 +355,8 @@ export function buildCharacterSpriteDescription(name, dna, options) {
         ...worldContextLines(options && options.world),
         '规格：大腿以上（cowboy shot）。朝向正面，直立，平视。禁止全身，禁止露出脚，禁止侧身，禁止倾斜构图。',
         SPRITE_DAILY_POSE_LINE,
+        SPRITE_LASTING_STATE_LINE,
+        ...outfitStateLines(options && options.outfitName),
         note ? `这次额外的要求：\n${note}` : '',
         SPRITE_NO_BACKGROUND_LINE,
         ...characterDnaLines(name, dna),
@@ -313,6 +374,7 @@ export function buildCharacterAvatarDescription(name, dna, { world = null, sourc
         '肩膀以下绝对不要出现：不画胸口以下的身体，不画腰、腿、脚，也不要画手。',
         '发色、瞳色、发型和头上的饰品按下面的角色设定来画，不能改；肩颈处的衣领按角色日常服装画一点即可。',
         '纯色浅底，不要背景，不要文字。',
+        `头像会一直挂着，${TRANSIENT_STATE_TEXT}这类一会儿就过去的状态不要画。`,
         ...characterDnaLines(name, dna),
         ...characterSourceLines(name, sourcesText),
         '只写一份，slotid 为 1。',
@@ -366,6 +428,7 @@ export function buildDbgenSpriteBatchDescription(needs = [], options = {}) {
         profiles.length ? '角色外貌与服装依据正文补充；下面列了设定的角色，长相按设定写。' : '角色外貌与服装依据正文补充。',
         ...profiles,
         SPRITE_DAILY_POSE_LINE,
+        SPRITE_LASTING_STATE_LINE,
         SPRITE_NO_BACKGROUND_LINE,
         '不要写生成点，不要从正文摘挂载句。',
     ].join('\n');
@@ -401,6 +464,7 @@ export function buildDbgenAssetDescription(need = {}) {
             '角色外貌与服装依据正文补充。',
             SPRITE_NO_BACKGROUND_LINE,
             SPRITE_DAILY_POSE_LINE,
+            SPRITE_LASTING_STATE_LINE,
             ...characterDnaLines(need.name, need.dna),
             ...characterSourceLines(need.name, need.sources),
         ].join('\n');
@@ -502,8 +566,9 @@ export function expressionLookTags(basePrompt, outfit) {
     const clothesPrompt = clothes ? String(clothes.prompt || '').trim() : '';
     if (clothesPrompt) return dnaEnglishTags(clothesPrompt).join(', ');
     if (clothes && !clothes.ownImage) return '';
+    // 原装那张画的时候出汗、湿身之类的临时状态不跟到别的表情里。
     return splitTags(storedCharTags(basePrompt))
-        .filter((tag) => !isExpressionPoseTag(tag) && !LOOK_SKIP_TAGS.has(tagKey(tag)) && !isBackgroundTag(tag))
+        .filter((tag) => !isExpressionPoseTag(tag) && !LOOK_SKIP_TAGS.has(tagKey(tag)) && !isBackgroundTag(tag) && !TRANSIENT_STATE_TAG_RE.test(tagKey(tag)))
         .join(', ');
 }
 

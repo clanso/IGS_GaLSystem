@@ -1,4 +1,4 @@
-import { BUILTIN_NUDE_OUTFIT, isBuiltinNudeOutfit, isValidOutfitName, isValidOutfitWord, normalizeWardrobe, OUTFIT_RESET } from '../../scene/character-outfits.js';
+import { BUILTIN_NUDE_OUTFIT, isBuiltinNudeOutfit, isValidOutfitName, isValidOutfitWord, normalizeWardrobe, OUTFIT_RESET, stateOutfitWardrobe } from '../../scene/character-outfits.js';
 import { normalizeMoodGroups } from '../../scene/mood-groups.js';
 import { classifySceneKey } from '../../scene/scene-directives.js';
 import { clearOutfitReview, loadOutfitReview, removeOutfitReview } from '../../scene/outfit-review-store.js';
@@ -95,7 +95,8 @@ function createOutfit(ctx, charName, outfits, name) {
     if (!isValidOutfitName(name)) { warn(ctx, `「${name}」不能用作服装名（不能为空、「默认」或含 | ] 换行）`); return false; }
     const owner = outfitTokenOwner(outfits, name);
     if (owner) { warn(ctx, owner === name ? `「${charName}」已有服装「${name}」（同名）` : `「${name}」已是服装「${owner}」的词`); return false; }
-    outfits[name] = isBuiltinNudeOutfit(name) ? { words: [], moods: {}, wardrobe: BUILTIN_NUDE_OUTFIT } : { words: [], moods: {} };
+    const wardrobe = isBuiltinNudeOutfit(name) ? BUILTIN_NUDE_OUTFIT : stateOutfitWardrobe(outfits, name);
+    outfits[name] = wardrobe ? { words: [], moods: {}, wardrobe } : { words: [], moods: {} };
     return true;
 }
 

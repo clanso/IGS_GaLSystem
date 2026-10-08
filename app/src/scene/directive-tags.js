@@ -1,3 +1,5 @@
+import { splitOutfitState } from './body-state.js';
+
 // igs 行内指令名的唯一登记点：分段、正文清洗、DOM 对比与聊天块收口都从这里构造正则，
 // 新增指令只改这一处，避免标签漏进正文。聊天标签（igs-chat/msg）是块级结构，由 chat-blocks 单独处理。
 export const IGS_INLINE_DIRECTIVE_NAMES = Object.freeze(['scene', 'char', 'thought', 'img', 'fx']);
@@ -63,13 +65,24 @@ const OUTFIT_FIELDS = '\\[igs-(char|thought):([^|\\]\\n]+)\\|([^|\\]\\n]*)\\|([^
 const OUTFIT_DIRECTIVE_AT_RE = new RegExp(`^${OUTFIT_FIELDS}(?:\\]|$)`);
 const OUTFIT_DIRECTIVE_GLOBAL_SOURCE = `${OUTFIT_FIELDS}(\\]|$)`;
 const OUTFIT_LIKE_RE = /^[^\s，。！？、；：,.!?;:…—~～「」『』“”"'（）()《》<>*]{1,12}$/u;
+const OUTFIT_STATE_LIKE_RE = /^[^\s，。！？、；：,.!?;:…—~～「」『』“”"'（）()《》<>*\-－]{1,8}$/u;
 // 显示用：对白内残留的半角竖线换成全角，交给只认三栏的格式化正则时不再被当作分隔符。
 const DISPLAY_BAR = '｜';
 
+// 「服装名-状态」（薄睡袍-孕晚期）：两段分开算长度，服装名最多 12 字、状态最多 8 字。
+function isOutfitLike(token) {
+    if (OUTFIT_LIKE_RE.test(token)) return true;
+    const { base, state } = splitOutfitState(token);
+    return Boolean(state) && OUTFIT_LIKE_RE.test(base) && OUTFIT_STATE_LIKE_RE.test(state);
+}
+
+// 未登记的「服装名-状态」前半段是已登记服装时，先按那套显示（还没建这一套前不退回原装），同时照常记入待确认。
 function classifyOutfitField(outfitResolver, character, token) {
     const outfit = outfitResolver(character, token);
     if (outfit) return { kind: 'outfit', outfit };
-    return OUTFIT_LIKE_RE.test(token) ? { kind: 'unknown' } : { kind: 'text' };
+    if (!isOutfitLike(token)) return { kind: 'text' };
+    const { base, state } = splitOutfitState(token);
+    return { kind: 'unknown', outfit: state ? outfitResolver(character, base) : '' };
 }
 
 export function matchOutfitDirectiveAt(text, outfitResolver) {
@@ -81,7 +94,7 @@ export function matchOutfitDirectiveAt(text, outfitResolver) {
     const field = classifyOutfitField(outfitResolver, character, token);
     const base = { type: m[1], character, mood: m[3].trim(), outfit: '', raw: m[0] };
     if (field.kind === 'outfit') return { ...base, outfit: field.outfit, text: m[5].trim() };
-    if (field.kind === 'unknown') return { ...base, unknownOutfit: token, text: m[5].trim() };
+    if (field.kind === 'unknown') return { ...base, outfit: field.outfit || '', unknownOutfit: token, text: m[5].trim() };
     return { ...base, text: `${m[4]}|${m[5]}`.trim() };
 }
 
