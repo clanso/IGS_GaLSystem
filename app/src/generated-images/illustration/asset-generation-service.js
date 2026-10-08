@@ -1,5 +1,5 @@
 import { numberParagraphs } from './marker-placer.js';
-import { STANDARD_FLOOR_CHARS, plannerLlmSettings, readPlannerContext, readableText } from './planner-context.js';
+import { STANDARD_FLOOR_CHARS, contextBudgetChars, plannerLlmSettings, readPlannerContext, readableText } from './planner-context.js';
 import { buildAssetPlannerUserPrompt, parseAssetPlan, buildAssetSlot, buildDictionaryAssetItems } from './asset-prompt.js';
 import { requestWithSoftRetry } from './prompt-kit.js';
 import { writeCharacterPersona, writeWorldSummary } from './persona-writer.js';
@@ -520,10 +520,13 @@ export function createAssetGenerationService(deps) {
         const needs = [...backgroundNeeds.filter((need) => !need.variantOf), ...spriteNeeds];
         attachCharacterDna(needs, s.sceneAssets);
         const floorText = numbered.paragraphs.map((p) => p.text).join('\n');
-        const context = needs.length ? plannerContextOf(messageId, s, floorText.length) : { budget: 0, floorChars: STANDARD_FLOOR_CHARS, previousText: '' };
+        // 「读取上下文」加大预算时，规划另附全部设定资料（三成预算），前文相应少读。
+        const budget = contextBudgetChars(s.auto.llm);
+        const settingMaterial = needs.length && budget ? await readSettingMaterial(needs.map((need) => need.name), Math.floor(budget * 0.3)) : '';
+        const context = needs.length ? plannerContextOf(messageId, s, floorText.length, settingMaterial.length) : { budget: 0, floorChars: STANDARD_FLOOR_CHARS, previousText: '' };
         await attachSources(needs, context.budget > 0);
         attachFloorExcerpts(needs, numbered);
-        // 前文里更早提到这些地点 / 角色的段落另挂进 need.sources：标准长度时只附【前文摘要】里没有的；
+        // 前文里更早提到这些地点 / 角色的段落另挂进 need.sources：标准长度时只附【前文（原文，从早到近）】里没有的；
         // 加大预算时前文整段都读了，照样附上，帮副 LLM 对准。
         attachMentions(needs, needs.length ? readHistory(messageId) : [], context.budget ? '' : context.previousText);
         if (!needs.length && !variantNeeds.length) {
@@ -560,7 +563,7 @@ export function createAssetGenerationService(deps) {
                 plan = await requestWithSoftRetry(llm, {
                     system: s.auto.llm.prompts.asset,
                     softSystem: s.auto.llm.prompts.assetSoft,
-                    user: buildAssetPlannerUserPrompt({ needs, readableText: floorText.slice(0, context.floorChars), previousText: context.previousText, world: worldContextOf(s.sceneAssets) }),
+                    user: buildAssetPlannerUserPrompt({ needs, readableText: floorText.slice(0, context.floorChars), previousText: context.previousText, settingMaterial, world: worldContextOf(s.sceneAssets) }),
                     parse: (reply) => parseAssetPlan(reply, needs),
                 }, plannerLlmSettings(s.auto.llm));
             } catch (error) {
@@ -680,13 +683,45 @@ export function createAssetGenerationService(deps) {
         }
     }
 
-    // 本楼正文读多少、前文读哪些（见 planner-context）；读不到前文就当没有。
-    function plannerContextOf(messageId, s, floorLength) {
+    // 本楼正文读多少、前文读哪些（见 planner-context）；读不到前文就当没有。reserved：同一份提示词里设定资料占的字数。
+    function plannerContextOf(messageId, s, floorLength, reserved = 0) {
         try {
-            return readPlannerContext(messageHost, messageId, s.auto.llm, floorLength);
+            return readPlannerContext(messageHost, messageId, s.auto.llm, floorLength, reserved);
         } catch (error) {
             return { budget: 0, floorChars: STANDARD_FLOOR_CHARS, previousText: '' };
         }
+    }
+
+    // 全部设定资料（宿主读：整张角色卡、所有世界书含全局、数据库），提到 names 的排前面，最多 limit 字。
+    async function readSettingMaterial(names, limit) {
+        if (!(limit > 0) || typeof deps.readSettingMaterial !== 'function') return '';
+        try {
+            return String((await deps.readSettingMaterial(names, { limit })) || '').trim();
+        } catch (error) {
+            return '';
+        }
+    }
+
+    const characterNamesOf = (name, s) => {
+        const aliases = s.sceneAssets.characterAliases && Array.isArray(s.sceneAssets.characterAliases[name]) ? s.sceneAssets.characterAliases[name] : [];
+        return [name, ...aliases];
+    };
+    const SPRITE_MATERIAL_GUIDE = (name) => `下面先给出这个故事的设定资料（角色卡、世界书、数据库）和正文原文，供你把「${name}」画准：长相、身材和固定特征以后面说明里的角色设定（DNA）为准；设定没写到的，按资料和正文里对「${name}」的描写补；穿着、发型、配饰后面说明指定了就照说明，没指定的按正文里最近的样子。资料和正文里的剧情、其他角色不要画进去。`;
+    const EXPRESSION_MATERIAL_GUIDE = (name) => `下面先给出这个故事的设定资料（角色卡、世界书、数据库）和正文原文：「${name}」每个表情的幅度和方式，照正文里这个角色说话做事的样子来定。长相和衣服按后面的说明，不要按正文改；资料和正文里的剧情、其他角色不要画进去。`;
+
+    // 设置页写立绘 / 头像 / 表情差分：「读取上下文」加大预算时，说明前面附上全部设定资料（四成预算）
+    // 和正文原文（连用户发言，从最新往前读满剩下的预算）。标准长度、或者走数据库生图插件（它自己读上下文）时原样返回。
+    async function writingMaterial(names, guide) {
+        const s = readSettings();
+        const budget = contextBudgetChars(s.auto.llm);
+        const backend = nai && typeof nai.describe === 'function' ? nai.describe() : {};
+        const unchanged = (description) => description;
+        if (!budget || backend.ownPrompts) return unchanged;
+        const setting = await readSettingMaterial(names, Math.floor(budget * 0.4));
+        const story = plannerContextOf(Number.POSITIVE_INFINITY, s, 0, setting.length).previousText;
+        if (!setting && !story) return unchanged;
+        const prefix = [guide, setting ? `【设定资料】\n${setting}` : '', story ? `【正文（原文，从早到近）】\n${story}` : ''].filter(Boolean).join('\n\n');
+        return (description) => `${prefix}\n\n【这次要写的】\n${description}`;
     }
 
     // 本楼之前最近 MENTION_FLOORS 层 AI 楼的正文（去掉标签），旧的在前。读不到就当没有前文。
@@ -700,7 +735,7 @@ export function createAssetGenerationService(deps) {
     }
 
     // 长相、穿着、地点的样子常在好几层前写过：前文里提到这个名字的段落挂到 need.sources 末尾，
-    // 已经在【前文摘要】里的不重复，超长时留最近的。
+    // 已经在【前文（原文，从早到近）】里的不重复，超长时留最近的。
     function attachMentions(needs, history, shownText) {
         const paragraphs = history.flatMap((text) => text.split('\n')).map((line) => line.trim()).filter(Boolean);
         for (const need of needs) {
@@ -878,6 +913,8 @@ export function createAssetGenerationService(deps) {
         };
         const paintDna = expressionPaintDna(dna, outfit);
         const stopped = () => Boolean(signal && signal.aborted);
+        // 资料和正文每批都一样，只读一次。
+        const withMaterial = await writingMaterial(characterNamesOf(name, readSettings()), EXPRESSION_MATERIAL_GUIDE(name));
         const items = [];
         let painted = 0;
         let writeError = '';
@@ -895,7 +932,7 @@ export function createAssetGenerationService(deps) {
                 let written;
                 try {
                     written = await nai.writeDbgenPrompt({
-                        description: buildExpressionDiffDescription(name, basePrompt, pending, dna, outfit, { note, nsfw: paint.nsfw, world }),
+                        description: withMaterial(buildExpressionDiffDescription(name, basePrompt, pending, dna, outfit, { note, nsfw: paint.nsfw, world })),
                     });
                 } catch (error) {
                     const message = (error && error.message) || '写提示词失败';
@@ -1031,7 +1068,8 @@ export function createAssetGenerationService(deps) {
         reportExpressionProgress(onProgress, { phase: 'write', done: 0, total: 1, mood: '头像' });
         let written;
         try {
-            written = await nai.writeDbgenPrompt({ description: buildCharacterAvatarDescription(who, dna, { world, sourcesText }) });
+            const withMaterial = await writingMaterial(characterNamesOf(who, readSettings()), SPRITE_MATERIAL_GUIDE(who));
+            written = await nai.writeDbgenPrompt({ description: withMaterial(buildCharacterAvatarDescription(who, dna, { world, sourcesText })) });
         } catch (error) {
             return { ok: false, error: (error && error.message) || '写提示词失败' };
         }
@@ -1064,7 +1102,8 @@ export function createAssetGenerationService(deps) {
         reportExpressionProgress(onProgress, { phase: 'write', done: 0, total: 1, mood: '默认' });
         let written;
         try {
-            written = await nai.writeDbgenPrompt({ description: buildCharacterSpriteDescription(who, dna, { nude: nude === true, note, world, sourcesText }) });
+            const withMaterial = await writingMaterial(characterNamesOf(who, readSettings()), SPRITE_MATERIAL_GUIDE(who));
+            written = await nai.writeDbgenPrompt({ description: withMaterial(buildCharacterSpriteDescription(who, dna, { nude: nude === true, note, world, sourcesText })) });
         } catch (error) {
             return { ok: false, error: (error && error.message) || '写提示词失败' };
         }

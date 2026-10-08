@@ -39,7 +39,9 @@ function previousMessages(messageHost, messageId, count) {
 }
 
 // 返回 { budget, floorChars, previousText }：floorChars 是本楼正文最多读几个字。
-export function readPlannerContext(messageHost, messageId, llm, floorLength = 0) {
+// reserved：同一份提示词里另外带的资料（设定资料等）占掉的字数，前文相应少读。
+// 设置页写词没有「本楼」：messageId 传 Infinity，从最新一条往前读。
+export function readPlannerContext(messageHost, messageId, llm, floorLength = 0, reserved = 0) {
     const budget = contextBudgetChars(llm);
     if (!budget) {
         const floors = llm.contextFloors > 0 && typeof messageHost.readPreviousAiTexts === 'function'
@@ -48,7 +50,7 @@ export function readPlannerContext(messageHost, messageId, llm, floorLength = 0)
     }
     // 本楼最多占一半；资料节选另外加，所以前文只用到预算的九成。
     const floorChars = Math.floor(budget / 2);
-    let left = Math.floor(budget * 0.9) - Math.min(floorLength, floorChars);
+    let left = Math.floor(budget * 0.9) - Math.min(floorLength, floorChars) - Math.max(0, reserved);
     const kept = [];
     const messages = previousMessages(messageHost, messageId, Number.MAX_SAFE_INTEGER);
     for (let i = messages.length - 1; i >= 0 && left > 0; i -= 1) {

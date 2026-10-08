@@ -101,22 +101,46 @@ async function readWorldbooks(helper, notes) {
     return books;
 }
 
+// 全局世界书（酒馆里勾选的全局条目，这个聊天也在用）：只给「读取上下文」加大预算时的全部资料用，按名字挑节选时不读。
+async function readGlobalWorldbooks(helper, notes, skip) {
+    if (typeof helper.getGlobalWorldbookNames !== 'function') return [];
+    let names = [];
+    try {
+        names = (helper.getGlobalWorldbookNames() || []).filter((name) => name && !skip.has(name));
+    } catch (error) {
+        notes.push('全局世界书读不到');
+        return [];
+    }
+    const books = [];
+    for (const name of names) {
+        try {
+            books.push({ name, entries: await helper.getWorldbook(name) });
+        } catch (error) {
+            notes.push(`世界书「${name}」读不到`);
+        }
+    }
+    return books;
+}
+
 // 角色卡、世界书、数据库一次读进来，再按名字挑：一层里补好几个角色立绘时不必每人重读世界书。
-export async function readSourceMaterial(globalObject) {
+// withGlobal：连全局世界书一起读（globalBooks），给「读取上下文」加大预算时的全部资料用。
+export async function readSourceMaterial(globalObject, { withGlobal = false } = {}) {
     const notes = [];
     const ctx = getSillyTavernContext(globalObject);
     const card = ctx && ctx.characters && ctx.characterId != null ? ctx.characters[ctx.characterId] : null;
     if (!card) notes.push('当前没有打开单人角色卡');
     const helper = getTavernHelper(globalObject);
     let books = [];
+    let globalBooks = [];
     if (helper && typeof helper.getWorldbook === 'function' && typeof helper.getCharWorldbookNames === 'function') {
         books = await readWorldbooks(helper, notes);
+        if (withGlobal) globalBooks = await readGlobalWorldbooks(helper, notes, new Set(books.map((book) => book.name)));
     } else {
         notes.push('没有找到酒馆助手的世界书接口');
     }
     const api = globalObject && (globalObject.AutoCardUpdaterAPI || (globalObject.top && globalObject.top.AutoCardUpdaterAPI));
     const tables = api ? createShujukuClient(api).readTables() : null;
-    return { card, books, tables, notes, chat: ctx && Array.isArray(ctx.chat) ? ctx.chat : [] };
+    return { card, books, globalBooks, tables, notes, chat: ctx && Array.isArray(ctx.chat) ? ctx.chat : [] };
 }
 
 export function pickCharacterSources(material, { name, aliases = [], limits = CHARACTER_SOURCE_LIMITS } = {}) {
@@ -142,6 +166,58 @@ export function pickSceneSources(material, { name, limits = CHARACTER_SOURCE_LIM
         database: material.tables ? pickDatabaseText(material.tables, names, limits.database) : '',
         notes,
     };
+}
+
+// 「读取上下文」加大预算时写词用的全部设定资料：整张角色卡（描述、性格、场景、开场白、备选开场白、对话示例）、
+// 角色卡 / 聊天 / 全局世界书的所有已启用条目、数据库所有行。提到 names 的条目和行排前面，其余在后，按 limit 字截。
+export function pickSettingMaterial(material, { names = [], limit = 0 } = {}) {
+    if (!material || !(limit > 0)) return '';
+    const keys = nameList(names[0], names.slice(1));
+    const parts = [];
+    const card = material.card && typeof material.card === 'object' ? material.card : null;
+    if (card) {
+        const data = card.data && typeof card.data === 'object' ? card.data : {};
+        const cardName = String(card.name || data.name || '').trim();
+        const greetings = card.alternate_greetings ?? data.alternate_greetings;
+        for (const [label, raw] of [
+            ['描述', card.description ?? data.description], ['性格', card.personality ?? data.personality],
+            ['场景', card.scenario ?? data.scenario], ['开场白', card.first_mes ?? data.first_mes],
+            ['备选开场白', Array.isArray(greetings) ? greetings.join('\n\n——\n\n') : ''], ['对话示例', card.mes_example ?? data.mes_example],
+        ]) {
+            const text = String(raw || '').trim();
+            if (text) parts.push({ first: true, text: `【角色卡${cardName ? `「${cardName}」` : ''}·${label}】\n${text}` });
+        }
+    }
+    for (const { name: book, entries } of [...(material.books || []), ...(material.globalBooks || [])]) {
+        for (const entry of Array.isArray(entries) ? entries : []) {
+            if (!entry || entry.enabled === false || !String(entry.content || '').trim()) continue;
+            const entryKeys = entry.strategy && Array.isArray(entry.strategy.keys) ? entry.strategy.keys.map((key) => String(key)) : [];
+            const hit = keys.some((key) => entryKeys.some((entryKey) => entryKey.includes(key) || (entryKey.length >= 2 && key.includes(entryKey)))) || mentions(entry.content, keys);
+            parts.push({ first: hit, text: `【世界书·${book}·${entry.name || '条目'}】\n${String(entry.content).trim()}` });
+        }
+    }
+    if (material.tables && material.tables.ok !== false) {
+        for (const table of parseTables(material.tables.data)) {
+            for (const row of table.rows) {
+                if (!Array.isArray(row)) continue;
+                const pairs = table.columns
+                    .map((column, index) => [String(column || '').trim(), String(row[index] ?? '').trim()])
+                    .filter(([column, value]) => column && value);
+                if (!pairs.length) continue;
+                const text = `【数据库·${table.name}】${pairs.map(([column, value]) => `${column}：${value}`).join('；')}`;
+                parts.push({ first: mentions(text, keys), text });
+            }
+        }
+    }
+    const ordered = [...parts.filter((part) => part.first), ...parts.filter((part) => !part.first)];
+    const out = [];
+    let used = 0;
+    for (const part of ordered) {
+        if (used + part.text.length > limit) continue;
+        out.push(part.text);
+        used += part.text.length + 2;
+    }
+    return out.join('\n\n');
 }
 
 export async function collectCharacterSources(globalObject, { name, aliases = [], limits = CHARACTER_SOURCE_LIMITS } = {}) {

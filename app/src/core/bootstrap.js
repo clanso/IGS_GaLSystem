@@ -38,7 +38,7 @@ import { createReaderImageService } from '../generated-images/reader-image-servi
 import { createPromptInjector } from '../host/prompt-injector.js';
 import { createIllustrationMessageHost } from '../host/illustration-message-host.js';
 import { createSecondaryLlm } from '../host/secondary-llm.js';
-import { formatCharacterSources, pickCharacterSources, pickSceneSources, readSourceMaterial } from '../host/character-sources.js';
+import { formatCharacterSources, pickCharacterSources, pickSceneSources, pickSettingMaterial, readSourceMaterial } from '../host/character-sources.js';
 import { createImageBackend, mergeLegacyNaiSettings } from '../generated-images/image-backend.js';
 import { createNaiOfficialClient } from '../generated-images/nai-official-client.js';
 import { createImageJobLog } from '../generated-images/image-job-log.js';
@@ -183,6 +183,8 @@ export function bootstrapIGS(options = {}) {
         readCharacterSources: (names, options) => readPlannerSources(globalObject, names, pickCharacterSources, options),
         // 楼内补背景：同样按地点名挑角色卡描述 / 场景栏、世界书、数据库节选。
         readSceneSources: (names, options) => readPlannerSources(globalObject, names, pickSceneSources, options),
+        // 「读取上下文」加大预算时写词附的全部设定资料：整张角色卡、角色卡 / 聊天 / 全局世界书的全部条目、数据库。
+        readSettingMaterial: async (names, { limit = 0 } = {}) => pickSettingMaterial(await readSourceMaterial(globalObject, { withGlobal: true }), { names, limit }),
         events,
         report: reportImageJob,
     });

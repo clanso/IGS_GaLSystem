@@ -54,7 +54,7 @@ export function createIllustrationMessageHost(globalObject = globalThis) {
         const ctx = context();
         const chat = ctx && Array.isArray(ctx.chat) ? ctx.chat : [];
         const out = [];
-        for (let i = Number(messageId) - 1; i >= 0 && out.length < count; i -= 1) {
+        for (let i = Math.min(Number(messageId), chat.length) - 1; i >= 0 && out.length < count; i -= 1) {
             const msg = chat[i];
             if (msg && !msg.is_user && !msg.is_system && typeof msg.mes === 'string') out.unshift(msg.mes);
         }
@@ -66,7 +66,7 @@ export function createIllustrationMessageHost(globalObject = globalThis) {
         const ctx = context();
         const chat = ctx && Array.isArray(ctx.chat) ? ctx.chat : [];
         const out = [];
-        for (let i = Number(messageId) - 1; i >= 0 && out.length < count; i -= 1) {
+        for (let i = Math.min(Number(messageId), chat.length) - 1; i >= 0 && out.length < count; i -= 1) {
             const msg = chat[i];
             if (msg && !msg.is_system && typeof msg.mes === 'string') out.unshift({ isUser: msg.is_user === true, text: msg.mes });
         }
