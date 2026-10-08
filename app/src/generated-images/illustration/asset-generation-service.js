@@ -11,7 +11,7 @@ import { supportsNaiTransparentBackground } from '../request-builders/nai-v4-bui
 import { collectAssetNeeds, tempAssetKeyOf, GENERATED_ASSET_URL_PREFIX, generatedAssetIdOf, isGeneratedAssetUrl } from '../../scene/asset-match.js';
 import { floorKeyOf } from '../../media/illustration-store.js';
 import { GENERATED_IMAGE_SCHEMA_VERSION, isLegacyGeneratedImage, isQuotaError, normalizeGeneratedImageRecord } from '../../media/generated-asset-store.js';
-import { dropBackgroundTags, buildCharacterAvatarDescription, buildCharacterSpriteDescription, buildDbgenAssetDescription, buildDbgenBackgroundBatchDescription, buildDbgenSpriteBatchDescription, buildExpressionDiffDescription, buildWardrobeClothingDescription, nsfwClothingBoostLine, applyCharacterDnaToCaption, applyLookToCaption, applyMoodToCaption, expressionLookTags, expressionPaintDna, expressionSpritePrompts, splitExpressionWriteBatches, splitWriteBatches, uprightSpriteCaption, applyPregnancyToCaption, outfitPregnancyMonth } from '../dbgen-prompt.js';
+import { dropBackgroundTags, buildCharacterAvatarDescription, buildCharacterSpriteDescription, buildDbgenAssetDescription, buildDbgenBackgroundBatchDescription, buildDbgenSpriteBatchDescription, buildExpressionDiffDescription, buildWardrobeClothingDescription, nsfwClothingBoostLine, applyCharacterDnaToCaption, applyLookToCaption, applyMoodToCaption, expressionLookTags, expressionPaintDna, expressionSpritePrompts, splitExpressionWriteBatches, splitWriteBatches, uprightSpriteCaption, applyPregnancyToCaption, outfitPregnancyMonth, sharedLookCaption } from '../dbgen-prompt.js';
 import { normalizeStoredPrompt, promptFromCaption } from '../generation-prompt.js';
 import { promptTimeBucket, sceneVariantCaption, sceneVariantTags } from '../scene-variant-tags.js';
 import { sceneTimeBucket } from '../../scene/time-bucket.js';
@@ -1047,7 +1047,7 @@ export function createAssetGenerationService(deps) {
         let painted = 0;
         let writeError = '';
         // 分批写时每批是一次独立的写词：外貌、身体状态（怀孕之类只写在正文里的）容易一批有一批没有。
-        // 后面的批次照第一批写好的第一份来。
+        // 后面的批次照第一批的样板来：只取第一批过半数份共有的 tag，表情和动作不进样板（见 sharedLookCaption）。
         let anchor = null;
         for (const batch of splitExpressionWriteBatches(labels)) {
             if (stopped()) break;
@@ -1080,10 +1080,7 @@ export function createAssetGenerationService(deps) {
                     break;
                 }
                 const captions = Array.isArray(written.captions) ? written.captions : [];
-                if (!anchor) {
-                    const first = captions.find((item) => item && item.caption);
-                    if (first) anchor = first.caption;
-                }
+                if (!anchor) anchor = sharedLookCaption(captions.map((item) => item && item.caption));
                 const missing = [];
                 for (let i = 0; i < pending.length; i += 1) {
                     if (stopped()) {

@@ -6,6 +6,7 @@ import { createAssetGenerationService } from '../src/generated-images/illustrati
 import { createMemoryGeneratedAssetStore } from '../src/media/generated-asset-store.js';
 import { moodTierLabels } from '../src/scene/mood-groups.js';
 
+const cap = (text) => ({ v4_prompt: { caption: { base_caption: 'solo', char_captions: [{ char_caption: text, centers: [{ x: 0.5, y: 0.5 }] }] } }, v4_negative_prompt: { caption: { base_caption: '', char_captions: [{ char_caption: '' }] } } });
 const charOf = (reply) => parseCaptionSlots(reply).captions[0].caption.v4_prompt.caption.char_captions[0].char_caption;
 
 test('gate:expression-consistency:writer-coordinates-never-leak-into-tags', () => {
@@ -17,7 +18,6 @@ test('gate:expression-consistency:writer-coordinates-never-leak-into-tags', () =
 test('gate:expression-consistency:later-batches-follow-the-first-written-look-and-lasting-body-state', async () => {
     const labels = moodTierLabels(20);
     const descriptions = [];
-    const cap = (text) => ({ v4_prompt: { caption: { base_caption: 'solo', char_captions: [{ char_caption: text, centers: [{ x: 0.5, y: 0.5 }] }] } }, v4_negative_prompt: { caption: { base_caption: '', char_captions: [{ char_caption: '' }] } } });
     const service = createAssetGenerationService({
         messageHost: { getChatId: () => 'c', readPreviousAiTexts: () => [] },
         llm: {},
@@ -26,9 +26,11 @@ test('gate:expression-consistency:later-batches-follow-the-first-written-look-an
             writeDbgenPrompt: async ({ description }) => {
                 descriptions.push(description);
                 const count = Number((description.match(/写 (\d+) 份立绘表情差分/) || [])[1]) || 1;
-                // 第一批写进了怀孕，后面的批次不一定会写：靠第一批的那一份对齐。出汗、湿发是临时状态，不进样板。
+                // 第一批写进了怀孕，后面的批次不一定会写：靠第一批的样板对齐。出汗、湿发是临时状态，不进样板；
+                // 第一份（平和）自己的眉毛、手势只有它有，也不进样板。
                 const body = descriptions.length === 1 ? 'elf, blonde hair, pregnant, sweat, damp skin, hair stuck to neck' : 'elf, blonde hair';
-                return { ok: true, captions: Array.from({ length: count }, (_, index) => ({ slotId: index + 1, caption: cap(`${body}, expr ${index + 1}`) })) };
+                const own = (index) => (descriptions.length === 1 && index === 0 ? 'relaxed eyebrows, own hands together, ' : '');
+                return { ok: true, captions: Array.from({ length: count }, (_, index) => ({ slotId: index + 1, caption: cap(`${body}, ${own(index)}expr ${index + 1}`) })) };
             },
             generateDbgenCaption: async () => ({ ok: true, dataUrl: 'data:image/png;base64,QQ==' }),
         },
@@ -46,6 +48,24 @@ test('gate:expression-consistency:later-batches-follow-the-first-written-look-an
     }
     assert.doesNotMatch(descriptions[0], /前面已经写好的一份/, '第一批没有可对齐的');
     for (const text of descriptions.slice(1)) {
-        assert.match(text, /下面是前面已经写好的一份。外貌、服装和长期身体状态要和它完全一致[^\n]*\nslotid: 1\nscene: solo\nchar: 0\.5,0\.5 \| elf, blonde hair, pregnant, expr 1/);
+        assert.match(text, /下面是前面已经写好的几份共有的外貌、服装和长期身体状态（表情和动作已经去掉）[^\n]*\nslotid: 1\nscene: solo\nchar: 0\.5,0\.5 \| elf, blonde hair, pregnant\n/);
     }
+});
+
+test('gate:expression-consistency:one-diffs-own-expression-and-hands-never-carry-over', async () => {
+    const { expressionLookTags, isMoodDetailTag, sharedLookCaption } = await import('../src/generated-images/dbgen-prompt.js');
+    // 阿黛尔「丝质睡袍-孕中期」平和那张的真实写词：重画别的表情时只该留下长相、衣服和肚子。
+    const calm = 'blonde hair, green eyes, 0.8::tareme::, pregnant, small round baby bump, pale ivory silk robe, closed robe, relaxed eyebrows, soft gaze, own hands together, hands resting loosely in front, relaxed shoulders, looking at viewer, closed mouth';
+    assert.equal(expressionLookTags({ positive: calm }, { name: '丝质睡袍-孕中期', ownImage: true }),
+        'blonde hair, green eyes, 0.8::tareme::, pregnant, small round baby bump, pale ivory silk robe, closed robe');
+    for (const tag of ['tearing up', 'chin slightly raised', 'other hand reaching forward slightly', 'hand holding own wrist in front of waist', 'sad smile', 'sidelong glance']) {
+        assert.equal(isMoodDetailTag(tag), true, tag);
+    }
+    for (const tag of ['green eyes', 'bare shoulders', 'arm warmers', 'mole under mouth', 'hair over shoulder', 'fingerless gloves', 'wide hips']) {
+        assert.equal(isMoodDetailTag(tag), false, tag);
+    }
+    // 样板取过半数份都有的 tag。
+    const shared = sharedLookCaption([cap('elf, robe, smile'), cap('elf, robe, frown'), cap('elf, robe, pout'), cap('elf, crying')]);
+    assert.equal(shared.v4_prompt.caption.char_captions[0].char_caption, 'elf, robe');
+    assert.equal(sharedLookCaption([]), null);
 });
