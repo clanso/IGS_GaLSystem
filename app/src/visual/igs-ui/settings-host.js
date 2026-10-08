@@ -5,7 +5,7 @@ import { placeRowMenu } from './settings-outfit-fields.js';
 import { cgReasonText } from '../../media/cg-library.js';
 import { setStagePauseReason } from './stage-pause.js';
 import { fileGeneratedHoldings, normalizeGeneratedLibrary, collectGeneratedImageIds } from '../../scene/asset-match.js';
-import { CHARACTER_DNA_FIELDS, resolveCharacterDna } from '../../scene/character-dna.js';
+import { CHARACTER_DNA_FIELDS, CHARACTER_PERSONA_FIELD, resolveCharacterDna } from '../../scene/character-dna.js';
 import { loadMatteEditor } from './sprite-matte-editor.js';
 import { mountMatteEditor } from './sprite-matte-editor-mount.js';
 import { createCanvasImageCodec } from './sprite-matte-editor-view.js';
@@ -583,6 +583,13 @@ export function createSettingsHost(deps) {
                 }
                 return;
             }
+            // 世界设定提要：只更新草稿（和世界观存在同一处），关闭设置时统一保存；不重绘，避免丢焦点。
+            if (target.getAttribute('data-world-summary') !== null) {
+                rememberAssetScope(state.activeSettings, getSillyTavernContext(options.global || globalThis));
+                draftAssetLibrary(state.activeSettings, null).worldSummary = target.value;
+                state.activeSettings.snapshot.draft = state.activeSettings.draft;
+                return;
+            }
             const wardrobeName = target.getAttribute('data-wardrobe-name');
             if (wardrobeName) {
                 if (['__proto__', 'constructor', 'prototype'].includes(wardrobeName)) return;
@@ -600,7 +607,7 @@ export function createSettingsHost(deps) {
             const dnaField = target.getAttribute('data-dna-field');
             if (dnaChar && dnaField) {
                 // 角色 DNA 输入只更新草稿，关闭设置时统一保存；不重绘，避免丢焦点。
-                if (!CHARACTER_DNA_FIELDS.includes(dnaField) || ['__proto__', 'constructor', 'prototype'].includes(dnaChar)) return;
+                if (!(CHARACTER_DNA_FIELDS.includes(dnaField) || dnaField === CHARACTER_PERSONA_FIELD) || ['__proto__', 'constructor', 'prototype'].includes(dnaChar)) return;
                 rememberAssetScope(state.activeSettings, getSillyTavernContext(options.global || globalThis));
                 const assets = draftAssetLibrary(state.activeSettings, { collections: ASSET_CHARACTER_FIELDS, name: dnaChar });
                 const dnaMap = assets.characterDna && typeof assets.characterDna === 'object' && !Array.isArray(assets.characterDna)
@@ -656,6 +663,12 @@ export function createSettingsHost(deps) {
             }
             // 角色学院 / 声线下拉：交给动作层写草稿并保存（input 监听不处理 SELECT）。
             const charSelect = event.target && event.target.getAttribute ? event.target : null;
+            // 情绪组的表情 tag：输完（失焦或回车）才保存。
+            const moodTagsGroup = charSelect ? charSelect.getAttribute('data-mood-group-tags') : null;
+            if (moodTagsGroup) {
+                controller.invoke(`mood-group-tags:${encodeURIComponent(moodTagsGroup)}:${encodeURIComponent(charSelect.value || '')}`);
+                return;
+            }
             const charHouse = charSelect ? charSelect.getAttribute('data-char-house') : null;
             if (charHouse) {
                 controller.invoke(`char-house:${encodeURIComponent(charHouse)}:${encodeURIComponent(charSelect.value || '')}`);

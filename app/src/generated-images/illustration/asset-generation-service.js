@@ -1,7 +1,10 @@
 import { numberParagraphs } from './marker-placer.js';
 import { MIN_AUTO_IMAGE_BODY_CHARS, floorBodyLength } from './floor-body-length.js';
+import { STANDARD_FLOOR_CHARS, contextBudgetChars, plannerLlmSettings, readPlannerContext, readableText } from './planner-context.js';
 import { buildAssetPlannerUserPrompt, parseAssetPlan, buildAssetSlot, buildDictionaryAssetItems } from './asset-prompt.js';
 import { requestWithSoftRetry } from './prompt-kit.js';
+import { writeCharacterPersona, writeWorldSummary } from './persona-writer.js';
+import { worldContextOf } from '../../scene/worldview.js';
 import { normalizeAutoIllustrationSettings, isStrictBackgroundMatch } from './auto-illustration-settings.js';
 import { cgSizeForMode } from './auto-illustration-service.js';
 import { supportsNaiTransparentBackground } from '../request-builders/nai-v4-builder.js';
@@ -17,6 +20,16 @@ import { isCharacterDnaEmpty, resolveCharacterDna } from '../../scene/character-
 
 export const GENERATED_ASSET_UPDATED_EVENT = 'igs:generated-asset-updated';
 const IMAGE_CACHE_LIMIT = 60;
+// 素材补全查前文：往前看多少层 AI 楼、每个地点 / 角色最多附多少字。
+const MENTION_FLOORS = 30;
+const MENTION_LIMIT = 800;
+// 长楼层里本楼前 EXCERPT_AFTER 字之后才出现的地点 / 角色另附本楼节选（整层都读时也附，帮副 LLM 对准那一段）：
+// 地点取场景标签前 SCENE_LEAD 字（进门、到达时的描写）和标签后 SCENE_BODY 字（刚进去时的样子），
+// 角色取提到他的段落（先出场的在前），最多 FLOOR_MENTION_LIMIT 字。
+const EXCERPT_AFTER = STANDARD_FLOOR_CHARS;
+const SCENE_LEAD = 2000;
+const SCENE_BODY = 1500;
+const FLOOR_MENTION_LIMIT = 1500;
 // 正在显示的图不淘汰：一页缩略图超过上限时，按张数硬淘汰会把刚读回的图挤掉，
 // 重绘后又缺图再读，循环闪「载入中」。近几秒内被取用过的图保留，离开页面后再按上限回收。
 const IMAGE_IN_USE_MS = 5000;
@@ -30,10 +43,6 @@ const ACTIVE_TEMP_STATUSES = new Set(['review', 'chat']);
 
 function randomSeed() {
     return Math.floor(Math.random() * 4294967295);
-}
-
-function toReadableText(raw) {
-    return numberParagraphs(raw).paragraphs.map((p) => p.text).join('\n');
 }
 
 // 按既有别名归约为立绘需求挂上主名 DNA；空 DNA 不挂，保持无 DNA 时的旧行为。
@@ -545,7 +554,7 @@ export function createAssetGenerationService(deps) {
             let written;
             try {
                 written = await nai.writeDbgenPrompt({
-                    description: buildDbgenSpriteBatchDescription(batch.map((item) => item.need)),
+                    description: buildDbgenSpriteBatchDescription(batch.map((item) => item.need), { world: worldContextOf(s.sceneAssets) }),
                     messageId: floor.messageId,
                 });
             } catch (error) {
@@ -629,6 +638,16 @@ export function createAssetGenerationService(deps) {
         const variantNeeds = backgroundNeeds.filter((need) => need.variantOf);
         const needs = [...backgroundNeeds.filter((need) => !need.variantOf), ...spriteNeeds];
         attachCharacterDna(needs, s.sceneAssets);
+        const floorText = numbered.paragraphs.map((p) => p.text).join('\n');
+        // 「读取上下文」加大预算时，规划另附全部设定资料（三成预算），前文相应少读。
+        const budget = contextBudgetChars(s.auto.llm);
+        const settingMaterial = needs.length && budget ? await readSettingMaterial(needs.map((need) => need.name), Math.floor(budget * 0.3)) : '';
+        const context = needs.length ? plannerContextOf(messageId, s, floorText.length, settingMaterial.length) : { budget: 0, floorChars: STANDARD_FLOOR_CHARS, previousText: '' };
+        await attachSources(needs, context.budget > 0);
+        attachFloorExcerpts(needs, numbered);
+        // 前文里更早提到这些地点 / 角色的段落另挂进 need.sources：标准长度时只附【前文（原文，从早到近）】里没有的；
+        // 加大预算时前文整段都读了，照样附上，帮副 LLM 对准。
+        attachMentions(needs, needs.length ? readHistory(messageId) : [], context.budget ? '' : context.previousText);
         if (!needs.length && !variantNeeds.length) {
             await store.putFloor(key, { status: 'done', count: 0, updatedAt: now() });
             return { ok: true, reason: 'nothing-missing' };
@@ -660,8 +679,6 @@ export function createAssetGenerationService(deps) {
         } else if (needs.length) {
             report('info', `第 ${messageId} 楼缺少 ${needs.length} 项素材，正在请求副 LLM…`);
             try {
-                const previousText = messageHost.readPreviousAiTexts(messageId, s.auto.llm.contextFloors)
-                    .map(toReadableText).join('\n').slice(-1500);
                 // 没登记 DNA 的角色补酒馆里的外貌参考（用户人设、角色卡、世界书），DNA 仍优先。
                 const loreNames = needs.filter((need) => need.type === 'sprite' && !need.dna).map((need) => need.name);
                 const lore = loreNames.length && typeof messageHost.readCharacterLore === 'function'
@@ -670,9 +687,9 @@ export function createAssetGenerationService(deps) {
                 plan = await requestWithSoftRetry(llm, {
                     system: s.auto.llm.prompts.asset,
                     softSystem: s.auto.llm.prompts.assetSoft,
-                    user: buildAssetPlannerUserPrompt({ needs, readableText: toReadableText(floor.text).slice(0, 6000), previousText, lore }),
+                    user: buildAssetPlannerUserPrompt({ needs, readableText: floorText.slice(0, context.floorChars), previousText: context.previousText, lore, settingMaterial, world: worldContextOf(s.sceneAssets) }),
                     parse: (reply) => parseAssetPlan(reply, needs),
-                }, s.auto.llm);
+                }, plannerLlmSettings(s.auto.llm));
             } catch (error) {
                 plan = { ok: false, error: '副 LLM 规划失败' };
             }
@@ -723,6 +740,142 @@ export function createAssetGenerationService(deps) {
             result.error = `${failedCount} 项失败${count ? `（成功 ${count} 项）` : ''}：${unique.length === 1 ? unique[0] : errors.join('；')}`;
         }
         return result;
+    }
+
+    // 本楼新角色的立绘与缺的背景：附上角色卡 / 世界书 / 数据库里提到这个角色或地点的节选
+    // （宿主读：角色走 readCharacterSources，地点走 readSceneSources；没接或读不到就不附，照旧补图）。
+    // large：加大了「读取上下文」预算，节选按长的给。
+    async function attachSources(needs, large = false) {
+        for (const [type, read] of [['sprite', deps.readCharacterSources], ['background', deps.readSceneSources]]) {
+            const list = needs.filter((need) => need && need.type === type && need.name);
+            if (!list.length || typeof read !== 'function') continue;
+            let found = {};
+            try {
+                found = (await read(list.map((need) => need.name), { large })) || {};
+            } catch (error) {
+                continue;
+            }
+            for (const need of list) {
+                const text = String(found[need.name] || '').trim();
+                if (text) need.sources = text;
+            }
+        }
+    }
+
+    // 按字数取段落：从 list 头上取到 limit 字为止，最后一段截短；fromEnd 时从尾上往前取。
+    function takeParagraphs(list, limit, fromEnd = false) {
+        const ordered = fromEnd ? list.slice().reverse() : list;
+        const kept = [];
+        let used = 0;
+        for (const p of ordered) {
+            if (used >= limit) break;
+            const text = fromEnd ? p.text.slice(-(limit - used)) : p.text.slice(0, limit - used);
+            kept.push({ ...p, text });
+            used += text.length;
+        }
+        return fromEnd ? kept.reverse() : kept;
+    }
+
+    // 长楼层里副 LLM 读不到的那部分：地点附场景标签前后的正文，角色附提到他的段落，挂到 need.sources。
+    function attachFloorExcerpts(needs, numbered) {
+        let offset = 0;
+        const paragraphs = numbered.paragraphs.map((p) => {
+            const item = { ...p, end: offset + p.text.length };
+            offset += p.text.length + 1;
+            return item;
+        });
+        const unseen = paragraphs.filter((p) => p.end > EXCERPT_AFTER);
+        if (!unseen.length) return;
+        const attach = (need, label, picked) => {
+            const text = picked.filter((p) => p.end > EXCERPT_AFTER).map((p) => p.text.trim()).filter(Boolean).join('\n');
+            if (text) need.sources = [need.sources, `【本楼·${label}】\n${text}`].filter(Boolean).join('\n\n');
+        };
+        for (const need of needs) {
+            const name = String(need && need.name || '').trim();
+            if (!name) continue;
+            if (need.type === 'background') {
+                const tag = numbered.scenes.find((scene) => scene.scene === name && scene.time === need.time)
+                    || numbered.scenes.find((scene) => scene.scene === name);
+                if (!tag || !Number.isInteger(tag.lineIndex)) continue;
+                const next = numbered.scenes.find((scene) => scene.lineIndex > tag.lineIndex && scene.scene !== name);
+                const lead = takeParagraphs(paragraphs.filter((p) => p.lineIndex < tag.lineIndex), SCENE_LEAD, true);
+                const body = takeParagraphs(paragraphs.filter((p) => p.lineIndex > tag.lineIndex && (!next || p.lineIndex < next.lineIndex)), SCENE_BODY);
+                attach(need, `「${name}」前后的正文`, [...lead, ...body]);
+            } else {
+                attach(need, `提到「${name}」的段落`, takeParagraphs(unseen.filter((p) => p.text.includes(name)), FLOOR_MENTION_LIMIT));
+            }
+        }
+    }
+
+    // 本楼正文读多少、前文读哪些（见 planner-context）；读不到前文就当没有。reserved：同一份提示词里设定资料占的字数。
+    function plannerContextOf(messageId, s, floorLength, reserved = 0) {
+        try {
+            return readPlannerContext(messageHost, messageId, s.auto.llm, floorLength, reserved);
+        } catch (error) {
+            return { budget: 0, floorChars: STANDARD_FLOOR_CHARS, previousText: '' };
+        }
+    }
+
+    // 全部设定资料（宿主读：整张角色卡、所有世界书含全局、数据库），提到 names 的排前面，最多 limit 字。
+    async function readSettingMaterial(names, limit) {
+        if (!(limit > 0) || typeof deps.readSettingMaterial !== 'function') return '';
+        try {
+            return String((await deps.readSettingMaterial(names, { limit })) || '').trim();
+        } catch (error) {
+            return '';
+        }
+    }
+
+    const characterNamesOf = (name, s) => {
+        const aliases = s.sceneAssets.characterAliases && Array.isArray(s.sceneAssets.characterAliases[name]) ? s.sceneAssets.characterAliases[name] : [];
+        return [name, ...aliases];
+    };
+    const SPRITE_MATERIAL_GUIDE = (name) => `下面先给出这个故事的设定资料（角色卡、世界书、数据库）和正文原文，供你把「${name}」画准：长相、身材和固定特征以后面说明里的角色设定（DNA）为准；设定没写到的，按资料和正文里对「${name}」的描写补；穿着、发型、配饰后面说明指定了就照说明，没指定的按正文里最近的样子；身体状态（例如怀孕、受伤包扎）也按正文里最近的样子写上。资料和正文里的剧情、其他角色不要画进去。`;
+    const EXPRESSION_MATERIAL_GUIDE = (name) => `下面先给出这个故事的设定资料（角色卡、世界书、数据库）和正文原文：「${name}」每个表情的幅度和方式，照正文里这个角色说话做事的样子来定。长相和衣服按后面的说明，不要按正文改；资料和正文里的剧情、其他角色不要画进去。`;
+
+    // 设置页写立绘 / 头像 / 表情差分：「读取上下文」加大预算时，说明前面附上全部设定资料（四成预算）
+    // 和正文原文（连用户发言，从最新往前读满剩下的预算）。标准长度、或者走数据库生图插件（它自己读上下文）时原样返回。
+    async function writingMaterial(names, guide) {
+        const s = readSettings();
+        const budget = contextBudgetChars(s.auto.llm);
+        const backend = nai && typeof nai.describe === 'function' ? nai.describe() : {};
+        const unchanged = (description) => description;
+        if (!budget || backend.ownPrompts) return unchanged;
+        const setting = await readSettingMaterial(names, Math.floor(budget * 0.4));
+        const story = plannerContextOf(Number.POSITIVE_INFINITY, s, 0, setting.length).previousText;
+        if (!setting && !story) return unchanged;
+        const prefix = [guide, setting ? `【设定资料】\n${setting}` : '', story ? `【正文（原文，从早到近）】\n${story}` : ''].filter(Boolean).join('\n\n');
+        return (description) => `${prefix}\n\n【这次要写的】\n${description}`;
+    }
+
+    // 本楼之前最近 MENTION_FLOORS 层 AI 楼的正文（去掉标签），旧的在前。读不到就当没有前文。
+    function readHistory(messageId) {
+        if (typeof messageHost.readPreviousAiTexts !== 'function') return [];
+        try {
+            return (messageHost.readPreviousAiTexts(messageId, MENTION_FLOORS) || []).map(readableText);
+        } catch (error) {
+            return [];
+        }
+    }
+
+    // 长相、穿着、地点的样子常在好几层前写过：前文里提到这个名字的段落挂到 need.sources 末尾，
+    // 已经在【前文（原文，从早到近）】里的不重复，超长时留最近的。
+    function attachMentions(needs, history, shownText) {
+        const paragraphs = history.flatMap((text) => text.split('\n')).map((line) => line.trim()).filter(Boolean);
+        for (const need of needs) {
+            const name = String(need && need.name || '').trim();
+            if (!name) continue;
+            const kept = [];
+            let used = 0;
+            for (let i = paragraphs.length - 1; i >= 0; i -= 1) {
+                const line = paragraphs[i];
+                if (!line.includes(name) || shownText.includes(line)) continue;
+                if (used + line.length > MENTION_LIMIT) break;
+                kept.unshift(line);
+                used += line.length;
+            }
+            if (kept.length) need.sources = [need.sources, `【前文·提到「${name}」的段落】\n${kept.join('\n')}`].filter(Boolean).join('\n\n');
+        }
     }
 
     async function processMessage(messageId, { manual = false } = {}) {
@@ -836,7 +989,9 @@ export function createAssetGenerationService(deps) {
 
     // 标签顺序：DNA → 表情 → 衣服与长相 → 写词结果。exact：用户改过的词原样出图，不硬合，新图继续记为「改过」。
     async function paintExpressionCaption(name, mood, caption, dna, { look = '', seed, nsfw = false, exact = false } = {}) {
-        const upright = exact ? caption : (uprightSpriteCaption(applyCharacterDnaToCaption(applyMoodToCaption(applyLookToCaption(caption, look), mood, { nsfw }), dna)) || caption);
+        // 情绪组的 tag 设置从当前素材库读；只有打开「固定加上」的组才会放。
+        const groups = readSettings().sceneAssets.moodGroups;
+        const upright = exact ? caption : (uprightSpriteCaption(applyCharacterDnaToCaption(applyMoodToCaption(applyLookToCaption(caption, look), mood, { nsfw, groups }), dna)) || caption);
         const meta = expressionPaintMeta();
         let painted;
         try {
@@ -872,7 +1027,7 @@ export function createAssetGenerationService(deps) {
     // 一批写完并逐张出完，再写下一批；某一张失败不影响后面的。
     // 插件少给某几份时只在这一批里补写；signal 中止后已画好的图保留，还没写的批不再写。
     // 一次点击里各批共用一颗新种子：衣服、画风接近；删掉重来、补画都是新种子，不会画回旧图。
-    async function generateExpressionSet({ name, basePrompt, moods, dna, outfit, note, nsfw, onProgress, signal } = {}) {
+    async function generateExpressionSet({ name, basePrompt, moods, dna, outfit, note, nsfw, world = null, onProgress, signal } = {}) {
         const labels = (Array.isArray(moods) ? moods : []).map((item) => String(item || '').trim()).filter(Boolean);
         if (!labels.length) return { ok: false, error: '没有表情分组' };
         if (!nai || typeof nai.writeDbgenPrompt !== 'function' || typeof nai.generateDbgenCaption !== 'function') {
@@ -885,9 +1040,14 @@ export function createAssetGenerationService(deps) {
         };
         const paintDna = expressionPaintDna(dna, outfit);
         const stopped = () => Boolean(signal && signal.aborted);
+        // 资料和正文每批都一样，只读一次。
+        const withMaterial = await writingMaterial(characterNamesOf(name, readSettings()), EXPRESSION_MATERIAL_GUIDE(name));
         const items = [];
         let painted = 0;
         let writeError = '';
+        // 分批写时每批是一次独立的写词：外貌、身体状态（怀孕之类只写在正文里的）容易一批有一批没有。
+        // 后面的批次照第一批写好的第一份来。
+        let anchor = null;
         for (const batch of splitExpressionWriteBatches(labels)) {
             if (stopped()) break;
             if (writeError) {
@@ -902,7 +1062,7 @@ export function createAssetGenerationService(deps) {
                 let written;
                 try {
                     written = await nai.writeDbgenPrompt({
-                        description: buildExpressionDiffDescription(name, basePrompt, pending, dna, outfit, { note, nsfw: paint.nsfw }),
+                        description: withMaterial(buildExpressionDiffDescription(name, basePrompt, pending, dna, outfit, { note, nsfw: paint.nsfw, world, anchor })),
                     });
                 } catch (error) {
                     const message = (error && error.message) || '写提示词失败';
@@ -919,6 +1079,10 @@ export function createAssetGenerationService(deps) {
                     break;
                 }
                 const captions = Array.isArray(written.captions) ? written.captions : [];
+                if (!anchor) {
+                    const first = captions.find((item) => item && item.caption);
+                    if (first) anchor = first.caption;
+                }
                 const missing = [];
                 for (let i = 0; i < pending.length; i += 1) {
                     if (stopped()) {
@@ -972,7 +1136,7 @@ export function createAssetGenerationService(deps) {
 
     // 单张重画：有这一格的提示词就不再写词（写词要等插件的模型，单张也得几十秒），
     // 直接叠上当前的表情、衣服、DNA 硬合再出图；显式换一颗随机种子——不传种子时插件用自己的配置，固定种子会画出同一张。
-    async function generateExpressionImage({ name, mood, caption, exact = false, basePrompt, dna, outfit, note, nsfw, onProgress } = {}) {
+    async function generateExpressionImage({ name, mood, caption, exact = false, basePrompt, dna, outfit, note, nsfw, world = null, onProgress } = {}) {
         const label = String(mood || '').trim();
         if (!label) return { ok: false, error: '没有表情' };
         if (caption) {
@@ -981,7 +1145,7 @@ export function createAssetGenerationService(deps) {
             const item = await paintExpressionCaption(name, label, caption, expressionPaintDna(dna, outfit), { look, seed: randomSeed(), nsfw: nsfw === true, exact: exact === true });
             return { ok: true, items: [item] };
         }
-        return generateExpressionSet({ name, basePrompt, moods: [label], dna, outfit, note, nsfw, onProgress });
+        return generateExpressionSet({ name, basePrompt, moods: [label], dna, outfit, note, nsfw, world, onProgress });
     }
 
     // 场景时间/天气差分：读场景原图存下的提示词，换上目标时间天气标签直接出图，不写词。
@@ -1030,7 +1194,7 @@ export function createAssetGenerationService(deps) {
     }
 
     // 状态栏头像：Q 版大头，方图、不抠图，直接把图交回去，由设置页缩小后存进头像。
-    async function generateCharacterAvatar({ name, dna, onProgress } = {}) {
+    async function generateCharacterAvatar({ name, dna, world = null, sourcesText = '', onProgress } = {}) {
         const who = String(name || '').trim();
         if (!who) return { ok: false, error: '没有角色' };
         if (!nai || typeof nai.writeDbgenPrompt !== 'function' || typeof nai.generateDbgenCaption !== 'function') {
@@ -1039,7 +1203,8 @@ export function createAssetGenerationService(deps) {
         reportExpressionProgress(onProgress, { phase: 'write', done: 0, total: 1, mood: '头像' });
         let written;
         try {
-            written = await nai.writeDbgenPrompt({ description: buildCharacterAvatarDescription(who, dna) });
+            const withMaterial = await writingMaterial(characterNamesOf(who, readSettings()), SPRITE_MATERIAL_GUIDE(who));
+            written = await nai.writeDbgenPrompt({ description: withMaterial(buildCharacterAvatarDescription(who, dna, { world, sourcesText })) });
         } catch (error) {
             return { ok: false, error: (error && error.message) || '写提示词失败' };
         }
@@ -1064,7 +1229,8 @@ export function createAssetGenerationService(deps) {
 
     // 设置页主动出一张默认立绘：先让 LLM 写提示词，再出图，不经过楼内补图。
     // 格子里已有图的「重新生成」带着那张图的 caption 进来：不写词，换一颗新种子直接画。
-    async function generateCharacterSprite({ name, dna, nude = false, note = '', caption, exact = false, onProgress } = {}) {
+    // world 是世界观与世界设定提要；sourcesText 是角色卡 / 世界书 / 数据库里这个角色的节选，只补 DNA 没写到的。
+    async function generateCharacterSprite({ name, dna, nude = false, note = '', caption, exact = false, world = null, sourcesText = '', onProgress } = {}) {
         const who = String(name || '').trim();
         if (!who) return { ok: false, error: '没有角色' };
         if (caption) {
@@ -1080,7 +1246,8 @@ export function createAssetGenerationService(deps) {
         reportExpressionProgress(onProgress, { phase: 'write', done: 0, total: 1, mood: '默认' });
         let written;
         try {
-            written = await nai.writeDbgenPrompt({ description: buildCharacterSpriteDescription(who, dna, { nude: nude === true, note }) });
+            const withMaterial = await writingMaterial(characterNamesOf(who, readSettings()), SPRITE_MATERIAL_GUIDE(who));
+            written = await nai.writeDbgenPrompt({ description: withMaterial(buildCharacterSpriteDescription(who, dna, { nude: nude === true, note, world, sourcesText })) });
         } catch (error) {
             return { ok: false, error: (error && error.message) || '写提示词失败' };
         }
@@ -1125,14 +1292,14 @@ export function createAssetGenerationService(deps) {
         return { ok: true, imageId };
     }
 
-    async function writeWardrobePrompt({ character, outfit, nsfwBoost = false } = {}) {
+    async function writeWardrobePrompt({ character, outfit, nsfwBoost = false, world = null, context = '', clues = '' } = {}) {
         const name = String(character || '').trim();
         const clothes = String(outfit || '').trim();
         if (!clothes) return { ok: false, error: '没有待确认的服装' };
         if (!nai || typeof nai.writeDbgenPrompt !== 'function') return { ok: false, error: '当前图像来源不能写服装提示词' };
         let written;
         try {
-            written = await nai.writeDbgenPrompt({ description: buildWardrobeClothingDescription(name, clothes, { nsfwBoost }) });
+            written = await nai.writeDbgenPrompt({ description: buildWardrobeClothingDescription(name, clothes, { nsfwBoost, world, context, clues }) });
         } catch (error) {
             return { ok: false, error: (error && error.message) || '写服装提示词失败' };
         }
@@ -1205,6 +1372,10 @@ export function createAssetGenerationService(deps) {
         processMessage, resolveUrl, resolveThumbUrl, thumbSourceId, tempBackground, tempSceneTime, tempSprite, tempSpriteTags, listReview, listTemp, setStatus, deleteImages, getImageDataUrl, getImagePrompt, saveImagePrompt, readStoredImage, writeStoredImage, importAssetImage,
         generateExpressionSet, generateExpressionImage, paintExpressionCaptions, generateSceneVariants, generateCharacterSprite, generateCharacterAvatar, writeWardrobePrompt, paintWardrobeReference,
         getEditableImage, saveMatteEdit,
+        // 表情差分写词前提炼「性格与表情习惯」：资料由调用方从角色卡 / 世界书 / 数据库收集，这里只管交给副 LLM。
+        summarizeCharacterPersona: ({ name, sourcesText } = {}) => writeCharacterPersona(llm, readSettings().auto.llm, { name, sourcesText }),
+        // 世界设定提要：资料（角色卡场景栏、世界书常驻条目）由调用方收集。
+        summarizeWorldSetting: ({ label, sourcesText } = {}) => writeWorldSummary(llm, readSettings().auto.llm, { label, sourcesText }),
         getRecord: (key) => currentTempRecords().get(key) || null,
         start() {
             if (offRendered) return;

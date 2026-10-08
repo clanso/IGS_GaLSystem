@@ -1,10 +1,11 @@
 import { esc } from './reader-value-utils.js';
-import { normalizeMoodGroups } from '../../scene/mood-groups.js';
+import { MOOD_PRESET, moodPresetTags, normalizeMoodGroups } from '../../scene/mood-groups.js';
+import { worldContextOf } from '../../scene/worldview.js';
 import { TOOLBAR_ACTIONS } from './reader-host-constants.js';
 import { STAGE_SHAKE_INTENSITIES } from './stage-shake-runtime.js';
 import { CHAT_SHOW_BUBBLE_RADIUS_LEVELS, CHAT_SHOW_DIM_LEVELS, CHAT_SHOW_PROMPT_RULE } from './chat-show-runtime.js';
 import { CHAT_SFX_PRESET_LABELS } from './chat-sfx.js';
-import { SLOT_ICONS, menuItem, transferIcons, renderCharacterSlotTabs, renderReviewCard, renderRowMenu, slotActions } from './settings-outfit-fields.js';
+import { SLOT_ICONS, menuItem, transferIcons, renderCharacterSlotTabs, renderReviewCard, renderRowMenu, slotActions, spriteClearPick } from './settings-outfit-fields.js';
 import { MAGIC_HOUSES, normalizeMagicHouse } from './dialog-theme-css-skins.js';
 import { resolveCharacterMagicHouse } from './magic-house.js';
 import { VOICE_PITCH_LIMIT, VOICE_SPEED_RANGE, normalizeCharacterVoice, resolveCharacterVoice, voicePackOptions } from './voice-bark.js';
@@ -440,6 +441,8 @@ export function renderCharacterAssetList(characters, options = {}) {
     const outfitMap = options.characterOutfits && typeof options.characterOutfits === 'object' && !Array.isArray(options.characterOutfits)
         ? options.characterOutfits : {};
     const outfitTabs = options.outfitTabs && typeof options.outfitTabs === 'object' ? options.outfitTabs : {};
+    // 「清空立绘」多选：{ character, outfit, moods: Set }，不在多选时为 null。
+    const spriteClear = options.spriteClear && options.spriteClear.moods instanceof Set ? options.spriteClear : null;
     // 折叠区的展开状态由宿主按 data-advanced 记住，重渲染后不会收起。
     const isOpen = typeof options.isOpen === 'function' ? options.isOpen : () => false;
     // 魔法星夜才显示学院行；未指定时按 DNA 自动识别，识别不出用全局配色。
@@ -500,7 +503,9 @@ export function renderCharacterAssetList(characters, options = {}) {
                 menuItem(`scene-rename-mood:${c}:${m}`, '重命名'),
                 menuItem(`scene-remove-mood:${c}:${m}`, '删除', ' is-danger'),
             ], `「${mood}」的操作`);
+            const clearing = spriteClear && spriteClear.character === charName && spriteClear.outfit === '';
             const collapsedRow = `<div class="igs-btn-mgr-row igs-scene-mood-row">`
+                + (clearing ? spriteClearPick(c, '', m, rawUrl, spriteClear.moods.has(mood)) : '')
                 + rowThumb
                 + `<span class="igs-btn-mgr-label">${esc(mood)}</span>`
                 + (imageId ? '' : `<input class="igs-scene-url-input" data-scene-char="${esc(charName)}" data-scene-mood="${esc(mood)}" value="${esc(url || '')}" placeholder="URL或data:image/...">`)
@@ -524,6 +529,7 @@ export function renderCharacterAssetList(characters, options = {}) {
             sceneAssets: options.sceneAssets || { characters, characterAliases: aliasesByCharacter, characterOutfits: outfitMap, moodGroups },
             icons: { pencil, trash },
             isOpen,
+            spriteClear,
         });
         // 和场景一样，每个角色平时只有一行；点名字或右边箭头才展开服装和立绘。
         const openKey = `char-open:${charName}`;
@@ -669,7 +675,17 @@ function renderCharacterSetupPanel(charName, dna, profileRows) {
     return `<div class="igs-char-dna-panel"><div class="igs-char-dna-panel-head">角色设定`
         + `<button type="button" class="igs-review-link" data-action="scene-toggle-dna:${encSeg(charName)}">收起</button></div>`
         + profileRows
-        + `<div class="igs-char-info-row is-block"><span class="igs-char-info-label">角色DNA<span class="igs-outfit-muted">（生图时保持长相）</span></span>${renderCharacterDnaFields(charName, dna)}</div></div>`;
+        + `<div class="igs-char-info-row is-block"><span class="igs-char-info-label">角色DNA<span class="igs-outfit-muted">（生图时保持长相）</span></span>${renderCharacterDnaFields(charName, dna)}</div>`
+        + renderCharacterPersonaRow(charName, dna)
+        + `</div>`;
+}
+
+// 性格与表情习惯：跟着 DNA 存，只给表情差分写词用。空着时第一次生成表情差分会自动提炼。
+function renderCharacterPersonaRow(charName, dna) {
+    const persona = dnaValue(dna, 'persona');
+    return `<div class="igs-char-info-row is-block"><span class="igs-char-info-label">性格与表情习惯<span class="igs-outfit-muted">（只给表情差分写词用，不进画图提示词）</span></span>`
+        + `<textarea class="igs-scene-url-input igs-dna-input" rows="3" data-dna-char="${esc(charName)}" data-dna-field="persona" placeholder="例：高雅内敛，情绪很少写在脸上；委屈时垂眼抿唇，不会噘嘴撒娇。空着时第一次生成表情差分会自动从角色卡、世界书和数据库提炼。">${esc(persona)}</textarea>`
+        + `<div class="igs-settings-row"><button type="button" class="igs-settings-action" data-action="char-persona-extract:${encSeg(charName)}">${persona.trim() ? '重新从资料提炼' : '从角色卡 / 世界书 / 数据库提炼'}</button></div></div>`;
 }
 
 export function renderCharacterDnaEditor(charName, dna) {
@@ -713,6 +729,26 @@ function storedMoodGroups(value) {
     return value.filter((group) => group && String(group.label || '').trim());
 }
 
+// 「场景 → 规则」的世界设定提要：给画立绘、服装和表情差分的写词参考；空着时第一次生成会自动提炼。
+export function renderWorldSummarySection(sceneAssets) {
+    const world = worldContextOf(sceneAssets);
+    return `<div class="igs-source-filter-note">当前世界观：${esc(world.label)}（在首页「适配世界」里改）。画立绘、服装和表情差分时，写词会参考世界观和这段提要；提要空着时，第一次生成会自动从角色卡的场景栏和世界书的常驻条目提炼。</div>`
+        + `<textarea class="igs-scene-url-input igs-dna-input" rows="4" data-world-summary="1" aria-label="世界设定提要" placeholder="例：架空的中式王朝，丝绸与刺绣常见，女子多着襦裙、披帛，饰品用玉和银；不出现现代衣物和电子产品。">${esc(world.summary)}</textarea>`
+        + `<div class="igs-settings-row"><button type="button" class="igs-settings-action" data-action="world-summary-extract">${world.summary ? '重新从资料提炼' : '从角色卡 / 世界书提炼'}</button></div>`;
+}
+
+// 表情差分用的表情 tag：开关打开就每次放到最前；关着不加，表情全按写词的来。输入框空着用预设（自建组没有预设）。
+function renderMoodGroupExpressionTags(group, label) {
+    const always = group.alwaysTags === true;
+    const custom = typeof group.tags === 'string' ? group.tags : '';
+    const preset = label === '默认' ? '' : moodPresetTags(label);
+    return `<div class="igs-mood-group-tags">`
+        + `<button type="button" class="igs-switch${always ? ' is-on' : ''}" data-action="mood-group-always:${encSeg(label)}" aria-pressed="${always ? 'true' : 'false'}"><i></i><span>表情差分固定加上这组 tag</span></button>`
+        + `<input class="igs-scene-url-input" data-mood-group-tags="${esc(label)}" value="${esc(custom)}" placeholder="${esc(preset || '自建组没有预设 tag，填了才会用')}" aria-label="「${esc(label)}」的表情 tag">`
+        + `<div class="igs-source-filter-note">${always ? '每张差分都放在提示词最前。' : '关着时不加，表情全按写词时照角色性格写的来。'}清空回到预设。</div>`
+        + `</div>`;
+}
+
 // 情绪组是词库里的容器，和角色上的表情槽分开列。标题上的数字就是当前有多少组。
 export function renderMoodGroupList(groups, options = {}) {
     const list = storedMoodGroups(groups);
@@ -730,6 +766,7 @@ export function renderMoodGroupList(groups, options = {}) {
         )).join('');
         const wordsHtml = open
             ? `<div class="igs-mood-word-list">${tags || '<div class="igs-scene-empty">暂无情绪词</div>'}<button type="button" class="igs-btn-mgr-icon" data-action="mood-add-word:${encSeg(label)}" title="添加词">+</button></div>`
+                + renderMoodGroupExpressionTags(group, label)
             : '';
         return `<div class="igs-mood-group" data-mood-group="${esc(label)}">`
             + `<div class="igs-btn-mgr-row">`
@@ -742,10 +779,18 @@ export function renderMoodGroupList(groups, options = {}) {
             + `<button type="button" class="igs-btn-mgr-icon" data-action="${toggle}" title="${open ? '收起' : '展开这个组里的词'}" aria-expanded="${open}">${open ? chevronUp : chevronDown}</button>`
             + `</div>${wordsHtml}</div>`;
     }).join('');
+    // 旧版默认只有 8 组；表情差分按 20 档预设画，缺的组在这里提示并可一键补上（已有的组不重置）。
+    const have = new Set(list.map((group) => String(group.label || '').trim()));
+    const missing = MOOD_PRESET.map((entry) => entry.label).filter((label) => !have.has(label));
+    const missingHtml = missing.length
+        ? `<div class="igs-source-filter-note igs-mood-missing">表情差分最多画 20 种表情，这里还缺 ${missing.length} 组：${esc(missing.join('、'))}。缺的组在正文里认不出来，画了也用不上。`
+            + `<button type="button" class="igs-review-link" data-action="mood-fill-presets">补上缺的 ${missing.length} 组</button></div>`
+        : '';
     return `<div class="igs-mood-groups" data-mood-group-count="${list.length}">`
         + `<div class="igs-settings-section-head"><div class="igs-settings-subhead">情绪组 <span class="igs-mood-group-total">${list.length}</span></div>`
         + `<button type="button" class="igs-btn-mgr-icon" data-action="mood-add-group" title="新增情绪组" aria-label="新增情绪组">+</button></div>`
         + `<div class="igs-source-filter-note">组名对应表情槽，组里的词是正文里的叫法。</div>`
+        + missingHtml
         + `<div class="igs-btn-mgr-list">${rows || '<div class="igs-scene-empty">还没有情绪组</div>'}</div>`
         + `</div>`;
 }

@@ -23,7 +23,7 @@ import { fontOptionsWith, loadCustomFonts, registerCustomFonts } from '../../med
 import { DIALOG_FONT_OPTIONS, PROMPT_RULE_OFF_HINT, PROMPT_RULE_OUTFIT_HINT, PROMPT_RULE_PRESET_HINT, scenePromptRuleOutfitHint, SETTINGS_PANEL_REQUIRED_SELECTORS, SETTINGS_PANEL_TAB_CONTRACT } from './reader-host-constants.js';
 import { PUBLIC_READER_MODES, getReaderModeLabel } from '../../schemas/reader-mode.js';
 import { esc, toHex } from './reader-value-utils.js';
-import { checkbox, colorInput, field, renderCharacterAssetList, renderMoodGroupList, renderMoodReviewList, renderPinnedButtons, renderSceneAssetList, renderGeneratedAssetPane, countGeneratedWaiting, renderStageShakeSettings, renderChatShowSettings, renderSystemRoleSettings, renderWeatherFxSettings, renderCustomFontManager, renderTemplate, rangeInput, secretInput, segmentedInput, selectInput, textInput, textareaInput, numberInput, hiddenAttr, modelPicker, tableMultiSelect } from './settings-fields.js';
+import { checkbox, colorInput, field, renderCharacterAssetList, renderMoodGroupList, renderMoodReviewList, renderWorldSummarySection, renderPinnedButtons, renderSceneAssetList, renderGeneratedAssetPane, countGeneratedWaiting, renderStageShakeSettings, renderChatShowSettings, renderSystemRoleSettings, renderWeatherFxSettings, renderCustomFontManager, renderTemplate, rangeInput, secretInput, segmentedInput, selectInput, textInput, textareaInput, numberInput, hiddenAttr, modelPicker, tableMultiSelect } from './settings-fields.js';
 import { normalizeSettingsTab, normalizeSpriteDefaultScale, normalizeSpriteGenderScale, SPRITE_HEIGHT_RANGE, SPRITE_SHORTER_RANGE } from './settings-normalize.js';
 import { createShujukuClient } from '../../data/shujuku/client.js';
 import { listStatusHudTables, normalizeStatusHudSettings } from '../../data/shujuku/status-hud-model.js';
@@ -311,6 +311,7 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
                 autoLlmPromptAssetField: field('bridge.autoIllustration.llm.prompts.asset', '素材补全规划', autoTextarea('bridge.autoIllustration.llm.prompts.asset', auto.llm.prompts.asset, '清空即恢复内置提示词')),
                 autoLlmPromptAssetSoftField: field('bridge.autoIllustration.llm.prompts.assetSoft', '素材补全规划 · 温和重试', autoTextarea('bridge.autoIllustration.llm.prompts.assetSoft', auto.llm.prompts.assetSoft, '清空即恢复内置提示词')),
                 autoLlmContextField: field('bridge.autoIllustration.llm.contextFloors', '参考前文楼层数', numberInput('bridge.autoIllustration.llm.contextFloors', auto.llm.contextFloors, 0, 3)),
+                autoLlmContextBudgetField: field('bridge.autoIllustration.llm.contextBudget', '读取上下文', selectInput('bridge.autoIllustration.llm.contextBudget', auto.llm.contextBudget, [['standard', '标准（本楼前6000字＋前文）'], ['32k', '约3万token'], ['128k', '约12万token'], ['500k', '约50万token'], ['1000k', '约100万token']]), '剧情CG和楼内补背景、立绘时副LLM读多少正文。标准以外整层都读，前文连你的发言从近到远读满为止，资料节选也加长，超时自动放到10分钟；越大越准，也越慢越贵，模型和接口的上下文上限要够。'),
                 autoNaiTransportField: field('bridge.autoIllustration.nai.transport', '传输方式', selectInput('bridge.autoIllustration.nai.transport', auto.nai.transport, [['direct', '浏览器直连'], ['st-proxy', '酒馆CORS代理（需开启enableCorsProxy）']])),
                 autoNaiEndpointField: field('bridge.autoIllustration.nai.endpoint', '接口地址', textInput('bridge.autoIllustration.nai.endpoint', auto.nai.endpoint, '留空使用官方image.novelai.net')),
                 autoNaiKeyField: field('bridge.autoIllustration.nai.apiKey', 'NAI Key', secretInput('bridge.autoIllustration.nai.apiKey', auto.nai.apiKey, 'pst-...')),
@@ -443,6 +444,7 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
                 spriteHeight: { sceneAssets, reader },
                 resolveUrl: resolveGenerated,
                 expressionNotes: normalizeGeneratedLibrary(sceneAssets.generated).expressionNotes,
+                spriteClear: asyncState.spriteClear || null,
                 folderSelect: (name, opts) => renderAssetFolderSelect('characters', name, assetFolders.characters, opts),
                 scopeTag,
                 isOpen: (key) => Boolean(asyncState.advancedOpen && asyncState.advancedOpen[key]),
@@ -542,6 +544,7 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
                     + checkbox('bridge.sceneAssets.promptAdaptive', sceneAssets.promptAdaptive !== false, '按需注入')
                     + '<div class="igs-source-filter-note">仅在需要时附上完整说明。</div></details>',
                 wardrobeSection: renderWardrobe(scopedEntries('wardrobe'), { resolveUrl: resolveGenerated, scopeTag, focus: asyncState.wardrobeFocus || '', lead: scopeFilterBar('wardrobe') }),
+                worldSection: renderWorldSummarySection(sceneAssets),
                 moodSection: checkbox('bridge.sceneAssets.moodAutoClassify', sceneAssets.moodAutoClassify === true, '自动归类（用副API）')
                     + (asyncState.moodAutoStatus ? `<div class="igs-source-filter-note" data-mood-auto-status>${esc(asyncState.moodAutoStatus)}</div>` : '')
                     + renderMoodGroupList(sceneAssets.moodGroups, { isOpen: (key) => Boolean(asyncState.advancedOpen && asyncState.advancedOpen[key]) })

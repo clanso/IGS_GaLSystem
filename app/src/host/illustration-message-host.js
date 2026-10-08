@@ -130,9 +130,21 @@ export function createIllustrationMessageHost(globalObject = globalThis) {
         const ctx = context();
         const chat = ctx && Array.isArray(ctx.chat) ? ctx.chat : [];
         const out = [];
-        for (let i = Number(messageId) - 1; i >= 0 && out.length < count; i -= 1) {
+        for (let i = Math.min(Number(messageId), chat.length) - 1; i >= 0 && out.length < count; i -= 1) {
             const msg = chat[i];
             if (msg && !msg.is_user && !msg.is_system && typeof msg.mes === 'string') out.unshift(msg.mes);
+        }
+        return out;
+    }
+
+    // 本楼之前最近 count 条消息（用户和 AI，不含系统消息）：[{ isUser, text }]，旧的在前。
+    function readPreviousMessages(messageId, count) {
+        const ctx = context();
+        const chat = ctx && Array.isArray(ctx.chat) ? ctx.chat : [];
+        const out = [];
+        for (let i = Math.min(Number(messageId), chat.length) - 1; i >= 0 && out.length < count; i -= 1) {
+            const msg = chat[i];
+            if (msg && !msg.is_system && typeof msg.mes === 'string') out.unshift({ isUser: msg.is_user === true, text: msg.mes });
         }
         return out;
     }
@@ -224,7 +236,7 @@ export function createIllustrationMessageHost(globalObject = globalThis) {
     }
 
     return {
-        getChatId, getUserName, getCharacterNames, readCharacterLore, readFloor, readPreviousAiTexts, writeFloor, on, attachPromptStrip, ensureMarkerRegexes,
+        getChatId, getUserName, getCharacterNames, readCharacterLore, readFloor, readPreviousAiTexts, readPreviousMessages, writeFloor, on, attachPromptStrip, ensureMarkerRegexes,
         destroy() { while (cleanups.length) cleanups.pop()(); },
     };
 }

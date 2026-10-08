@@ -13,6 +13,8 @@ import { collectAssetZipEntries } from '../../scene/asset-zip.js';
 import { assetOwnerKey, draftAssetLibrary, draftEffectiveAssets, effectiveSceneAssets, ensureCardLibrary, libraryHasContent, moveLibraryEntry, rememberAssetScope, sceneAssetsForContext } from '../../scene/asset-scope.js';
 import { buildCharacterCardPack, buildImageZip, buildPresetArchive, mergeLabelGroups, parseCharacterCardPack, parsePresetArchive, parseSettingsArchive, spriteEntriesForNames } from '../../scene/card-pack.js';
 import { getSillyTavernContext } from '../../host/tavern-helper-adapter.js';
+import { collectCharacterSources, formatCharacterSources, pickCharacterSources, pickChatMentions, readSourceMaterial } from '../../host/character-sources.js';
+import { extractWorldSummary, prepareWorldContext } from './world-context.js';
 import { localImageCacheFor } from '../../media/tavern-image-cache.js';
 import { createIndexedDbAssetThumbStore } from '../../media/asset-thumb-store.js';
 import { buildPageDiagnostic } from './page-diagnostic.js';
@@ -33,7 +35,7 @@ import { ROMANCE_ACTIONS_MAX, normalizeRomanceFxSettings } from './romance-setti
 import { META_GLOBAL_SCOPE, META_LINE_KINDS, META_LINES_MAX, normalizeMetaFxSettings } from './meta-settings.js';
 import { applyPerformancePreset, capturePerformancePreset, detectPerformancePreset, performancePresetLabel, restorePerformancePreset } from './performance-presets.js';
 import { applyPerformanceProfile, hasPerformanceProfile, profileDiff, profileFromReader } from './performance-profile.js';
-import { WORLDVIEWS, applyWorldview, resolveWorldview } from '../../scene/worldview.js';
+import { WORLDVIEWS, applyWorldview, resolveWorldview, worldContextOf } from '../../scene/worldview.js';
 import { normalizeHorrorGore, normalizeHorrorStyle } from '../../scene/horror.js';
 import { BGM_ACTION_RE, handleBgmSettingsAction } from './bgm-settings-actions.js';
 import { deleteTavernFont, loadCustomFonts, pickFontFile, saveCustomFonts, uploadFontFile } from '../../media/custom-fonts.js';
@@ -94,7 +96,7 @@ function assetFolderScope(settingsState, options) {
 
 const CHARACTER_FIELDS = ['characters', 'characterOutfits', 'characterDna', 'characterAliases', 'statusAvatars'];
 const SCENE_ACTION = /^scene-(?:(?:add|remove|rename|set|toggle|pick)-(?:bg|bg-word|bg-url|time|time-url|weather|weather-url)|variant-(?:set|retry))$/;
-const CHARACTER_ACTION = /^(?:scene-(?:add|remove|rename|set|toggle|pick)-(?:char|char-alias|mood|mood-url|dna-char|outfit-mood)|status-avatar-(?:pick|clear|set-url|generate)|char-generate-sprite|outfit-generate-nude|char-expression-(?:prompt|set|retry|resume)|outfit-expression-(?:prompt|set|retry|resume))$/;
+const CHARACTER_ACTION = /^(?:scene-(?:add|remove|rename|set|toggle|pick)-(?:char|char-alias|mood|mood-url|dna-char|outfit-mood)|status-avatar-(?:pick|clear|set-url|generate)|char-generate-sprite|char-persona-extract|outfit-generate-nude|char-expression-(?:prompt|set|retry|resume)|outfit-expression-(?:prompt|set|retry|resume)|sprite-clear(?:-pick|-all|-apply)?)$/;
 
 // 服装的适用场景可能指向另一边的场景：场景改名、删除时全局和本卡的服装都要跟上。
 function linkedCharacterOutfits(settingsState) {
@@ -199,6 +201,48 @@ function characterExpressionDna(sceneAssets, name) {
     return hit ? hit.dna : null;
 }
 
+// 「性格与表情习惯」：从角色卡 / 世界书 / 数据库收集提到这个角色的资料，交给副 LLM 提炼。
+async function extractCharacterPersona({ service, globalObj, sceneAssets, name }) {
+    if (!service || typeof service.summarizeCharacterPersona !== 'function') return { ok: false, error: '当前不能提炼性格' };
+    const sources = await collectCharacterSources(globalObj, { name, aliases: characterAliasesOf(sceneAssets, name) });
+    const sourcesText = formatCharacterSources(sources);
+    if (!sourcesText) {
+        return { ok: false, error: `角色卡、世界书和数据库里都没找到「${name}」的资料${sources.notes.length ? `（${sources.notes.join('，')}）` : ''}` };
+    }
+    const written = await service.summarizeCharacterPersona({ name, sourcesText });
+    if (!written || !written.ok) return { ok: false, error: (written && written.error) || '提炼失败' };
+    if (written.insufficient) return { ok: false, error: `资料里看不出「${name}」的性格` };
+    return { ok: true, persona: written.persona };
+}
+
+// 画默认立绘、头像时给写词的角色资料节选：比提炼性格时短，只补 DNA 没写到的长相和穿着。
+// 「副 LLM → 读取上下文」加大了预算时，素材服务另在说明前附上全部设定资料和正文原文。
+const SPRITE_SOURCE_LIMITS = Object.freeze({ card: 2000, worldbook: 2500, entry: 1000, database: 800 });
+const characterAliasesOf = (sceneAssets, name) => (sceneAssets.characterAliases && Array.isArray(sceneAssets.characterAliases[name]) ? sceneAssets.characterAliases[name] : []);
+
+// 角色卡 / 世界书 / 数据库节选，加上正文里提到这个角色的段落（长相、穿着常写在剧情里）。
+function characterSourcesText(material, sceneAssets, name) {
+    const sources = pickCharacterSources(material, { name, aliases: characterAliasesOf(sceneAssets, name), limits: SPRITE_SOURCE_LIMITS });
+    const chat = pickChatMentions(material.chat, name);
+    return formatCharacterSources({ ...sources, chat: chat ? `【前文·提到「${name}」的段落】\n${chat}` : '' });
+}
+
+// 画默认立绘前读一次角色卡 / 世界书 / 数据库：世界背景（还没有世界设定提要就先提炼）和这个角色的资料节选；DNA 不动。
+async function spriteWritingBackground({ settingsState, service, globalObj, sceneAssets, name, onProgress, persist }) {
+    const material = await readSourceMaterial(globalObj);
+    const prepared = await prepareWorldContext({ settingsState, service, globalObj, material, onProgress, persist });
+    if (prepared.note) showGeneratedNotice(globalObj, prepared.note, prepared.tone);
+    return { world: prepared.world, sourcesText: characterSourcesText(material, sceneAssets, name) };
+}
+
+// 存进这个角色的 DNA（和 DNA 一起跟着角色走）；返回更新后的 DNA。
+function saveCharacterPersona(sceneAssets, name, persona) {
+    const map = sceneAssets.characterDna && typeof sceneAssets.characterDna === 'object' && !Array.isArray(sceneAssets.characterDna)
+        ? sceneAssets.characterDna : (sceneAssets.characterDna = {});
+    map[name] = normalizeCharacterDna({ ...normalizeCharacterDna(Object.hasOwn(map, name) ? map[name] : null), persona });
+    return map[name];
+}
+
 function expressionNoteKey(name, outfit) {
     return outfit ? `${name}\u0001${outfit}` : name;
 }
@@ -254,6 +298,8 @@ function settingsProgressHost(globalObj) {
 // 进度条写明在画谁：写词和出图分开说，一批多张带上第几张。
 function expressionProgressText(who, event) {
     if (event && event.phase === 'write') return `写提示词：${who}`;
+    if (event && event.phase === 'persona') return `提炼性格：${who}`;
+    if (event && event.phase === 'world') return `提炼世界设定：${who}`;
     const total = Number(event && event.total) || 0;
     if (total > 1) return `生图中：${who}·${event.mood || ''} ${Number(event.done) || 0}/${total}`;
     return `生图中：${who}`;
@@ -307,13 +353,13 @@ function generationFailure(globalObj, dialogs, message, reason) {
 }
 
 // 已有提示词的先补画，不重写；剩下没有词的再写再画。补画中途停下就不再写。
-async function paintThenWriteExpressions({ service, name, paintItems, writeLabels, basePrompt, dna, outfit, note, nsfw, onProgress, signal }) {
+async function paintThenWriteExpressions({ service, name, paintItems, writeLabels, basePrompt, dna, outfit, note, nsfw, world = null, onProgress, signal }) {
     const paint = paintItems.length && typeof service.paintExpressionCaptions === 'function'
         ? await service.paintExpressionCaptions({ name, items: paintItems, basePrompt, dna, outfit, nsfw, onProgress, signal })
         : null;
     if (paint && !paint.ok) return paint;
     if (paint && (paint.stopped || (signal && signal.aborted))) return paint;
-    const written = await service.generateExpressionSet({ name, basePrompt, moods: writeLabels, dna, outfit, note, nsfw, onProgress, signal });
+    const written = await service.generateExpressionSet({ name, basePrompt, moods: writeLabels, dna, outfit, note, nsfw, world, onProgress, signal });
     if (!paint) return written;
     const paintedItems = paint.items || [];
     const wroteItems = written && written.items;
@@ -534,15 +580,57 @@ function applyMoodPreset(groups) {
     for (const group of custom) {
         for (const word of Array.isArray(group.words) ? group.words : []) customWords.add(String(word || '').trim());
     }
+    // 套用预设只重置词；各组改过的表情 tag 和「固定加上」开关保留。
+    const tagSettings = (label) => {
+        const old = groups.find((group) => group && String(group.label || '').trim() === label) || {};
+        return { ...(old.tags && { tags: old.tags }), ...(old.alwaysTags === true && { alwaysTags: true }) };
+    };
     const built = MOOD_PRESET.map((entry) => ({
         label: entry.label,
         words: entry.words.filter((word) => !customWords.has(word)),
+        ...tagSettings(entry.label),
     }));
-    const next = [...built, ...custom.map((group) => ({ label: String(group.label).trim(), words: (group.words || []).slice() }))];
+    const next = [...built, ...custom.map((group) => ({ label: String(group.label).trim(), words: (group.words || []).slice(), ...tagSettings(String(group.label).trim()) }))];
     const before = JSON.stringify(groups.map((group) => ({ label: group.label, words: group.words })));
     const after = JSON.stringify(next.map((group) => ({ label: group.label, words: group.words })));
     groups.splice(0, groups.length, ...next);
     return before !== after;
+}
+
+// 补上缺的预设组：旧版默认只有 8 组，表情差分却按 20 档预设画；正文里写「委屈」「哭泣」时找不到组，那几张立绘永远用不上。
+// 只加还没有的预设组（带预设词），已有的组不重置。新组的组名和预设词如果在别的预设组里，挪到新组
+// （不挪的话正文里的这个词还是先归到旧组）；用户自建组里的词不动，新组就不带这些词。返回 { added, moved }。
+export function planMissingMoodPresets(groups) {
+    const list = Array.isArray(groups) ? groups : [];
+    const have = new Set(list.map((group) => String(group && group.label || '').trim()));
+    const presetLabels = new Set(MOOD_PRESET.map((entry) => entry.label));
+    const missing = MOOD_PRESET.filter((entry) => !have.has(entry.label));
+    const customWords = new Set(list
+        .filter((group) => group && !presetLabels.has(String(group.label || '').trim()))
+        .flatMap((group) => (Array.isArray(group.words) ? group.words : []).map((word) => String(word || '').trim())));
+    const added = missing.map((entry) => ({ label: entry.label, words: entry.words.filter((word) => !customWords.has(word)) }));
+    const moved = [];
+    for (const entry of added) {
+        const words = new Set([entry.label, ...entry.words]);
+        for (const group of list) {
+            const label = String(group && group.label || '').trim();
+            if (!presetLabels.has(label)) continue;
+            for (const word of Array.isArray(group.words) ? group.words : []) {
+                if (words.has(String(word || '').trim())) moved.push({ word: String(word).trim(), from: label, to: entry.label });
+            }
+        }
+    }
+    return { added, moved };
+}
+
+function applyMissingMoodPresets(groups, plan) {
+    for (const { word, from, to } of plan.moved) {
+        const group = groups.find((item) => item && String(item.label || '').trim() === from);
+        if (group && Array.isArray(group.words)) group.words = group.words.filter((item) => String(item || '').trim() !== word);
+        const target = plan.added.find((item) => item.label === to);
+        if (target && word !== to && !target.words.includes(word)) target.words.push(word);
+    }
+    groups.push(...plan.added.map((item) => ({ label: item.label, words: item.words.slice() })));
 }
 
 function generatedOperationFailure(dialogs, globalObj, message, reason) {
@@ -812,6 +900,53 @@ export async function handleSettingsAction(action, ctx) {
             if (result && result.ok === false) return result;
         }
         asyncState.assetSelect = null;
+        return rerenderSettings();
+    }
+    // 清空一套服装（原装 outfit 为空）下选中的立绘：只清图和这格存下的写词注记，情绪格留着，之后可以重新生成。
+    // 多选只记在界面状态里（asyncState.spriteClear），清空时才改草稿并保存。
+    const clearMatch = /^sprite-clear(?:-(pick|all|apply))?:([^:]*):([^:]*)(?::(.*))?$/.exec(normalizedAction);
+    if (clearMatch) {
+        const [, op = 'toggle', c, o, m = ''] = clearMatch;
+        const character = decodeSeg(c);
+        const outfit = decodeSeg(o);
+        const asyncState = settingsState.asyncState;
+        const cur = asyncState.spriteClear && asyncState.spriteClear.character === character && asyncState.spriteClear.outfit === outfit
+            ? asyncState.spriteClear : null;
+        const liveAssets = draftAssetLibrary(settingsState, editTarget);
+        const outfitEntry = outfit ? ((liveAssets.characterOutfits || {})[character] || {})[outfit] : null;
+        const slots = outfit
+            ? (outfitEntry && outfitEntry.moods && typeof outfitEntry.moods === 'object' ? outfitEntry.moods : {})
+            : ((liveAssets.characters || {})[character] || {});
+        const filled = Object.keys(slots).filter((mood) => String(slots[mood] || '').trim());
+        if (op === 'toggle') {
+            asyncState.spriteClear = cur ? null : { character, outfit, moods: new Set() };
+            return rerenderSettings();
+        }
+        if (!cur) return rerenderSettings();
+        if (op === 'pick') {
+            const mood = decodeSeg(m);
+            if (cur.moods.has(mood)) cur.moods.delete(mood); else cur.moods.add(mood);
+            return rerenderSettings();
+        }
+        if (op === 'all') {
+            cur.moods = cur.moods.size === filled.length ? new Set() : new Set(filled);
+            return rerenderSettings();
+        }
+        const moods = [...cur.moods].filter((mood) => filled.includes(mood));
+        if (!moods.length) return rerenderSettings();
+        const where = `「${character}」${outfit ? `「${outfit}」` : '原装'}`;
+        const preview = moods.slice(0, 6).map((mood) => `「${mood}」`).join('') + (moods.length > 6 ? ` 等 ${moods.length} 张` : '');
+        if (typeof dialogs.confirm === 'function' && !(await dialogs.confirm(`清空${where}的 ${preview}立绘？情绪格会留着，可以重新生成；这几格存下的提示词也一起清掉。`))) return rerenderSettings();
+        let library = normalizeGeneratedLibrary(liveAssets.generated);
+        const noteKey = expressionNoteKey(character, outfit);
+        for (const mood of moods) {
+            slots[mood] = '';
+            library = clearExpressionNote(library, noteKey, mood);
+        }
+        liveAssets.generated = library;
+        asyncState.spriteClear = null;
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
         return rerenderSettings();
     }
     if (normalizedAction.startsWith('asset-filter:')) {
@@ -1383,8 +1518,11 @@ export async function handleSettingsAction(action, ctx) {
             progress.end();
             return generationFailure(globalObj, dialogs, `「${name}」的默认立绘未能生成：${errorText(error, '未返回原因')}${current ? '\n原有图片保持不变。' : ''}`, 'sprite-generate-failed');
         };
+        // 拿已有词重画不写词，不用先读资料。
+        const background = redrawCaption ? {} : await spriteWritingBackground({ settingsState, service, globalObj, sceneAssets, name, onProgress: progress.onProgress, persist: persistSettingsDraft });
+        progress.onProgress({ phase: redrawCaption ? 'paint' : 'write' });
         try {
-            result = await service.generateCharacterSprite({ name, dna, note: spriteNote, caption: redrawCaption, exact: redrawExact, onProgress: progress.onProgress });
+            result = await service.generateCharacterSprite({ name, dna, note: spriteNote, caption: redrawCaption, exact: redrawExact, ...background, onProgress: progress.onProgress });
         } catch (error) {
             return failed(error);
         }
@@ -1441,8 +1579,9 @@ export async function handleSettingsAction(action, ctx) {
             restoreBusy();
             return generationFailure(globalObj, dialogs, `「${name}」的「${outfitName}」裸体立绘未能生成：${errorText(error, '未返回原因')}${current ? '\n原有图片保持不变。' : ''}`, 'sprite-generate-failed');
         };
+        const background = await spriteWritingBackground({ settingsState, service, globalObj, sceneAssets, name, onProgress: progress.onProgress, persist: persistSettingsDraft });
         try {
-            result = await service.generateCharacterSprite({ name, dna, nude: true, onProgress: progress.onProgress });
+            result = await service.generateCharacterSprite({ name, dna, nude: true, ...background, onProgress: progress.onProgress });
         } catch (error) {
             return failed(error);
         }
@@ -1467,6 +1606,28 @@ export async function handleSettingsAction(action, ctx) {
         restoreBusy();
         showGeneratedNotice(globalObj, `「${name}」的「${outfitName}」裸体立绘已更新。`, 'info');
         return rendered;
+    }
+
+    // 角色设定里的「从资料提炼」：手动（重新）提炼性格与表情习惯，已有内容先问一句再覆盖。
+    if (normalizedAction.startsWith('char-persona-extract:')) {
+        const name = decodeSeg(normalizedAction.slice('char-persona-extract:'.length));
+        if (!name || ['__proto__', 'constructor', 'prototype'].includes(name)) return { ok: false, error: '角色名无效' };
+        const globalObj = options.global || globalThis;
+        const sceneAssets = draftAssetLibrary(settingsState, editTarget);
+        const existing = characterExpressionDna(sceneAssets, name);
+        if (existing && existing.persona && !(await dialogs.confirm(`「${name}」已经有性格与表情习惯，重新提炼会覆盖现在的内容。继续吗？`))) return rerenderSettings();
+        const task = beginSettingsProgress(() => settingsProgressHost(globalObj), `提炼性格：${name}`);
+        let extracted;
+        try {
+            extracted = await extractCharacterPersona({ service: options.generatedAssets, globalObj, sceneAssets, name });
+        } finally {
+            task.end();
+        }
+        if (!extracted.ok) return generationFailure(globalObj, dialogs, `没能提炼「${name}」的性格：${extracted.error}`, 'persona-extract-failed');
+        saveCharacterPersona(sceneAssets, name, extracted.persona);
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
     }
 
     if (/^(?:char|outfit)-expression-(?:set|retry|resume):/.test(normalizedAction)) {
@@ -1551,7 +1712,7 @@ export async function handleSettingsAction(action, ctx) {
             }
             if (!savedCaption && note && note.caption) savedCaption = note.caption;
         }
-        const dna = characterExpressionDna(sceneAssets, name);
+        let dna = characterExpressionDna(sceneAssets, name);
         const nude = outfitMode && isBuiltinNudeOutfit(outfitEntry.wardrobe);
         const clothes = outfitMode && !nude ? resolveWardrobePrompt(draftEffectiveAssets(settingsState).wardrobe || {}, outfitEntry, outfitName) : null;
         const outfit = outfitMode ? { name: outfitName, words: nude ? [] : outfitEntry.words, ownImage: Boolean(ownUrl), prompt: nude ? '' : (clothes ? clothes.prompt : ''), nude, nsfwBoost: Boolean(!nude && clothes && clothes.nsfwBoost) } : null;
@@ -1613,6 +1774,25 @@ export async function handleSettingsAction(action, ctx) {
         let result;
         if (!progress) progress = startExpressionProgress(globalObj, subject);
         const onProgress = progress.onProgress;
+        // 要写新词、角色还没有「性格与表情习惯」时，先从角色卡 / 世界书 / 数据库提炼一段存起来；提炼失败不挡生成。
+        if (!resume && (retry ? !savedCaption : writeLabels.length > 0) && !(dna && dna.persona)) {
+            onProgress({ phase: 'persona' });
+            const extracted = await extractCharacterPersona({ service, globalObj, sceneAssets, name });
+            if (extracted.ok) {
+                dna = saveCharacterPersona(sceneAssets, name, extracted.persona);
+                persistSettingsDraft();
+                showGeneratedNotice(globalObj, `已为「${name}」提炼性格与表情习惯，写表情时会参考；可在角色设定里查看和修改。`, 'info');
+            } else {
+                showGeneratedNotice(globalObj, `没能提炼「${name}」的性格：${extracted.error}。这次按默认写法写表情。`);
+            }
+        }
+        // 世界背景：要写新词时还没有世界设定提要就先提炼；只补画存好的词时直接用现有的。
+        let world = worldContextOf(draftEffectiveAssets(settingsState));
+        if (!resume && (retry ? !savedCaption : writeLabels.length > 0)) {
+            const prepared = await prepareWorldContext({ settingsState, service, globalObj, onProgress, persist: persistSettingsDraft });
+            world = prepared.world;
+            if (prepared.note) showGeneratedNotice(globalObj, prepared.note, prepared.tone);
+        }
         // 单张重画的按钮由宿主按 settingsBusyLabel 锁住，这里只锁整套差分的按钮。
         const restoreBusy = retry ? () => {} : markExpressionActionBusy(globalObj, normalizedAction, '生图中');
         // 单张重画不接停止键：只有一张，按了也停不下来，别把「表情差分」按钮变成摆设。
@@ -1631,11 +1811,11 @@ export async function handleSettingsAction(action, ctx) {
             result = resume || paintOnly
                 ? await service.paintExpressionCaptions({ name, items: resumeItems, basePrompt, dna, outfit, nsfw, onProgress, signal: stopControl.signal })
                 : retry && savedCaption && typeof service.generateExpressionImage === 'function'
-                ? await service.generateExpressionImage({ name, mood, caption: savedCaption, exact: savedExact, basePrompt, dna, outfit, nsfw, onProgress, signal: stopControl.signal })
+                ? await service.generateExpressionImage({ name, mood, caption: savedCaption, exact: savedExact, basePrompt, dna, outfit, nsfw, world, onProgress, signal: stopControl.signal })
                 : retry
-                    ? await service.generateExpressionImage({ name, mood, basePrompt, dna, outfit, nsfw, onProgress, signal: stopControl.signal })
+                    ? await service.generateExpressionImage({ name, mood, basePrompt, dna, outfit, nsfw, world, onProgress, signal: stopControl.signal })
                     : await paintThenWriteExpressions({
-                        service, name, paintItems, writeLabels, basePrompt, dna, outfit, note: moodNote, nsfw, onProgress, signal: stopControl.signal,
+                        service, name, paintItems, writeLabels, basePrompt, dna, outfit, note: moodNote, nsfw, world, onProgress, signal: stopControl.signal,
                     });
         } catch (error) {
             stopControl.done();
@@ -1941,6 +2121,24 @@ export async function handleSettingsAction(action, ctx) {
         return rerenderSettings();
     }
 
+    // 「场景 → 规则」的世界设定提要：从角色卡场景栏和世界书常驻条目（重新）提炼，已有内容先问一句再覆盖。
+    if (normalizedAction === 'world-summary-extract') {
+        const globalObj = options.global || globalThis;
+        if (worldContextOf(draftEffectiveAssets(settingsState)).summary
+            && !(await dialogs.confirm('已经有世界设定提要，重新提炼会覆盖现在的内容。继续吗？'))) return rerenderSettings();
+        const task = beginSettingsProgress(() => settingsProgressHost(globalObj), '提炼世界设定');
+        let extracted;
+        try {
+            extracted = await extractWorldSummary({ settingsState, service: options.generatedAssets, globalObj });
+        } finally {
+            task.end();
+        }
+        if (!extracted.ok) return generationFailure(globalObj, dialogs, `没能提炼世界设定提要：${extracted.error}`, 'world-summary-failed');
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
     const worldviewAction = normalizedAction.match(/^worldview:([a-z-]+)$/);
     if (worldviewAction) {
         const bridgeDraft = settingsState.draft.bridge = settingsState.draft.bridge || {};
@@ -2241,7 +2439,9 @@ export async function handleSettingsAction(action, ctx) {
         let result;
         const progress = startExpressionProgress(globalObj, `${charName}·Q版头像`);
         try {
-            result = await service.generateCharacterAvatar({ name: charName, dna: characterExpressionDna(sceneAssets, charName), onProgress: progress.onProgress });
+            // 头像只带现有的世界背景，不为它单独提炼世界设定；角色资料照默认立绘那样附上，DNA 空着时发色瞳色不靠猜。
+            const sourcesText = characterSourcesText(await readSourceMaterial(globalObj), sceneAssets, charName);
+            result = await service.generateCharacterAvatar({ name: charName, dna: characterExpressionDna(sceneAssets, charName), world: worldContextOf(draftEffectiveAssets(settingsState)), sourcesText, onProgress: progress.onProgress });
         } catch (error) {
             result = { ok: false, error: errorText(error, '') };
         }
@@ -3439,6 +3639,21 @@ export async function handleSettingsAction(action, ctx) {
         return rerenderSettings();
     }
 
+    if (normalizedAction === 'mood-fill-presets') {
+        const groups = ensureMoodGroups(settingsState);
+        const plan = planMissingMoodPresets(groups);
+        if (!plan.added.length) return rerenderSettings();
+        const movedText = plan.moved.length
+            ? `\n这些词会从原来的组挪到新组（不挪的话正文里写这个词还是先归到旧组）：${plan.moved.map((item) => `「${item.word}」${item.from}→${item.to}`).join('、')}。`
+            : '';
+        const message = `补上 ${plan.added.length} 个预设情绪组：${plan.added.map((item) => item.label).join('、')}。\n已有的组和你加的词不重置。${movedText}`;
+        if (typeof dialogs.confirm === 'function' && !(await dialogs.confirm(message, { okLabel: '补上' }))) return rerenderSettings();
+        applyMissingMoodPresets(groups, plan);
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
+        return rerenderSettings();
+    }
+
     if (normalizedAction === 'mood-add-group') {
         const globalObj = options.global || globalThis;
         const groups = ensureMoodGroups(settingsState);
@@ -3500,6 +3715,25 @@ export async function handleSettingsAction(action, ctx) {
             const persisted = persistSettingsDraft();
             if (persisted.ok === false) return persisted;
         }
+        return rerenderSettings();
+    }
+
+    // 情绪组的表情 tag：开关打开时表情差分出图总是放到最前，关着就不加；tag 清空回到预设。
+    if (normalizedAction.startsWith('mood-group-always:') || normalizedAction.startsWith('mood-group-tags:')) {
+        const always = normalizedAction.startsWith('mood-group-always:');
+        const [rawLabel, rawValue] = normalizedAction.slice(always ? 'mood-group-always:'.length : 'mood-group-tags:'.length).split(':');
+        const group = ensureMoodGroups(settingsState).find((g) => g.label === decodeSeg(rawLabel));
+        if (!group) return { ok: false, error: '找不到这个情绪组' };
+        if (always) {
+            if (group.alwaysTags === true) delete group.alwaysTags;
+            else group.alwaysTags = true;
+        } else {
+            const tags = decodeSeg(rawValue).replace(/\s+/g, ' ').trim();
+            if (tags) group.tags = tags;
+            else delete group.tags;
+        }
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
         return rerenderSettings();
     }
 

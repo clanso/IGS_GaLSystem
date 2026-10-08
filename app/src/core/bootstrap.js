@@ -38,6 +38,7 @@ import { createReaderImageService } from '../generated-images/reader-image-servi
 import { createPromptInjector } from '../host/prompt-injector.js';
 import { createIllustrationMessageHost } from '../host/illustration-message-host.js';
 import { createSecondaryLlm } from '../host/secondary-llm.js';
+import { formatCharacterSources, pickCharacterSources, pickSceneSources, pickSettingMaterial, readSourceMaterial } from '../host/character-sources.js';
 import { createImageBackend, mergeLegacyNaiSettings } from '../generated-images/image-backend.js';
 import { IMAGE_ACTIVITY_EVENT, trackImageActivity } from '../generated-images/generation-activity.js';
 import { createNaiOfficialClient } from '../generated-images/nai-official-client.js';
@@ -60,6 +61,22 @@ const IGS_VERSION = '0.35.3';
 const SCENE_ASSETS_INJECTION_INITIAL_DELAY_MS = 3000;
 const SCENE_ASSETS_INJECTION_RETRY_MS = 1500;
 const SCENE_ASSETS_INJECTION_MAX_ATTEMPTS = 5;
+// 副 LLM 规划（楼内补立绘 / 背景、剧情 CG）的资料节选：标准长度时每项限得比手动生成时短；
+// 「读取上下文」加大预算时（large）给长的，世界书相关条目尽量整条带上。
+const PLANNER_SOURCE_LIMITS = Object.freeze({ card: 800, worldbook: 1200, entry: 600, database: 500 });
+const LARGE_PLANNER_SOURCE_LIMITS = Object.freeze({ card: 8000, worldbook: 20000, entry: 5000, database: 5000 });
+
+// 一次读角色卡 / 世界书 / 数据库，再按名字挑节选。
+async function readPlannerSources(globalObject, names, pick, { large = false } = {}) {
+    const material = await readSourceMaterial(globalObject);
+    const limits = large ? LARGE_PLANNER_SOURCE_LIMITS : PLANNER_SOURCE_LIMITS;
+    const out = {};
+    for (const name of names) {
+        const text = formatCharacterSources(pick(material, { name, limits }));
+        if (text) out[name] = text;
+    }
+    return out;
+}
 
 // 自动插图 / 素材补全的进度与失败原因：始终写控制台；阅读器开着时交给对话框顶边的生成细线，
 // 没开时失败与成功再按「显示提示弹窗」弹酒馆 toastr。
@@ -155,6 +172,8 @@ export function bootstrapIGS(options = {}) {
         getViewport: () => readCgViewport(globalObject, readerModeNow()),
         getSceneAssets: () => sceneAssetsNow(readImageBridge().sceneAssets),
         getSourceFilter: () => readImageBridge().sourceFilter,
+        // 剧情 CG 规划：出场角色的角色卡 / 世界书 / 数据库节选。
+        readCharacterSources: (names, sourceOptions) => readPlannerSources(globalObject, names, pickCharacterSources, sourceOptions),
         events,
         random: options.random,
         report: reportImageJob,
@@ -174,6 +193,12 @@ export function bootstrapIGS(options = {}) {
         getReaderMode: readerModeNow,
         getViewport: () => readCgViewport(globalObject, readerModeNow()),
         getSourceFilter: () => readImageBridge().sourceFilter,
+        // 楼内补立绘：按角色名挑节选。
+        readCharacterSources: (names, options) => readPlannerSources(globalObject, names, pickCharacterSources, options),
+        // 楼内补背景：同样按地点名挑角色卡描述 / 场景栏、世界书、数据库节选。
+        readSceneSources: (names, options) => readPlannerSources(globalObject, names, pickSceneSources, options),
+        // 「读取上下文」加大预算时写词附的全部设定资料：整张角色卡、角色卡 / 聊天 / 全局世界书的全部条目、数据库。
+        readSettingMaterial: async (names, { limit = 0 } = {}) => pickSettingMaterial(await readSourceMaterial(globalObject, { withGlobal: true }), { names, limit }),
         events,
         report: reportImageJob,
         thumbStore: options.assetThumbStore !== undefined ? options.assetThumbStore : createIndexedDbAssetThumbStore(globalObject),

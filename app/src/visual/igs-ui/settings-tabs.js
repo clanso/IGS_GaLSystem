@@ -120,7 +120,7 @@ const IMAGE_LLM_TEMPLATE = `
     <div class="igs-source-filter-note">{{autoLlmNote}}</div>
     <div class="igs-source-filter-note" data-image-feature="llm-warn"{{autoLlmWarnHidden}}>{{autoLlmWarn}}</div>
     <div class="igs-source-filter-grid">
-      {{autoLlmSourceField}}{{autoLlmContextField}}
+      {{autoLlmSourceField}}{{autoLlmContextField}}{{autoLlmContextBudgetField}}
     </div>
     <div class="igs-settings-sub"{{autoLlmApiHidden}}>
       <div class="igs-source-filter-grid">
@@ -347,6 +347,10 @@ export const SCENE_RULES_TEMPLATE = `
     <div class="igs-settings-result" data-result="prompt-rule">{{promptRuleStatus}}</div>
     {{promptRuleOutfitHint}}
     {{promptAdvanced}}
+  </div>
+  <div class="igs-source-filter" data-world-section>
+    <div class="igs-source-filter-title">世界设定提要<span class="igs-outfit-muted">生图用</span></div>
+    {{worldSection}}
   </div>
   <div class="igs-source-filter" data-wardrobe-section>
     <div class="igs-source-filter-title">衣柜提示词<span class="igs-outfit-muted">生图用</span><button class="igs-btn-mgr-icon igs-title-add" data-action="wardrobe-add" type="button" title="添加一条衣柜提示词" aria-label="添加一条衣柜提示词">+</button></div>

@@ -36,6 +36,14 @@ export function normalizeWorldview(id) {
     return isReadyWorldview(id) ? id : DEFAULT_WORLDVIEW;
 }
 
+// 生图写词用的世界背景：当前世界观的中文名，加上用户的世界设定提要（可以为空）。
+export function worldContextOf(sceneAssets) {
+    const id = resolveWorldview(sceneAssets);
+    const found = WORLDVIEWS.find((item) => item.id === id);
+    const summary = sceneAssets && typeof sceneAssets.worldSummary === 'string' ? sceneAssets.worldSummary.trim() : '';
+    return { id, label: found ? found.label : '', summary };
+}
+
 // 从场景素材设置读出当前世界观 id。
 export function resolveWorldview(sceneAssets) {
     if (isAncientEra(sceneAssets)) return 'ancient';

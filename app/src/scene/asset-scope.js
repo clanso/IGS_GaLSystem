@@ -34,8 +34,11 @@ function ownedWorldview(card) {
     if (!card || typeof card !== 'object' || Array.isArray(card)) return null;
     const hasWorldview = Object.prototype.hasOwnProperty.call(card, 'worldview');
     const hasAncient = Object.prototype.hasOwnProperty.call(card, 'ancient');
-    if (!hasWorldview && !hasAncient) return null;
-    const patch = {};
+    // 生图用的世界设定提要跟着角色卡走；只写了提要、没选世界观的卡也要留住它。
+    const summary = typeof card.worldSummary === 'string' ? card.worldSummary.trim() : '';
+    if (!hasWorldview && !hasAncient && !summary) return null;
+    const patch = summary ? { worldSummary: summary } : {};
+    if (!hasWorldview && !hasAncient) return patch;
     if (hasWorldview) patch.worldview = card.worldview;
     if (hasAncient) patch.ancient = card.ancient === true;
     else if (hasWorldview) patch.ancient = card.worldview === 'ancient';

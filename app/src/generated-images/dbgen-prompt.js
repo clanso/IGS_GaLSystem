@@ -1,4 +1,4 @@
-import { moodPresetAct, moodPresetTags, moodPresetUse } from '../scene/mood-groups.js';
+import { moodHasNsfwVariant, moodPresetUse, resolveMoodExpressionTags } from '../scene/mood-groups.js';
 
 // 楼内补立绘一次最多写 8 份，超过则平分 2 批。
 export const EXPRESSION_WRITE_BATCH_MAX = 8;
@@ -117,12 +117,26 @@ export function splitExpressionWriteBatches(items) {
 // 立绘底色由程序按「立绘底色」设置统一加；写词时也写底色，会和程序加的那组混在一起。
 const SPRITE_NO_BACKGROUND_LINE = '不要写背景、场景和底色，底色由程序统一加。';
 
+// 每份表情只交代用在什么场面，不规定怎么做（固定的招牌动作会让每个角色都画成同一副套路脸）；
+// 怎么做由写词模型按角色性格和正文来定。自建组没有预设场面，只出现在最后的份数清单里。
+function moodSceneLines(moods, nsfw) {
+    const lines = moods.map((mood, index) => {
+        const use = moodPresetUse(mood);
+        const nsfwVariant = nsfw && moodHasNsfwVariant(mood) ? '这一份画 NSFW 版，情欲上来时的样子。' : '';
+        return use || nsfwVariant ? `${index + 1} ${mood}：${use ? `用在${use}。` : ''}${nsfwVariant}` : '';
+    }).filter(Boolean);
+    return lines.length ? ['各份表情用在什么场面（只说场面，怎么做按这个角色来）：', ...lines] : [];
+}
+
 // note 是用户这次临时补的要求（性格、某个情绪的特别表现），只影响写词这一步；
 // nsfw 为 true 时「动情」改用它在 NSFW 下的动作说明。
-export function buildExpressionDiffDescription(name, prompt, labels, dna, outfit, { note = '', nsfw = false } = {}) {
+// anchor：同一组表情分批写时，前面一批写好的一份；后面的批次外貌、服装和身体状态照它，整组才一致。
+export function buildExpressionDiffDescription(name, prompt, labels, dna, outfit, { note = '', nsfw = false, world = null, anchor = null } = {}) {
     const moods = (Array.isArray(labels) ? labels : []).map((item) => String(item || '').trim()).filter(Boolean);
+    const persona = String((dna && typeof dna === 'object' && dna.persona) || '').trim();
     const stored = prompt && typeof prompt === 'object' ? prompt : {};
     const caption = formatReturnedCaption(stored.caption);
+    const anchored = formatReturnedCaption(anchor);
     const clothes = outfit && typeof outfit === 'object' ? outfit : null;
     const outfitName = clothes ? String(clothes.name || '').trim() : '';
     const words = clothes && Array.isArray(clothes.words)
@@ -154,21 +168,20 @@ export function buildExpressionDiffDescription(name, prompt, labels, dna, outfit
         clothesLine,
         clothes && clothes.nsfwBoost && !nude ? nsfwClothingBoostLine('character') : '',
         clothesPrompt ? `服装提示词：\n${clothesPrompt}` : '',
-        '表情依据该角色的性格、脾气与行为习惯分别撰写，禁止套用统一表情模板。',
-        '规格：大腿以上（cowboy shot）。朝向正面，直立，平视。禁止全身，禁止露出脚，禁止侧身，禁止倾斜构图。',
-        '情绪须写入肢体：手势、肩线、重心随该情绪变化。禁止仅替换面部。',
-        '各表情的动作按下面的说明写，不要把不同表情画成同一张脸。',
-        '下面的动作是基准，不是照抄的模板。先按角色的性格改幅度和形式：三无、高冷、内敛的性格幅度极小，靠眼神和嘴角的细微变化，动作克制；开朗、外向的性格按基准写；狂躁、元气、暴烈的性格幅度夸张，带动肩、手、重心，甚至打破站姿。',
+        anchored ? `这一组表情分几次写，下面是前面已经写好的一份。外貌、服装和身体状态要和它完全一致，只有表情和动作按各自的情绪重写：\n${anchored}` : '',
+        '正文和资料里写着的这个角色现在的身体状态（例如怀孕、受伤包扎、湿身），每一份都要写上，各份写法一致；这不算改长相。',
+        ...worldContextLines(world),
+        '每个表情都按这个角色自己的性格、脾气和说话做事的习惯来写，不要套统一的表情模板。',
+        persona ? `「${name || ''}」的性格与表情习惯（据此决定每个表情怎么做、做到多大；只管表情和动作，不要据此改长相和衣服）：\n${persona}` : '',
+        '规格：大腿以上（cowboy shot），身体朝正面站着（各张差分要叠在同一个位置）。头的角度、视线方向、手和肩膀可以随情绪动。禁止全身，禁止露出脚，禁止整个身体侧过去，禁止倾斜构图。',
+        '写每一份之前，先想这个角色在那种场面里真实会怎么反应，再落到脸上（眉、眼、嘴、视线），需要时带到手和肩膀；动多少按这个角色来，内敛的人可以只有眼神和嘴角的变化。',
+        '同一种情绪，不同的人做法可以完全不同：比如委屈，有人噘嘴含泪，有人眼泪汪汪地凑过来要人哄，有人别过头一声不吭，有人反而笑着说没事。不要套最常见的动漫画法，除非这个角色本来就是这样；也不要为了表现情绪把一串同类标签堆在一起，只写这个角色这一刻真会有的那几个。',
+        '每一份要一眼看得出是哪种情绪，彼此不要撞脸，但都要像同一个人。',
         String(note || '').trim() ? `这次额外的要求：\n${String(note).trim()}` : '',
         caption ? '上面那份立绘的表情和动作不要沿用，每份的表情、嘴型、眼神和手势都按各自的情绪重写。' : '',
         SPRITE_NO_BACKGROUND_LINE,
         ...characterDnaLines(name, dna),
-        ...moods.map((mood, index) => {
-            const act = moodPresetAct(mood, { nsfw });
-            if (!act) return '';
-            const use = moodPresetUse(mood);
-            return use ? `${index + 1} ${mood}：${act}。用在${use}。` : `${index + 1} ${mood}：${act}`;
-        }).filter(Boolean),
+        ...moodSceneLines(moods, nsfw),
         `按 slotid 1 到 ${moods.length} 的顺序另写 ${moods.length} 份：${moods.map((label, index) => `${index + 1} ${label}`).join('、')}。`,
     ].filter(Boolean).join('\n');
 }
@@ -241,6 +254,37 @@ function characterDnaLines(name, dna) {
 const SPRITE_DAILY_POSE_LINE = '姿势带一个轻量的日常小动作（如一只手拨头发、手背在身后、手插口袋、轻抓衣角），不要双手僵直下垂，也不要大幅动作或拿道具挡住身体。';
 
 // 设置页直接出一张角色立绘。没有正文，长相和衣服按角色设定写。
+// 生图写词的世界背景：世界观选项 + 世界设定提要；服装、发型、饰品和随身物品都要合这个世界。
+export function worldContextLines(world) {
+    const label = String((world && world.label) || '').trim();
+    const summary = String((world && world.summary) || '').trim();
+    if (!label && !summary) return [];
+    return [
+        `这个故事的世界观${label ? `是「${label}」` : '见下面的设定'}。服装、发型、饰品和随身物品都要符合这个世界，不要画出不属于这个世界的东西。`,
+        summary ? `世界设定提要：\n${summary}` : '',
+    ].filter(Boolean);
+}
+
+// 角色卡 / 世界书 / 数据库里这个角色的资料节选：只补角色设定（DNA）没写到的长相、穿着和身份气质。
+export function characterSourceLines(name, sourcesText) {
+    const text = String(sourcesText || '').trim();
+    if (!text) return [];
+    return [
+        `下面是「${name || ''}」的资料节选（每段开头标了出处：角色卡、世界书、数据库或前文）。长相和服装以角色设定（DNA）为准；设定没写到的按这些资料补，只取长相、穿着和身份气质，资料里的剧情不要画进去：`,
+        text,
+    ];
+}
+
+// 背景：角色卡 / 世界书 / 数据库 / 前文里提到这个地点的节选，只取地点本身的样子。
+export function sceneSourceLines(name, sourcesText) {
+    const text = String(sourcesText || '').trim();
+    if (!text) return [];
+    return [
+        `下面是地点「${name || ''}」的资料节选（每段开头标了出处）。只取地点本身：档次、规模、建筑风格、年代、陈设和氛围；资料里的人物和剧情不要画进去：`,
+        text,
+    ];
+}
+
 export function buildCharacterSpriteDescription(name, dna, options) {
     const nude = Boolean(options && options.nude);
     const note = String(options && options.note || '').trim();
@@ -249,24 +293,28 @@ export function buildCharacterSpriteDescription(name, dna, options) {
         nude
             ? '不要画任何衣服、内衣和配饰。长相按下面的角色设定，人还是这个角色。不要套用现成的服装提示词，按这个角色自己写裸体该怎么画。'
             : '外貌与服装按下面的角色设定来画。设定里没写到的，按这个角色补一个日常样子。',
+        ...worldContextLines(options && options.world),
         '规格：大腿以上（cowboy shot）。朝向正面，直立，平视。禁止全身，禁止露出脚，禁止侧身，禁止倾斜构图。',
         SPRITE_DAILY_POSE_LINE,
         note ? `这次额外的要求：\n${note}` : '',
         SPRITE_NO_BACKGROUND_LINE,
         ...characterDnaLines(name, dna),
+        ...characterSourceLines(name, options && options.sourcesText),
         '只写一份，slotid 为 1。',
     ].filter(Boolean).join('\n');
 }
 
 // 状态栏头像：Q 版圆脸，只画一颗头。长相按角色设定写。
-export function buildCharacterAvatarDescription(name, dna) {
+export function buildCharacterAvatarDescription(name, dna, { world = null, sourcesText = '' } = {}) {
     return [
         `画角色「${name || ''}」的 Q 版头像（chibi）。`,
+        ...worldContextLines(world),
         '头像会裁成圆形：只画头、脖子和肩膀，脸放在画面正中，占画面的大半。脸圆、眼睛大，正面看向画面，带一点笑。',
         '肩膀以下绝对不要出现：不画胸口以下的身体，不画腰、腿、脚，也不要画手。',
         '发色、瞳色、发型和头上的饰品按下面的角色设定来画，不能改；肩颈处的衣领按角色日常服装画一点即可。',
         '纯色浅底，不要背景，不要文字。',
         ...characterDnaLines(name, dna),
+        ...characterSourceLines(name, sourcesText),
         '只写一份，slotid 为 1。',
     ].filter(Boolean).join('\n');
 }
@@ -279,11 +327,18 @@ export function nsfwClothingBoostLine(kind = 'clothes') {
 }
 
 // 待确认服装：只写这一套衣服的生图标签，不写出图。
-export function buildWardrobeClothingDescription(_character, outfitName, { nsfwBoost = false } = {}) {
+// 衣柜按服装名共用，这里只写衣服、不提角色名（_character 不用）。context 是正文里描写这套衣服的段落，
+// clues 是数据库里的穿着记录；两者都只取衣服的描写，款式风格靠世界观约束。
+export function buildWardrobeClothingDescription(_character, outfitName, { nsfwBoost = false, world = null, context = '', clues = '' } = {}) {
     const outfit = String(outfitName || '').trim();
+    const scene = String(context || '').trim();
+    const worn = String(clues || '').trim();
     return [
         `为服装「${outfit}」写一份生图用的服装提示词。`,
         '一定要注意：生成的是一套衣服，而不是角色，没有角色。',
+        ...worldContextLines(world),
+        scene ? `正文里对这套衣服的描写（只取衣服本身：款式、颜色、材质照着写；没写到的按世界观补；人物和剧情不要写进去）：\n${scene}` : '',
+        worn ? `数据库里的穿着记录（同样只取衣服本身）：\n${worn}` : '',
         '这是一整套穿着，从上到下写完整：头上、上身、下身、腿和脚，以及配套的饰品。不要只写其中一件。',
         '每件都写清款式、颜色和材质。',
         nsfwBoost ? nsfwClothingBoostLine('clothes') : '',
@@ -294,18 +349,20 @@ export function buildWardrobeClothingDescription(_character, outfitName, { nsfwB
 
 // 本楼还缺的立绘一次写完。名单里只有尚未生成的，已有的不进来。
 export function buildDbgenSpriteBatchDescription(needs = [], options = {}) {
+    const world = options.world || null;
     const items = Array.isArray(needs) ? needs : [];
     const list = items.map((need, index) => `${index + 1}. ${need && need.name ? need.name : ''}`);
     const count = list.length;
     const profiles = items
         .map((need, index) => {
-            const lines = characterDnaLines(need && need.name, need && need.dna);
+            const lines = [...characterDnaLines(need && need.name, need && need.dna), ...characterSourceLines(need && need.name, need && need.sources)];
             return lines.length ? [`第 ${index + 1} 份：`, ...lines].join('\n') : '';
         })
         .filter(Boolean);
     return [
         `写${count}张立绘的提示词，按下面的顺序各一份，slotid 从 1 数到 ${count}。`,
         list.join('\n'),
+        ...worldContextLines(world),
         profiles.length ? '角色外貌与服装依据正文补充；下面列了设定的角色，长相按设定写。' : '角色外貌与服装依据正文补充。',
         ...profiles,
         SPRITE_DAILY_POSE_LINE,
@@ -321,15 +378,22 @@ export function buildDbgenBackgroundBatchDescription(needs = []) {
         return `${index + 1}. ${need && need.name ? need.name : ''}${when ? `（${when}）` : ''}`;
     });
     const count = list.length;
+    const profiles = (Array.isArray(needs) ? needs : [])
+        .map((need, index) => {
+            const lines = sceneSourceLines(need && need.name, need && need.sources);
+            return lines.length ? [`第 ${index + 1} 份：`, ...lines].join('\n') : '';
+        })
+        .filter(Boolean);
     return [
         `为本楼写${count}张背景的提示词，按下面的顺序各一份，slotid 从 1 数到 ${count}。`,
         list.join('\n'),
         '地点陈设、光线与氛围依据楼层正文补充。',
+        ...profiles,
         '不要写生成点，不要从正文摘挂载句。',
     ].join('\n');
 }
 
-export function buildDbgenAssetDescription(need = {}, options = {}) {
+export function buildDbgenAssetDescription(need = {}) {
     const when = [need.time, need.weather].filter(Boolean).join('、');
     if (need.type === 'sprite') {
         return [
@@ -338,12 +402,14 @@ export function buildDbgenAssetDescription(need = {}, options = {}) {
             SPRITE_NO_BACKGROUND_LINE,
             SPRITE_DAILY_POSE_LINE,
             ...characterDnaLines(need.name, need.dna),
+            ...characterSourceLines(need.name, need.sources),
         ].join('\n');
     }
     if (need.type === 'background') {
         return [
             `画场景「${need.name || ''}」${when ? `（${when}）` : ''}的背景图。`,
             '地点陈设、光线与氛围依据楼层正文补充。',
+            ...sceneSourceLines(need.name, need.sources),
         ].join('\n');
     }
     return '';
@@ -406,11 +472,14 @@ function isExpressionPoseTag(tag) {
 // 默认立绘被写成无表情时，差分照抄会带上这些词。
 const NEUTRAL_FACE_TAGS = new Set(['expressionless', 'emotionless', 'neutral expression', 'blank expression', 'blank stare', 'straight face', 'closed mouth', 'arms at sides'].map(tagKey));
 
-// 写词插件常常整份漏写表情（只写了长相和衣服）。预设组的英文表情标签放到角色 caption 最前，
-// 并去掉照抄来的无表情词；默认组和自建组不动。nsfw 为 true 时「动情」换成 NSFW 那套标签。
-export function applyMoodToCaption(caption, mood, { nsfw = false } = {}) {
+// 表情组的英文表情 tag（用户改过的优先，没改用预设）：只有组上打开「固定加上」（alwaysTags）才放到角色 caption 最前，
+// 并去掉照抄来的无表情词；没打开就完全按写词结果，不兜底（预设 tag 是通用画法，叠上去容易变成套路脸）。
+// 默认组不动；nsfw 为 true 时「动情」没改过就用 NSFW 那套预设。
+export function applyMoodToCaption(caption, mood, { nsfw = false, groups = null } = {}) {
     const label = String(mood || '').trim();
-    const tags = label === '默认' ? '' : moodPresetTags(label, { nsfw });
+    if (label === '默认') return caption;
+    const { tags, always } = resolveMoodExpressionTags(label, groups, { nsfw });
+    if (!tags || !always) return caption;
     return prependCharTags(caption, tags, (tag) => !NEUTRAL_FACE_TAGS.has(tagKey(tag)));
 }
 
