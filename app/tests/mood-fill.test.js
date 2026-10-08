@@ -62,7 +62,7 @@ test('gate:mood-fill:action-fills-groups-keeps-own-words-and-new-groups-match', 
 
 test('gate:mood-fill:list-shows-missing-groups-and-button', () => {
     const html = renderMoodGroupList(oldGroups());
-    assert.match(html, /表情差分最多画 20 种表情，这里还缺 13 组：惊讶、思考/);
+    assert.match(html, /预设情绪组一共 21 组（默认加 20 种表情差分），这里还缺 13 组：惊讶、思考/);
     assert.match(html, /data-action="mood-fill-presets">补上缺的 13 组/);
     const full = renderMoodGroupList(MOOD_PRESET.map((entry) => ({ label: entry.label, words: entry.words.slice() })));
     assert.doesNotMatch(full, /mood-fill-presets/);
