@@ -7,6 +7,7 @@ import {
     buildDictionaryBackgroundTags,
 } from './prompt-kit.js';
 import { buildCharacterDnaPromptParts, mergePromptTags } from '../../scene/character-dna.js';
+import { worldContextLines } from '../dbgen-prompt.js';
 
 const ASSET_TASK = [
     '任务：阅读视觉小说正文，为「需要生成的素材」清单里的每一项写英文 tag。素材分两类：',
@@ -53,15 +54,21 @@ export function describeAssetNeed(need, index) {
     return { id: `ch${index + 1}`, line: [`立绘｜角色：${need.name}`, ...dnaNotes].join('｜') };
 }
 
-export function buildAssetPlannerUserPrompt({ needs = [], readableText = '', previousText = '' } = {}) {
+export function buildAssetPlannerUserPrompt({ needs = [], readableText = '', previousText = '', world = null } = {}) {
     const listed = needs.map((need, index) => {
         const { id, line } = describeAssetNeed(need, index);
         return `${id}｜${line}`;
     });
+    const worldLines = worldContextLines(world);
+    // 角色卡 / 世界书 / 数据库里提到这个角色的节选，由调用方挂在 need.sources 上。
+    const sources = needs.map((need, index) => (need.type === 'sprite' && String(need.sources || '').trim()
+        ? `${describeAssetNeed(need, index).id}「${need.name}」：\n${String(need.sources).trim()}` : '')).filter(Boolean);
     return [
         `【需要生成的素材】\n${listed.join('\n')}`,
+        worldLines.length ? `【世界观】\n${worldLines.join('\n')}` : '',
         needs.some((need) => need.type === 'sprite' && need.dna)
             ? '【角色 DNA】标注了固定身份或默认外观的立绘，tags 不得改变这些特征，只补充正文中额外交代的内容。' : '',
+        sources.length ? `【角色资料】下面是角色卡、世界书和数据库里提到这些角色的节选。长相和服装以 DNA 为准；DNA 没写到的按资料补，只取长相、穿着和身份气质，资料里的剧情不要画进去。\n${sources.join('\n')}` : '',
         previousText ? `【前文摘要】\n${previousText}` : '',
         `【本楼正文】\n${readableText}`,
         '请直接按输出格式给出字段。',

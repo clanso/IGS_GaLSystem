@@ -6,6 +6,9 @@ import { migrateSpriteKeys } from './sprite-key-migration.js';
 import { draftAssetLibrary, draftEffectiveAssets, rememberAssetScope } from '../../scene/asset-scope.js';
 import { getSillyTavernContext } from '../../host/tavern-helper-adapter.js';
 import { createSettingsDialogs } from './settings-dialog.js';
+import { pickOutfitContext, readSourceMaterial } from '../../host/character-sources.js';
+import { collectOutfitClues } from '../../data/shujuku/outfit-clues.js';
+import { prepareWorldContext } from './world-context.js';
 
 const BLOCKED_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 const CHARACTER_FIELDS = ['characters', 'characterOutfits', 'characterDna', 'characterAliases', 'statusAvatars'];
@@ -173,7 +176,7 @@ async function handleWardrobe(command, segs, ctx) {
                 return rerenderSettings();
             }
             let written;
-            try { written = await service.writeWardrobePrompt(subject); }
+            try { written = await service.writeWardrobePrompt({ ...subject, ...(await wardrobeWritingBackground(ctx, globalObj, subject)) }); }
             catch (error) { written = { ok: false, error: '写服装提示词失败' }; }
             if (!written || !written.ok || !String(written.prompt || '').trim()) {
                 warn(globalObj, (written && written.error) || '写服装提示词失败。');
@@ -199,7 +202,7 @@ async function handleWardrobe(command, segs, ctx) {
             return rerenderSettings();
         }
         let written;
-        try { written = await service.writeWardrobePrompt({ character, outfit: word }); }
+        try { written = await service.writeWardrobePrompt({ character, outfit: word, ...(await wardrobeWritingBackground(ctx, globalObj, { character, outfit: word })) }); }
         catch (error) { written = { ok: false, error: '写服装提示词失败' }; }
         if (!written || !written.ok || !String(written.prompt || '').trim()) {
             warn(globalObj, (written && written.error) || '写服装提示词失败。');
@@ -301,6 +304,22 @@ function handleOutfitReview(command, segs, ctx) {
 const COMMAND_RE = /^(scene-(?:add|rename|remove)-outfit(?:-(?:mood|word|scene))?|scene-set-outfit-(?:mood|avatar|wardrobe)-url|scene-set-outfit-note|scene-clear-outfit-avatar|scene-outfit-(?:tab|copy-slots)|outfit-review-(?:assign|create|dismiss|clear)|wardrobe-(?:add|rename|remove|generate-prompt|reference|nsfw|for-outfit|prompt))(?::(.*))?$/;
 
 // 服装区 action：返回 null 表示不归本模块处理。位置 / 头部标定 key 随改名迁移、随删除清理。
+// 写服装提示词前的背景：世界观（还没有世界设定提要就先提炼）、正文里描写这套衣服的段落、
+// 数据库里这个角色提到这套衣服的穿着记录（数据库记的是当前穿着，只留提到这套衣服名的，免得写成别的衣服）。
+async function wardrobeWritingBackground(ctx, globalObj, { character = '', outfit = '' } = {}) {
+    const { settingsState, options, persistSettingsDraft } = ctx;
+    const material = await readSourceMaterial(globalObj);
+    const prepared = await prepareWorldContext({ settingsState, service: options.generatedAssets, globalObj, material, persist: persistSettingsDraft });
+    const assets = draftEffectiveAssets(settingsState);
+    const aliases = character && assets.characterAliases && Array.isArray(assets.characterAliases[character]) ? assets.characterAliases[character] : [];
+    const clues = character ? collectOutfitClues(material.tables, [character, ...aliases]) : { profile: [], worn: [] };
+    return {
+        world: prepared.world,
+        context: pickOutfitContext(material.chat, outfit),
+        clues: [...clues.profile, ...clues.worn].filter((line) => outfit && String(line).includes(outfit)).join('\n'),
+    };
+}
+
 export function handleOutfitAction(normalizedAction, ctx) {
     const match = COMMAND_RE.exec(normalizedAction);
     return match ? runOutfitAction(match, ctx) : null;

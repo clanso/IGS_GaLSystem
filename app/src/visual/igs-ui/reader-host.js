@@ -127,6 +127,7 @@ import {
     field,
     renderCharacterAssetList,
     renderMoodGroupList,
+    renderWorldSummarySection,
     renderMoodReviewList,
     renderPinnedButtons,
     renderSceneAssetList,
@@ -4022,6 +4023,7 @@ export function createIgsReaderHost(options = {}) {
                     + checkbox('bridge.sceneAssets.promptAdaptive', sceneAssets.promptAdaptive !== false, '按需注入')
                     + '<div class="igs-source-filter-note">只在用得上时附完整说明。</div></details>',
                 wardrobeSection: renderWardrobe(scopedEntries('wardrobe'), { resolveUrl: resolveGenerated, scopeTag, focus: asyncState.wardrobeFocus || '', lead: scopeFilterBar('wardrobe') }),
+                worldSection: renderWorldSummarySection(sceneAssets),
                 moodSection: checkbox('bridge.sceneAssets.moodAutoClassify', sceneAssets.moodAutoClassify === true, '自动归类（用副API）')
                     + (asyncState.moodAutoStatus ? `<div class="igs-source-filter-note" data-mood-auto-status>${esc(asyncState.moodAutoStatus)}</div>` : '')
                     + renderMoodGroupList(sceneAssets.moodGroups, { isOpen: (key) => Boolean(asyncState.advancedOpen && asyncState.advancedOpen[key]) })
@@ -4770,6 +4772,13 @@ export function createIgsReaderHost(options = {}) {
                 const entry = wardrobe[wardrobeName] && typeof wardrobe[wardrobeName] === 'object' && !Array.isArray(wardrobe[wardrobeName])
                     ? wardrobe[wardrobeName] : (wardrobe[wardrobeName] = { prompt: '' });
                 entry.prompt = target.value;
+                state.activeSettings.snapshot.draft = state.activeSettings.draft;
+                return;
+            }
+            // 世界设定提要：只更新草稿（和世界观存在同一处），关闭设置时统一保存；不重绘，避免丢焦点。
+            if (target.getAttribute('data-world-summary') !== null) {
+                rememberAssetScope(state.activeSettings, getSillyTavernContext(options.global || globalThis));
+                draftAssetLibrary(state.activeSettings, null).worldSummary = target.value;
                 state.activeSettings.snapshot.draft = state.activeSettings.draft;
                 return;
             }

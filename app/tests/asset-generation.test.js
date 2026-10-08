@@ -351,6 +351,50 @@ test('gate:assets:service-generates-missing-assets-and-reviews', async () => {
     assert.ok(emitted.includes('generated'));
 });
 
+test('gate:assets:planner-gets-world-and-character-sources-for-new-sprites', async () => {
+    const asked = [];
+    const sourcesAsked = [];
+    let id = 0;
+    const service = createAssetGenerationService({
+        messageHost: fakeHost(FLOOR_TEXT),
+        llm: { async request(req) { asked.push(req.user); return 'id: bg1\ntags: factory, night, rain\nid: ch2\ntags: 1girl, silver hair, black coat'; } },
+        nai: { async generate() { return { ok: true, dataUrl: 'data:image/png;base64,AAA' }; } },
+        store: createMemoryGeneratedAssetStore(),
+        matte: async (url) => url,
+        getSettings: () => ({
+            autoIllustration: { assets: { spriteEnabled: true, backgroundEnabled: true, strictMatch: true } },
+            sceneAssets: { ...USER_ASSETS, worldview: 'ancient', ancient: true, worldSummary: '架空王朝，丝绸襦裙常见。' },
+        }),
+        events: { emit() {} },
+        newId: () => `img${++id}`,
+        // 宿主按名字给本楼新角色挑角色卡 / 世界书 / 数据库节选。
+        readCharacterSources: async (names) => { sourcesAsked.push(names); return { 神秘少女: '【世界书·设定·神秘少女】黑衣剑客，银发。' }; },
+    });
+    assert.equal((await service.processMessage(3)).ok, true);
+    assert.deepEqual(sourcesAsked, [['神秘少女']]);
+    assert.match(asked[0], /【世界观】\n这个故事的世界观是「古代」。服装、发型、饰品和随身物品都要符合这个世界/);
+    assert.match(asked[0], /世界设定提要：\n架空王朝，丝绸襦裙常见。/);
+    assert.match(asked[0], /【角色资料】[^\n]*资料里的剧情不要画进去。\nch2「神秘少女」：\n【世界书·设定·神秘少女】黑衣剑客，银发。/);
+});
+
+test('gate:assets:planner-still-runs-when-host-cannot-read-sources', async () => {
+    const asked = [];
+    const service = createAssetGenerationService({
+        messageHost: fakeHost(FLOOR_TEXT),
+        llm: { async request(req) { asked.push(req.user); return 'id: bg1\ntags: factory\nid: ch2\ntags: 1girl'; } },
+        nai: { async generate() { return { ok: true, dataUrl: 'data:image/png;base64,AAA' }; } },
+        store: createMemoryGeneratedAssetStore(),
+        matte: async (url) => url,
+        getSettings: () => ({ autoIllustration: { assets: { spriteEnabled: true, backgroundEnabled: true, strictMatch: true } }, sceneAssets: USER_ASSETS }),
+        events: { emit() {} },
+        readCharacterSources: async () => { throw new Error('世界书读不到'); },
+    });
+    assert.equal((await service.processMessage(3)).ok, true);
+    assert.doesNotMatch(asked[0], /【角色资料】/);
+    // 没选世界观时按现代。
+    assert.match(asked[0], /【世界观】\n这个故事的世界观是「现代」/);
+});
+
 test('gate:assets:service-disabled-makes-no-requests', async () => {
     let requested = false;
     const service = createAssetGenerationService({

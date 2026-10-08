@@ -38,6 +38,7 @@ import { createReaderImageService } from '../generated-images/reader-image-servi
 import { createPromptInjector } from '../host/prompt-injector.js';
 import { createIllustrationMessageHost } from '../host/illustration-message-host.js';
 import { createSecondaryLlm } from '../host/secondary-llm.js';
+import { formatCharacterSources, pickCharacterSources, readSourceMaterial } from '../host/character-sources.js';
 import { createImageBackend, mergeLegacyNaiSettings } from '../generated-images/image-backend.js';
 import { createNaiOfficialClient } from '../generated-images/nai-official-client.js';
 import { createImageJobLog } from '../generated-images/image-job-log.js';
@@ -59,6 +60,8 @@ const IGS_VERSION = '0.34.78';
 const SCENE_ASSETS_INJECTION_INITIAL_DELAY_MS = 3000;
 const SCENE_ASSETS_INJECTION_RETRY_MS = 1500;
 const SCENE_ASSETS_INJECTION_MAX_ATTEMPTS = 5;
+// 楼内补立绘给副 LLM 的角色资料节选：每个角色限得比手动生成时短。
+const PLANNER_SOURCE_LIMITS = Object.freeze({ card: 800, worldbook: 1200, entry: 600, database: 500 });
 
 // 自动插图 / 素材补全的进度与失败原因：始终写控制台，失败与成功再按「显示提示弹窗」弹出。
 function createImageJobReporter(globalObject, getBridge, log) {
@@ -160,6 +163,16 @@ export function bootstrapIGS(options = {}) {
         },
         getReaderMode: readerModeNow,
         getViewport: () => readCgViewport(globalObject, readerModeNow()),
+        // 楼内补立绘：一次读角色卡 / 世界书 / 数据库，再按名字挑节选（每人限得短，规划说明不膨胀）。
+        readCharacterSources: async (names) => {
+            const material = await readSourceMaterial(globalObject);
+            const out = {};
+            for (const name of names) {
+                const text = formatCharacterSources(pickCharacterSources(material, { name, limits: PLANNER_SOURCE_LIMITS }));
+                if (text) out[name] = text;
+            }
+            return out;
+        },
         events,
         report: reportImageJob,
     });
