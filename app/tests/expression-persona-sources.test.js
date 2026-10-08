@@ -29,9 +29,14 @@ test('gate:persona:expression-description-carries-persona-and-only-scene-of-each
     assert.match(withPersona, /各份表情用在什么场面（只说场面，怎么做按这个角色来）：\n1 委屈：用在被冤枉、被凶了想讨说法，或者摔了、哪里碰疼了想撒娇求安慰的时候。\n2 动情：用在告白前后、接吻前、距离一下子拉近的时候。这一份画 NSFW 版，情欲上来时的样子。/);
     assert.doesNotMatch(withPersona, /噘嘴，眼眶含泪忍着不掉|动作是基准|禁止仅替换面部|平视/);
     assert.match(withPersona, /先想这个角色在那种场面里真实会怎么反应/);
-    assert.match(withPersona, /不要套最常见的动漫画法/);
+    assert.match(withPersona, /动漫立绘最常见的套路画法：[^\n]*只有这个角色的性格和这份情绪真的会这样时才写/);
+    assert.match(withPersona, /场面里的「讨说法」「撒娇」「崩溃」是心情，不是动作清单/);
     assert.match(withPersona, /头的角度、视线方向、手和肩膀可以随情绪动/);
-    assert.ok(withPersona.indexOf('性格与表情习惯') < withPersona.indexOf('各份表情用在什么场面'));
+    // 不举具体情绪的做法（举了委屈「噘嘴含泪、凑过来要人哄」，写委屈时就照抄）。
+    assert.doesNotMatch(withPersona, /噘嘴含泪|凑过来要人哄/);
+    // 性格和怎么表现排在场面后面，最后读到的是性格。
+    assert.ok(withPersona.indexOf('各份表情用在什么场面') < withPersona.indexOf('性格与表情习惯'));
+    assert.ok(withPersona.indexOf('性格与表情习惯') < withPersona.indexOf('按 slotid 1 到'));
     assert.doesNotMatch(buildExpressionDiffDescription('冬月', null, ['委屈'], { identity: '1girl' }, null), /性格与表情习惯/);
     assert.doesNotMatch(buildExpressionDiffDescription('冬月', null, ['委屈', '动情'], null, null), /NSFW 版/, '不开 NSFW 时动情是全年龄版');
     assert.doesNotMatch(buildExpressionDiffDescription('冬月', null, ['发呆'], null, null), /各份表情用在什么场面/, '自建组没有预设场面，只在份数清单里');
