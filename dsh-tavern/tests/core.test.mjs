@@ -146,3 +146,10 @@ function makeZip(name, data) {
   eocd.writeUInt32LE(0x06054b50, 0); eocd.writeUInt16LE(1, 8); eocd.writeUInt16LE(1, 10); eocd.writeUInt32LE(centralPart.length, 12); eocd.writeUInt32LE(localPart.length, 16)
   return Buffer.concat([localPart, centralPart, eocd])
 }
+
+test('gate: 每个接口路径只注册一次', async () => {
+  const { createRoutes } = await import('../lib/routes.js')
+  const routes = createRoutes({ engine: { subscribe() {} }, logger: {} })
+  const paths = routes.map(r => r.path)
+  assert.equal(new Set(paths).size, paths.length)
+})

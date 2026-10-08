@@ -6,23 +6,19 @@ import { segmentTurn, anchorFor } from './segment.js'
 import { direct, callModel, extractJson } from './director.js'
 import { REWRITE_SYSTEM, REWRITE_USER, fill } from './prompts.js'
 import { applyPeople, castListAt, effectivePerson, allNames, expandMentions, editPerson, rollback, nameColor } from './cast.js'
-import { composePrompt, sizeFor } from './image/style.js'
+import { composePrompt, sizeFor, BUILTIN_ARTISTS, DEFAULT_QUALITY, DEFAULT_NEGATIVE } from './image/style.js'
+import { NAI_MODELS, NAI_SAMPLERS } from './image/novelai.js'
 import { generateImage, createQueue, secretRef, backendNeedsKey } from './image/index.js'
 import { comfyCheckpoints, comfyStats } from './image/comfyui.js'
 import { resolveConfig, applyPatch } from './config.js'
 import { createSecrets } from './secrets.js'
-import { EMOTIONS } from './vocab.js'
+import { EMOTIONS, placeKey } from './vocab.js'
 
 export const PLUGIN = 'dsh-tavern-igs'
 export const KIND_SCENE = PLUGIN + '/scene'
 export const KIND_CG = PLUGIN + '/cg'
 
 const shortError = error => String(error?.message || error || '未知错误').slice(0, 300)
-
-export function placeKey(scene) {
-  const part = { dawn: 'day', morning: 'day', noon: 'day', afternoon: 'day', dusk: 'dusk', evening: 'night', night: 'night', midnight: 'night' }[scene?.time] || 'day'
-  return `${String(scene?.location || '').trim() || '未知地点'}|${part}`
-}
 
 export function createEngine({ store, services, logger = console, fetchImpl = fetch }) {
   const log = (level, msg) => { try { logger[level]?.(`[${PLUGIN}] ${msg}`) } catch {} }
@@ -62,7 +58,7 @@ export function createEngine({ store, services, logger = console, fetchImpl = fe
   }
 
   /** 登记一轮正文：先存单元（前台先文本），挂场景卡占位。 */
-  async function registerTurn(turnInfo, { attachCard = true } = {}) {
+  async function registerTurn(turnInfo, { attachCard = true, status = 'directing' } = {}) {
     const { gameId, turn, textVersion, text } = turnInfo
     const units = segmentTurn(text)
     let mediaId = null
@@ -71,12 +67,12 @@ export function createEngine({ store, services, logger = console, fetchImpl = fe
     if (existing?.mediaId) mediaId = existing.mediaId
     else if (attachCard) {
       try {
-        const res = await tavern().attach({ gameId, turn, textVersion, item: { kind: KIND_SCENE, status: 'pending', data: { turn } } })
+        const res = await tavern().attach({ gameId, turn, textVersion, item: { kind: KIND_SCENE, status: status === 'raw' ? 'ready' : 'pending', data: { turn } } })
         mediaId = res?.id || null
       } catch (error) { log('warn', '挂场景卡失败：' + shortError(error)) }
     }
     await store.updateGame(gameId, g => {
-      g.scenes[textVersion] = { ...(g.scenes[textVersion] || {}), turn, textVersion, units, mediaId, at: Date.now(), status: g.scenes[textVersion]?.script ? 'ready' : 'directing', card: turnInfo.card || null }
+      g.scenes[textVersion] = { ...(g.scenes[textVersion] || {}), turn, textVersion, units, mediaId, at: Date.now(), status: g.scenes[textVersion]?.script ? 'ready' : status, card: turnInfo.card || null }
     })
     notify(gameId)
     return { units, mediaId }
@@ -109,7 +105,7 @@ export function createEngine({ store, services, logger = console, fetchImpl = fe
           scene.error = ''
           scene.summary = script.summary
         })
-        if (mediaId) await tavern().update(mediaId, { status: 'ready', data: { turn, summary: script.summary, location: script.scene.location } }).catch(() => {})
+        if (mediaId) await tavern().update(mediaId, { status: 'ready', data: { turn, summary: script.summary, location: script.scene.location, time: script.scene.time, weather: script.scene.weather, mood: script.scene.mood, cast: script.cast.map(c => c.name), choices: script.choices.length } }).catch(() => {})
         notify(gameId)
         // 出图不阻塞场景就绪。
         planImages(gameId, textVersion).catch(error => log('warn', '排图失败：' + shortError(error)))
@@ -129,7 +125,7 @@ export function createEngine({ store, services, logger = console, fetchImpl = fe
   async function onTurnSettled(turnInfo) {
     const cfg = await config()
     if (!cfg.enabled) return
-    if (!cfg.director.auto) { await registerTurn(turnInfo); return }
+    if (!cfg.director.auto) { await registerTurn(turnInfo, { status: 'raw' }); return }
     await runDirector(turnInfo).catch(() => {})
   }
 
@@ -199,7 +195,7 @@ export function createEngine({ store, services, logger = console, fetchImpl = fe
     const anchor = anchorFor(scene.units, plan.after)
     let mediaId = null
     try {
-      const res = await tavern().attach({ gameId, turn: scene.turn, textVersion: scene.textVersion, item: { kind: KIND_CG, status: 'pending', anchor, caption: plan.title || '', data: { imageId: id } } })
+      const res = await tavern().attach({ gameId, turn: scene.turn, textVersion: scene.textVersion, item: { kind: KIND_CG, status: 'pending', anchor, caption: plan.title || '', data: { imageId: id, shape: plan.shape || 'landscape' } } })
       mediaId = res?.id || null
     } catch (error) { log('warn', '挂插画占位失败：' + shortError(error)) }
     await store.updateGame(gameId, g => {
@@ -266,7 +262,7 @@ export function createEngine({ store, services, logger = console, fetchImpl = fe
   async function syncMedia(image, status, error = '') {
     if (!image?.mediaId) return
     try {
-      await tavern().update(image.mediaId, { status, caption: image.title || '', ...(error ? { error: error.slice(0, 200) } : {}), data: { imageId: image.id, v: image.versions?.length || 0, current: image.current } })
+      await tavern().update(image.mediaId, { status, caption: image.title || '', ...(error ? { error: error.slice(0, 200) } : {}), data: { imageId: image.id, v: image.versions?.length || 0, current: image.current, assetId: image.versions?.[image.current]?.assetId || '', shape: image.shape || 'landscape' } })
     } catch (e) { log('warn', '更新插画状态失败：' + shortError(e)) }
   }
 
@@ -356,6 +352,7 @@ export function createEngine({ store, services, logger = console, fetchImpl = fe
       turns.push({ turn: scene.turn, textVersion: scene.textVersion, status: scene.status, error: scene.error || '', units: scene.units, script: scene.script || null })
     }
     turns.sort((a, b) => a.turn - b.turn)
+    const latest = Object.values(game.scenes || {}).sort((a, b) => b.at - a.at)[0]
     const images = Object.values(game.images || {})
       .filter(i => !i.mediaId || current.has(i.mediaId))
       .map(i => ({ id: i.id, turn: i.turn, textVersion: i.textVersion, after: i.after, title: i.title, tags: i.tags, desc: i.desc, shape: i.shape, negativeExtra: i.negativeExtra || '', status: queue.has(`cg:${gameId}:${i.id}`) ? (i.status === 'queued' ? 'queued' : 'running') : i.status, error: i.error, current: i.current, versions: i.versions.map(v => ({ assetId: v.assetId, seed: v.seed, model: v.model, backend: v.backend, positive: v.positive, negative: v.negative, at: v.at })) }))
@@ -368,6 +365,7 @@ export function createEngine({ store, services, logger = console, fetchImpl = fe
     })
     return {
       gameId,
+      card: latest?.card || null,
       turns,
       images,
       cast,
@@ -525,7 +523,8 @@ export function createEngine({ store, services, logger = console, fetchImpl = fe
       } else keys[backend] = await secrets.has(secretRef(backend, cfg))
     }
     const ready = await backendReady(cfg)
-    return { config: cfg, keys, ready: ready.ok, readyReason: ready.reason || '', secretStorage: secrets.storage() }
+    const presets = { artists: BUILTIN_ARTISTS, quality: DEFAULT_QUALITY, negative: DEFAULT_NEGATIVE, naiModels: NAI_MODELS, naiSamplers: NAI_SAMPLERS }
+    return { config: cfg, keys, ready: ready.ok, readyReason: ready.reason || '', secretStorage: secrets.storage(), presets }
   }
 
   async function patchConfig(patch) {

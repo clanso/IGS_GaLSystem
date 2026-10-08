@@ -47,17 +47,19 @@ export function createRoutes({ engine, logger }) {
     waiters.set(gameId, list)
   })
 
-  const json = (method, path, handler) => ({
+  // 一个路径只注册一次（同路径重复注册会互相覆盖）；同一路径的 GET / POST 在 handler 里分派。
+  const json = (methods, path, handler) => ({
     kind: 'exact',
     path: BASE + path,
     handler: async (req, res) => {
       try {
-        if (req.method !== method) return send(res, 405, { ok: false, error: '方法不对' })
+        const method = req.method
+        if (![].concat(methods).includes(method)) return send(res, 405, { ok: false, error: '方法不对' })
         if (req.headers['x-igs-request'] !== '1') return send(res, 403, { ok: false, error: '缺少插件请求头' })
         if (method === 'POST' && !/application\/json/i.test(req.headers['content-type'] || '')) return send(res, 415, { ok: false, error: '需要 JSON' })
         const url = new URL(req.url || '/', 'http://localhost')
         const body = method === 'POST' ? await readBody(req) : {}
-        const result = await handler({ url, body, query: Object.fromEntries(url.searchParams) })
+        const result = await handler({ url, body, method, query: Object.fromEntries(url.searchParams) })
         send(res, 200, { ok: true, ...(result || {}) })
       } catch (error) {
         logger.warn?.(`[dsh-tavern-igs] ${path}: ${error?.message || error}`)
@@ -90,8 +92,7 @@ export function createRoutes({ engine, logger }) {
     json('POST', '/cancel', async ({ body }) => ({ cancelled: engine.cancel(needGame(body), String(body.kind || 'cg'), String(body.id || '')) })),
     json('POST', '/place/render', async ({ body }) => { await engine.ensurePlace(needGame(body), String(body.key || '')); return {} }),
     json('POST', '/cast', async ({ body }) => engine.castAction(needGame(body), String(body.action || ''), body)),
-    json('GET', '/config', async () => engine.publicConfig()),
-    json('POST', '/config', async ({ body }) => engine.patchConfig(body.patch || {})),
+    json(['GET', 'POST'], '/config', async ({ method, body }) => (method === 'POST' ? engine.patchConfig(body.patch || {}) : engine.publicConfig())),
     json('POST', '/secret', async ({ body }) => engine.setSecret(String(body.backend || ''), String(body.endpoint || ''), String(body.value ?? ''))),
     json('POST', '/test', async () => engine.testBackend()),
     json('GET', '/llm', async ({ query }) => engine.llmModels(String(query.provider || ''))),

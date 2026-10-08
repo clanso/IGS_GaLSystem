@@ -7,8 +7,9 @@
 const NAME_COLORS = ['#f2739b', '#7aa2ff', '#ffb35c', '#5fd3b3', '#c58bff', '#ff7a6b', '#59c3ff', '#e5c34f', '#9be36b', '#ff8ad8']
 
 export function nameColor(name) {
-  let h = 0
-  for (const ch of String(name)) h = (h * 31 + ch.codePointAt(0)) >>> 0
+  // FNV-1a：常见两字中文名也能分散到不同颜色。
+  let h = 0x811c9dc5
+  for (const ch of String(name)) h = Math.imul(h ^ ch.codePointAt(0), 0x01000193) >>> 0
   return NAME_COLORS[h % NAME_COLORS.length]
 }
 

@@ -34,6 +34,11 @@ export const MOODS = ['daily', 'cheerful', 'sweet', 'calm', 'sad', 'tense', 'bat
 /** 立绘站位。 */
 export const POSITIONS = ['left', 'center', 'right', 'farleft', 'farright']
 
+const DAYPART = { dawn: 'day', morning: 'day', noon: 'day', afternoon: 'day', dusk: 'dusk', evening: 'night', night: 'night', midnight: 'night' }
+/** 背景只分日 / 黄昏 / 夜三档：同一地点同一档共用一张背景。 */
+export const daypart = time => DAYPART[time] || 'day'
+export const placeKey = scene => `${String(scene?.location || '').trim() || '未知地点'}|${daypart(scene?.time)}`
+
 export function pick(value, list, fallback) {
   const text = String(value ?? '').trim().toLowerCase()
   return list.includes(text) ? text : fallback

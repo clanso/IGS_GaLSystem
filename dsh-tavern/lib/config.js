@@ -48,13 +48,15 @@ export const DEFAULT_CONFIG = {
   },
   webui: { baseURL: 'http://127.0.0.1:7860', authType: 'none', steps: 24, cfg: 6, sampler: 'Euler a', hires: false },
   ui: {
-    skin: 'sakura',
+    skin: 'stellar',
     textSpeed: 30,           // 每字毫秒
     autoDelay: 1400,
     blip: true,              // 打字音
     bgm: true,
     bgmVolume: 0.45,
-    bgmBase: 'https://cdn.jsdelivr.net/gh/Anyno001/IGS_GaLSystem@main/app/assets/bgm/',
+    // IGS 默认素材（72 张背景、80 首配乐）直接从 IGS 发布仓库的 CDN 读取，不随插件打包。
+    assetBase: 'https://cdn.jsdelivr.net/gh/Anyno001/IGS_GaLSystem@main/app/dist/',
+    igsBackgrounds: true,    // 地点能匹配上 IGS 背景库时先用库里的图，不花生图费用
     particles: true,
     fontScale: 1,
     autoOpen: false,         // 新一轮写完后自动打开剧场
@@ -74,7 +76,7 @@ export function deepMerge(base, patch) {
   return out
 }
 
-const URL_FIELDS = [['comfyui', 'baseURL'], ['openai', 'baseURL'], ['webui', 'baseURL'], ['ui', 'bgmBase']]
+const URL_FIELDS = [['comfyui', 'baseURL'], ['openai', 'baseURL'], ['webui', 'baseURL'], ['ui', 'assetBase']]
 
 /** 合并后的完整设置，带基本校验（数值范围、URL 协议）。 */
 export function resolveConfig(saved) {

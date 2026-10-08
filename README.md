@@ -25,6 +25,10 @@
 
 自动更新 loader 会从发布仓库的 `main` 分支加载 `app/dist/` 中的运行时 bundle 和样式。若只想锁定某个版本，可使用 `loader/沉浸式Galgame系统 v0.23.21.json` 这类固定版导入件。
 
+### DSH Tavern 版
+
+用 [DSH Tavern](https://github.com/flizzywine/dsh-tavern) 的话，装 `dsh-tavern/` 目录里的插件：正文照常流式输出，后台导演把每轮整理成视觉小说场景，带柏宝绘式的角色外貌库和自动配图。安装和截图见 [dsh-tavern/README.md](dsh-tavern/README.md)。
+
 ## 更新日志
 
 ### v0.34.74（2026-10-06）· CG 库重做、衣服差分不闪回原装、电影黑边
