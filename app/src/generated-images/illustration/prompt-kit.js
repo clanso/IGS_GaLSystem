@@ -84,17 +84,14 @@ export const DEFAULT_ASSET_TEMPLATES = Object.freeze({
 export const MATTE_BACKGROUND_TAGS = 'simple background, grey background, light grey background, flat color background';
 export const WHITE_BACKGROUND_TAGS = 'simple background, white background, flat color background';
 export const TRANSPARENT_BACKGROUND_TAGS = 'transparent background';
+// 立绘透明底只用这一个加权标签，其余底色标签一律去掉（见 asset-prompt 的 buildAssetSlot）。
+export const SPRITE_TRANSPARENT_BACKGROUND_TAG = '1.5::transparent background::';
 
 // 用户在模板 / 画师串里已经要透明底（含加权写法）时，摘掉自动补的灰底词，免得正向词里两种底色打架。
 const MATTE_TAG_KEYS = new Set(MATTE_BACKGROUND_TAGS.split(',').map((t) => t.trim()));
 export function dropMatteTagsWhenTransparent(prompt, context = '') {
     if (!/transparent background/i.test(`${prompt} ${context}`)) return prompt;
     return String(prompt || '').split(',').map((t) => t.trim()).filter((t) => t && !MATTE_TAG_KEYS.has(t.toLowerCase())).join(', ');
-}
-
-// 要白底时，负面里的 white background 会和正向对着干，摘掉。
-export function dropWhiteBackgroundNegative(prompt) {
-    return String(prompt || '').split(',').map((t) => t.trim()).filter((t) => t && t.toLowerCase() !== 'white background').join(', ');
 }
 
 export function applyTemplate(template, vars = {}) {

@@ -227,6 +227,11 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
                 extension: '当前图像来源：智绘姬。',
                 baibai: '当前图像来源：柏宝绘。',
             };
+            const spriteBackgroundNotes = {
+                auto: '按图像来源：数据库生图按它那里的「立绘透明底」开关（关了用白底），NAI V5用透明底，智绘姬、柏宝绘和其他NAI模型用浅灰底，出图后自动抠图。',
+                transparent: '底色只加 1.5::transparent background::，写词和模板里别的底色词都去掉。出图方没回透明图时照常自动抠图。',
+                matte: '底色只加 simple background, grey background, light grey background, flat color background，别的底色词都去掉，出图后自动抠图。',
+            };
             const openaiDisabled = auto.llm.source !== 'openai';
             const llmReady = describeLlmReady(auto.llm);
             const autoTextarea = (path, value, placeholder) => `<textarea data-path="${esc(path)}" placeholder="${esc(placeholder)}">${esc(value)}</textarea>`;
@@ -249,6 +254,8 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
                 sourceExtensionHidden: hiddenAttr(sourceMode !== 'extension'),
                 sourceDbgenHidden: hiddenAttr(sourceMode !== 'dbgen'),
                 dbgenSpriteTransparentField: checkbox('bridge.imageApi.dbgenSpriteTransparent', imageApi.dbgenSpriteTransparent !== false, '立绘透明底（V4.5 请关闭，关闭后改为白色背景）'),
+                spriteBackgroundField: field('bridge.autoIllustration.assets.spriteBackground', '立绘底色', segmentedInput('bridge.autoIllustration.assets.spriteBackground', auto.assets.spriteBackground, [['auto', '自动'], ['transparent', '透明底'], ['matte', '浅灰底']], '立绘底色')),
+                spriteBackgroundNote: esc(spriteBackgroundNotes[auto.assets.spriteBackground]),
                 // 分类型模型收在「图像来源 › 模型」下的折叠项里，默认收起；生成开关只在「生图 › 内容」一处。
                 kindModelFields: field('bridge.imageApi.cgModel', '剧情 CG 模型', kindModelPicker('bridge.imageApi.cgModel', imageApi.cgModel, pulledImageModels))
                     + ['sprite', 'background', 'item'].map((kind) => field(`bridge.imageApi.${kind}Model`, { sprite: '立绘模型', background: '背景模型', item: '物品模型' }[kind], kindModelPicker(`bridge.imageApi.${kind}Model`, imageApi[`${kind}Model`], pulledImageModels))).join(''),

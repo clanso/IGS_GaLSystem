@@ -14,6 +14,7 @@ import { normalizeAutoIllustrationSettings, isStrictBackgroundMatch } from '../s
 import { createAlphaMatte, hasTransparentBorder, matteSolidBackground, findOpaqueBounds } from '../src/media/alpha-matte.js';
 import { createMemoryGeneratedAssetStore } from '../src/media/generated-asset-store.js';
 import { createAssetGenerationService } from '../src/generated-images/illustration/asset-generation-service.js';
+import { isBackgroundTag, splitTags } from '../src/generated-images/dbgen-prompt.js';
 
 const USER_ASSETS = {
     enabled: true,
@@ -128,11 +129,15 @@ test('gate:assets:sprite-slot-uses-light-grey-matte-or-native-transparency', () 
     assert.ok(grey.scene.includes('light grey background'));
     assert.ok(grey.sceneUc.includes('white background'));
     const native = buildAssetSlot(item, { transparent: true });
-    assert.ok(native.scene.includes('transparent background') && !native.scene.includes('grey background'));
-    const asked = buildAssetSlot(item, { templates: { sprite: '{tags}, 2::transparent background::, {matte}' } });
-    assert.ok(asked.scene.includes('2::transparent background::') && !/grey background|simple background|flat color background/.test(asked.scene));
-    const viaPrefix = buildAssetSlot(item, { positiveContext: 'artist:foo, transparent background' });
-    assert.ok(!viaPrefix.scene.includes('grey background'));
+    assert.ok(native.scene.endsWith(', 1.5::transparent background::') && !native.scene.includes('grey background'));
+    // 底色只留一种：模板、副 LLM 写的别的底色词都去掉，透明底只剩加权的那一个。
+    const noisy = { need: { type: 'sprite', name: 'x' }, tags: '1girl, transparent background, no background, white background, red hair', uc: 'simple background' };
+    const asked = buildAssetSlot(noisy, { transparent: true, templates: { sprite: '{tags}, 2::transparent background::, simple background, {matte}' } });
+    assert.equal(asked.scene, '1girl, red hair, 1.5::transparent background::');
+    assert.equal(asked.sceneUc, 'multiple views, 2girls, 2boys, multiple girls, multiple boys, crowd, close-up, portrait, upper body, full body, feet, head out of frame, cropped arms, scenery, detailed background, white background, gradient background, patterned background, drop shadow, floor, furniture, holding weapon, text, speech bubble, watermark, signature, frame, border, simple background');
+    const matte = buildAssetSlot(noisy, { templates: { sprite: '{tags}, 2::transparent background::, {matte}' } });
+    assert.equal(matte.scene, '1girl, red hair, simple background, grey background, light grey background, flat color background');
+    assert.ok(!/(^|, )simple background/.test(matte.sceneUc));
     assert.ok(buildItemSlot('key', { positiveContext: '1.5::transparent background::' }).scene.endsWith('key'));
     assert.ok(buildItemSlot('key').scene.includes('light grey background'));
     assert.equal(supportsNaiTransparentBackground('nai-diffusion-4-5-full'), false);
@@ -808,7 +813,7 @@ test('gate:assets:dbgen-sprite-passes-frontend-templates', async () => {
     const description = writes[0].description;
     assert.ok(!description.includes('全身'), '不再写死全身构图');
     assert.match(description, /神秘少女/);
-    assert.match(description, /无背景，透明底/);
+    assert.match(description, /不要写背景、场景和底色/);
     assert.match(description, /slotid 从 1 数到 1/);
     assert.ok(!description.includes('必须原样写入'));
     assert.ok(!description.includes('upper body'));
@@ -855,14 +860,49 @@ test('gate:assets:dbgen-sprite-white-background-when-transparent-off', async () 
     });
     const result = await service.processMessage(3, { manual: true });
     assert.equal(result.ok, true);
-    assert.match(writes[0].description, /白色背景，不要透明底/);
-    assert.equal(/透明底/.test(writes[0].description.replace('不要透明底', '')), false);
+    // 底色由程序按设置统一加，写词说明只说别写底色。
+    assert.match(writes[0].description, /不要写背景、场景和底色/);
+    assert.equal(/透明底|白色背景/.test(writes[0].description), false);
     const meta = paints[0];
     assert.equal(meta.transparent, undefined);
     assert.match(meta.userPrompts.positive, /white background/);
     assert.equal(/transparent background/.test(meta.userPrompts.positive), false);
     assert.equal(/grey background/.test(meta.userPrompts.positive), false);
     assert.equal(/(^|, )white background(,|$)/.test(meta.userPrompts.negative), false);
+});
+
+test('gate:assets:sprite-background-choice-overrides-dbgen-white', async () => {
+    const { createAssetGenerationService } = await import('../src/generated-images/illustration/asset-generation-service.js');
+    const { createMemoryGeneratedAssetStore } = await import('../src/media/generated-asset-store.js');
+    const caption = {
+        v4_prompt: { caption: { base_caption: '1girl, solo', char_captions: [] } },
+        v4_negative_prompt: { caption: { base_caption: 'lowres', char_captions: [] } },
+    };
+    // 数据库生图关了「立绘透明底」时，自动用白底；用户在「立绘底色」里选了透明底 / 浅灰底就按选的，但不向插件要原生透明。
+    const run = async (spriteBackground) => {
+        const paints = [];
+        const mattes = [];
+        const service = createAssetGenerationService({
+            messageHost: { getChatId: () => 'c' }, llm: {},
+            nai: {
+                describe: () => ({ mode: 'dbgen', via: 'dbgen', ownPrompts: true, ready: { ok: true } }),
+                writeDbgenPrompt: async () => ({ ok: true, caption }),
+                generateDbgenCaption: async (meta) => { paints.push(meta); return { ok: true, dataUrl: 'data:image/png;base64,AAA' }; },
+            },
+            store: createMemoryGeneratedAssetStore(),
+            getSettings: () => ({ autoIllustration: { assets: { spriteBackground } }, sceneAssets: {}, imageApi: { dbgenSpriteTransparent: false } }),
+            matte: async (url, options) => { mattes.push(options.alreadyTransparent); return url; },
+        });
+        assert.equal((await service.generateCharacterSprite({ name: '冬月' })).ok, true);
+        return { meta: paints[0], alreadyTransparent: mattes[0] };
+    };
+    const transparent = await run('transparent');
+    assert.match(transparent.meta.userPrompts.positive, /1\.5::transparent background::$/);
+    assert.equal(/white background|grey background/.test(transparent.meta.userPrompts.positive), false);
+    assert.deepEqual([transparent.meta.transparent, transparent.alreadyTransparent], [false, false]);
+    const matte = await run('matte');
+    assert.match(matte.meta.userPrompts.positive, /light grey background/);
+    assert.equal(/white background|transparent background/.test(matte.meta.userPrompts.positive), false);
 });
 
 test('gate:assets:dbgen-sprites-write-once-then-paint-and-split-past-eight', async () => {
@@ -886,7 +926,7 @@ test('gate:assets:dbgen-sprites-write-once-then-paint-and-split-past-eight', asy
             writeDbgenPrompt: async (meta) => {
                 order.push(`write:${(meta.description.match(/写(\d+)张立绘/) || [])[1]}`);
                 assert.match(meta.description, /1\. 甲\n2\. 乙\n3\. 丙/);
-                assert.match(meta.description, /无背景，透明底/);
+                assert.match(meta.description, /不要写背景、场景和底色/);
                 return {
                     ok: true,
                     captions: names.map((name, index) => ({ slotId: index + 1, caption: captionOf(name) })).reverse(),
@@ -1251,7 +1291,7 @@ test('gate:assets:expression-set-writes-once-then-paints-eight-in-order', async 
             assert.match(meta.description, /触发词：\nfuyuko/);
             assert.match(meta.description, /不要出现：\nextra fingers/);
             assert.equal(meta.description.includes('楼层'), false);
-            assert.match(meta.description, /无背景，透明底/);
+            assert.match(meta.description, /不要写背景、场景和底色/);
             assert.match(meta.description, /规格：大腿以上（cowboy shot）。朝向正面，直立，平视。禁止全身，禁止露出脚，禁止侧身，禁止倾斜构图。/);
             assert.match(meta.description, /情绪须写入肢体：手势、肩线、重心随该情绪变化。禁止仅替换面部。/);
             assert.equal(meta.description.includes('表情只改脸'), false);
@@ -1551,7 +1591,7 @@ test('gate:assets:character-sprite-writes-from-dna-then-paints-default', async (
     assert.match(text, /画角色「冬月」的立绘/);
     assert.match(text, /固定身份：\n银发/);
     assert.match(text, /默认外观：\n白裙/);
-    assert.match(text, /无背景，透明底/);
+    assert.match(text, /不要写背景、场景和底色/);
     assert.match(text, /只写一份，slotid 为 1/);
     assert.match(buildCharacterSpriteDescription('冬月', null, { note: '银发红瞳，穿白裙' }), /这次额外的要求：\n银发红瞳，穿白裙/);
     assert.equal(text.includes('楼层'), false);
@@ -1678,6 +1718,84 @@ test('gate:assets:default-sprite-extension-failure-falls-back-through-image-back
     assert.match([calls[2][1].scene, ...(calls[2][1].chars || []).map((item) => item.tags)].join(', '), /silver hair/);
     assert.equal(calls[3][1], false, '智绘姬失败后的 NAI 图片按非透明底抠图');
     assert.equal((await store.getImage(result.imageId)).dataUrl, image);
+});
+
+// 智绘姬出立绘：副 LLM 照旧写了一堆底色词，最终交给智绘姬的提示词里只剩「立绘底色」选的那一组。
+async function paintChatu8Sprite(spriteBackground) {
+    const { createImageBackend } = await import('../src/generated-images/image-backend.js');
+    const prompts = [];
+    const mattes = [];
+    const bridge = { imageApi: { mode: 'extension' }, autoIllustration: { assets: { spriteBackground } } };
+    const backend = createImageBackend({
+        global: {}, getBridge: () => bridge,
+        llm: { request: async () => '#1\nscene: 1girl, cowboy shot, transparent background, no background, simple background, light grey background, flat color background\nchar: silver hair, grey background, white dress\nuc: lowres, transparent background' },
+        nai: { generate: async () => { throw new Error('不应走 NAI'); } },
+        chatu8: { findHost: () => ({ win: {} }), request: async (host, prompt) => { prompts.push(prompt); return { ok: true, imageData: 'data:image/png;base64,QQ==' }; } },
+    });
+    const service = createAssetGenerationService({
+        messageHost: { getChatId: () => 'chat' }, llm: {}, nai: backend, store: createMemoryGeneratedAssetStore(),
+        getSettings: () => ({ autoIllustration: bridge.autoIllustration, sceneAssets: {} }),
+        matte: async (url, options) => { mattes.push(options.alreadyTransparent); return url; },
+    });
+    const result = await service.generateCharacterSprite({ name: '冬月', dna: { identity: 'silver hair' } });
+    assert.equal(result.ok, true);
+    const tags = splitTags(prompts[0]);
+    return { backgrounds: tags.filter(isBackgroundTag), tags, alreadyTransparent: mattes[0] };
+}
+
+test('gate:assets:sprite-background-choice-leaves-one-background-for-chatu8', async () => {
+    const transparent = await paintChatu8Sprite('transparent');
+    assert.deepEqual(transparent.backgrounds, ['1.5::transparent background::']);
+    assert.ok(transparent.tags.includes('silver hair') && transparent.tags.includes('white dress'));
+    assert.equal(transparent.alreadyTransparent, false, '智绘姬不保证真回透明图，交给抠图看四边');
+    const matte = await paintChatu8Sprite('matte');
+    assert.deepEqual(matte.backgrounds, ['simple background', 'grey background', 'light grey background', 'flat color background']);
+    const auto = await paintChatu8Sprite('auto');
+    assert.deepEqual(auto.backgrounds, matte.backgrounds, '自动：智绘姬照旧浅灰底');
+});
+
+test('gate:assets:sprite-background-choice-drives-nai-alpha-and-artist-prefix', async () => {
+    const { createImageBackend } = await import('../src/generated-images/image-backend.js');
+    const run = async (assets, model = 'nai-diffusion-5-full') => {
+        const calls = [];
+        const mattes = [];
+        const bridge = { imageApi: { mode: 'nai' }, autoIllustration: { assets, nai: { apiKey: 'test-key', model, artistPrefix: 'artist:foo, simple background' } } };
+        const backend = createImageBackend({
+            global: {}, getBridge: () => bridge,
+            llm: { request: async () => '#1\nscene: 1girl, no background\nchar: silver hair\nuc: lowres' },
+            nai: { generate: async (slot, config) => { calls.push({ slot, config }); return { ok: true, dataUrl: 'data:image/png;base64,QQ==' }; } },
+        });
+        const service = createAssetGenerationService({
+            messageHost: { getChatId: () => 'chat' }, llm: {}, nai: backend, store: createMemoryGeneratedAssetStore(),
+            getSettings: () => ({ autoIllustration: bridge.autoIllustration, sceneAssets: {} }),
+            matte: async (url, options) => { mattes.push(options.alreadyTransparent); return url; },
+        });
+        assert.equal((await service.generateCharacterSprite({ name: '冬月' })).ok, true);
+        const { slot, config } = calls[0];
+        return { slot, config, backgrounds: splitTags(slot.scene).filter(isBackgroundTag), alreadyTransparent: mattes[0] };
+    };
+    const v5 = await run({});
+    assert.deepEqual([v5.slot.transparent, v5.alreadyTransparent], [true, true]);
+    assert.deepEqual(v5.backgrounds, ['1.5::transparent background::']);
+    assert.equal(v5.config.artistPrefix, 'artist:foo', '画师串里的底色词也去掉');
+    const v5Matte = await run({ spriteBackground: 'matte' });
+    assert.deepEqual([v5Matte.slot.transparent, v5Matte.alreadyTransparent], [false, false]);
+    assert.equal(buildNaiV4Request(v5Matte.slot, { model: 'nai-diffusion-5-full' }, () => 0).parameters.straight_alpha, undefined);
+    const v45 = await run({ spriteBackground: 'transparent' }, 'nai-diffusion-4-5-full');
+    assert.deepEqual([v45.slot.transparent, v45.alreadyTransparent], [false, false], '4.5 没有原生透明：不带透明参数，抠图自己判断');
+    assert.deepEqual(v45.backgrounds, ['1.5::transparent background::']);
+    const asked = await run({ templates: { sprite: '{tags}, solo, transparent background, {matte}' } }, 'nai-diffusion-4-5-full');
+    assert.deepEqual(asked.backgrounds, ['1.5::transparent background::'], '自动：模板里写了透明底就按透明底');
+});
+
+test('gate:assets:sprite-background-setting-normalizes', () => {
+    assert.equal(normalizeAutoIllustrationSettings({}).assets.spriteBackground, 'auto');
+    assert.equal(normalizeAutoIllustrationSettings({ assets: { spriteBackground: 'matte' } }).assets.spriteBackground, 'matte');
+    assert.equal(normalizeAutoIllustrationSettings({ assets: { spriteBackground: 'grey' } }).assets.spriteBackground, 'auto');
+    assert.equal(isBackgroundTag('(white background:1.2)'), true);
+    assert.equal(isBackgroundTag('{{no background}}'), true);
+    assert.equal(isBackgroundTag('background characters'), false);
+    assert.equal(isBackgroundTag('backlighting'), false);
 });
 
 test('gate:asset-upload:stored-records-hydrate-in-a-new-service-and-report-failure', async () => {
