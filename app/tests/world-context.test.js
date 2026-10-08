@@ -54,7 +54,7 @@ test('gate:world:default-sprite-gets-character-sources-after-dna', () => {
     assert.ok(text.indexOf('固定身份') < text.indexOf('资料节选'), 'DNA 在前、资料在后，长相以 DNA 为准');
     assert.match(text, /长相和服装以角色设定（DNA）为准；设定没写到的按这些资料补，只取长相、穿着和身份气质，资料里的剧情不要画进去：\n【角色卡·描述】冬月是名门千金。/);
     const batch = buildDbgenSpriteBatchDescription([{ name: '路人', sources: '【世界书·设定·路人】卖花的老人。' }]);
-    assert.match(batch, /第 1 份：\n下面是「路人」在角色卡、世界书和数据库里的资料节选/);
+    assert.match(batch, /第 1 份：\n下面是「路人」的资料节选（每段开头标了出处/);
     const planner = buildAssetPlannerUserPrompt({ needs: [{ type: 'sprite', name: '路人', sources: '卖花的老人。' }], readableText: '正文', world: WORLD });
     assert.match(planner, /【世界观】\n这个故事的世界观是「古代」/);
     assert.match(planner, /【角色资料】[^\n]*\nch1「路人」：\n卖花的老人。/);

@@ -60,15 +60,18 @@ export function buildAssetPlannerUserPrompt({ needs = [], readableText = '', pre
         return `${id}｜${line}`;
     });
     const worldLines = worldContextLines(world);
-    // 角色卡 / 世界书 / 数据库里提到这个角色的节选，由调用方挂在 need.sources 上。
-    const sources = needs.map((need, index) => (need.type === 'sprite' && String(need.sources || '').trim()
+    // 角色卡 / 世界书 / 数据库 / 前文里提到这个角色或地点的节选，由调用方挂在 need.sources 上。
+    const sourcesOf = (type) => needs.map((need, index) => (need.type === type && String(need.sources || '').trim()
         ? `${describeAssetNeed(need, index).id}「${need.name}」：\n${String(need.sources).trim()}` : '')).filter(Boolean);
+    const sources = sourcesOf('sprite');
+    const sceneSources = sourcesOf('background');
     return [
         `【需要生成的素材】\n${listed.join('\n')}`,
         worldLines.length ? `【世界观】\n${worldLines.join('\n')}` : '',
         needs.some((need) => need.type === 'sprite' && need.dna)
             ? '【角色 DNA】标注了固定身份或默认外观的立绘，tags 不得改变这些特征，只补充正文中额外交代的内容。' : '',
-        sources.length ? `【角色资料】下面是角色卡、世界书和数据库里提到这些角色的节选。长相和服装以 DNA 为准；DNA 没写到的按资料补，只取长相、穿着和身份气质，资料里的剧情不要画进去。\n${sources.join('\n')}` : '',
+        sources.length ? `【角色资料】下面是提到这些角色的节选，每段开头标了出处（角色卡、世界书、数据库或前文）。长相和服装以 DNA 为准；DNA 没写到的按资料补，只取长相、穿着和身份气质，资料里的剧情不要画进去。\n${sources.join('\n')}` : '',
+        sceneSources.length ? `【场景资料】下面是提到这些地点的节选，每段开头标了出处。背景 tags 要写出资料里地点的档次、规模、建筑风格、年代、陈设和氛围；资料里的人物和剧情不要画进去。\n${sceneSources.join('\n')}` : '',
         previousText ? `【前文摘要】\n${previousText}` : '',
         `【本楼正文】\n${readableText}`,
         '请直接按输出格式给出字段。',
