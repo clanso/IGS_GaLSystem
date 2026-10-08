@@ -41826,11 +41826,13 @@ function moodSceneLines(moods, nsfw) {
 
 // note 是用户这次临时补的要求（性格、某个情绪的特别表现），只影响写词这一步；
 // nsfw 为 true 时「动情」改用它在 NSFW 下的动作说明。
-function buildExpressionDiffDescription(name, prompt, labels, dna, outfit, { note = '', nsfw = false, world = null } = {}) {
+// anchor：同一组表情分批写时，前面一批写好的一份；后面的批次外貌、服装和身体状态照它，整组才一致。
+function buildExpressionDiffDescription(name, prompt, labels, dna, outfit, { note = '', nsfw = false, world = null, anchor = null } = {}) {
     const moods = (Array.isArray(labels) ? labels : []).map((item) => String(item || '').trim()).filter(Boolean);
     const persona = String((dna && typeof dna === 'object' && dna.persona) || '').trim();
     const stored = prompt && typeof prompt === 'object' ? prompt : {};
     const caption = formatReturnedCaption(stored.caption);
+    const anchored = formatReturnedCaption(anchor);
     const clothes = outfit && typeof outfit === 'object' ? outfit : null;
     const outfitName = clothes ? String(clothes.name || '').trim() : '';
     const words = clothes && Array.isArray(clothes.words)
@@ -41862,6 +41864,8 @@ function buildExpressionDiffDescription(name, prompt, labels, dna, outfit, { not
         clothesLine,
         clothes && clothes.nsfwBoost && !nude ? nsfwClothingBoostLine('character') : '',
         clothesPrompt ? `服装提示词：\n${clothesPrompt}` : '',
+        anchored ? `这一组表情分几次写，下面是前面已经写好的一份。外貌、服装和身体状态要和它完全一致，只有表情和动作按各自的情绪重写：\n${anchored}` : '',
+        '正文和资料里写着的这个角色现在的身体状态（例如怀孕、受伤包扎、湿身），每一份都要写上，各份写法一致；这不算改长相。',
         ...worldContextLines(world),
         '每个表情都按这个角色自己的性格、脾气和说话做事的习惯来写，不要套统一的表情模板。',
         persona ? `「${name || ''}」的性格与表情习惯（据此决定每个表情怎么做、做到多大；只管表情和动作，不要据此改长相和衣服）：\n${persona}` : '',
@@ -45746,7 +45750,8 @@ function parseCaptionSlots(text) {
             return m ? m[1].trim() : '';
         };
         const scene = read('scene');
-        const char = read('char');
+        // 说明里的已有立绘是「char: x,y | tags」，模型有时照抄这种写法（偶尔还带角色名）：去掉开头的坐标，免得 0.5, 0.5 混进标签。
+        const char = read('char').replace(/^(?:[^|,]*\|\s*)?-?\d*\.?\d+\s*,\s*-?\d*\.?\d+\s*\|\s*/, '');
         if (!scene && !char) return null;
         const hasChar = Boolean(char);
         return { slotId, caption: { v4_prompt: side(scene, hasChar ? char : null), v4_negative_prompt: side(read('uc'), hasChar ? '' : null) } };
@@ -77495,7 +77500,7 @@ function createAssetGenerationService(deps) {
         const aliases = s.sceneAssets.characterAliases && Array.isArray(s.sceneAssets.characterAliases[name]) ? s.sceneAssets.characterAliases[name] : [];
         return [name, ...aliases];
     };
-    const SPRITE_MATERIAL_GUIDE = (name) => `下面先给出这个故事的设定资料（角色卡、世界书、数据库）和正文原文，供你把「${name}」画准：长相、身材和固定特征以后面说明里的角色设定（DNA）为准；设定没写到的，按资料和正文里对「${name}」的描写补；穿着、发型、配饰后面说明指定了就照说明，没指定的按正文里最近的样子。资料和正文里的剧情、其他角色不要画进去。`;
+    const SPRITE_MATERIAL_GUIDE = (name) => `下面先给出这个故事的设定资料（角色卡、世界书、数据库）和正文原文，供你把「${name}」画准：长相、身材和固定特征以后面说明里的角色设定（DNA）为准；设定没写到的，按资料和正文里对「${name}」的描写补；穿着、发型、配饰后面说明指定了就照说明，没指定的按正文里最近的样子；身体状态（例如怀孕、受伤包扎）也按正文里最近的样子写上。资料和正文里的剧情、其他角色不要画进去。`;
     const EXPRESSION_MATERIAL_GUIDE = (name) => `下面先给出这个故事的设定资料（角色卡、世界书、数据库）和正文原文：「${name}」每个表情的幅度和方式，照正文里这个角色说话做事的样子来定。长相和衣服按后面的说明，不要按正文改；资料和正文里的剧情、其他角色不要画进去。`;
 
     // 设置页写立绘 / 头像 / 表情差分：「读取上下文」加大预算时，说明前面附上全部设定资料（四成预算）
@@ -77709,6 +77714,9 @@ function createAssetGenerationService(deps) {
         const items = [];
         let painted = 0;
         let writeError = '';
+        // 分批写时每批是一次独立的写词：外貌、身体状态（怀孕之类只写在正文里的）容易一批有一批没有。
+        // 后面的批次照第一批写好的第一份来。
+        let anchor = null;
         for (const batch of splitExpressionWriteBatches(labels)) {
             if (stopped()) break;
             if (writeError) {
@@ -77723,7 +77731,7 @@ function createAssetGenerationService(deps) {
                 let written;
                 try {
                     written = await nai.writeDbgenPrompt({
-                        description: withMaterial(buildExpressionDiffDescription(name, basePrompt, pending, dna, outfit, { note, nsfw: paint.nsfw, world })),
+                        description: withMaterial(buildExpressionDiffDescription(name, basePrompt, pending, dna, outfit, { note, nsfw: paint.nsfw, world, anchor })),
                     });
                 } catch (error) {
                     const message = (error && error.message) || '写提示词失败';
@@ -77740,6 +77748,10 @@ function createAssetGenerationService(deps) {
                     break;
                 }
                 const captions = Array.isArray(written.captions) ? written.captions : [];
+                if (!anchor) {
+                    const first = captions.find((item) => item && item.caption);
+                    if (first) anchor = first.caption;
+                }
                 const missing = [];
                 for (let i = 0; i < pending.length; i += 1) {
                     if (stopped()) {
