@@ -1,6 +1,8 @@
 import { numberParagraphs, formatNumberedParagraphs, insertMarkers, insertMarkersAtAnchors, findAnchorInsertIndex, appendedTail, reattachTail, transplantMarkers } from './marker-placer.js';
 import { MIN_AUTO_IMAGE_BODY_CHARS, floorBodyLength } from './floor-body-length.js';
 import { buildPlannerUserPrompt } from './planner-prompt.js';
+import { STANDARD_FLOOR_CHARS, plannerLlmSettings, readPlannerContext } from './planner-context.js';
+import { worldContextOf } from '../../scene/worldview.js';
 import { requestWithSoftRetry, DEFAULT_ASSET_TEMPLATES } from './prompt-kit.js';
 import { parseIllustrationPlan } from './planner-parser.js';
 import { normalizeAutoIllustrationSettings } from './auto-illustration-settings.js';
@@ -96,10 +98,6 @@ const CACHE_LIMIT = 40;
 // 只有这些状态算「本楼已处理完」；failed / stale / 中途刷新残留的 planning 在下次渲染时重试，
 // 否则改好 Key 或地址之后，之前失败过的楼层永远不会再发请求。
 const SETTLED_STATUSES = new Set(['done']);
-
-function toReadableText(raw) {
-    return numberParagraphs(raw).paragraphs.map((p) => p.text).join('\n');
-}
 
 // 按既有别名归约取主名 DNA；没有 DNA 映射时返回 null，调用方保持旧行为。
 function createDnaResolver(sceneAssets) {
@@ -217,6 +215,31 @@ export function createAutoIllustrationService(deps) {
         const value = typeof deps.getSceneAssets === 'function' ? deps.getSceneAssets() : null;
         return value && typeof value === 'object' ? value : {};
     };
+
+    // 本楼正文读多少、前文读哪些（见 planner-context）；读不到前文就当没有。
+    function plannerContextOf(messageId, s, floorLength) {
+        try {
+            return readPlannerContext(messageHost, messageId, s.llm, floorLength);
+        } catch (error) {
+            return { budget: 0, floorChars: STANDARD_FLOOR_CHARS, previousText: '' };
+        }
+    }
+
+    // 出场角色的角色卡 / 世界书 / 数据库节选（宿主读）。标准长度时只给没有 DNA 的角色（有 DNA 的长相以 DNA 为准）；
+    // 加大预算时都给。没接或读不到就不附。
+    async function readCgCharacterSources(names, sceneAssets, large) {
+        if (typeof deps.readCharacterSources !== 'function') return [];
+        const resolver = createDnaResolver(sceneAssets);
+        const wanted = (Array.isArray(names) ? names : []).filter((name) => large || !resolver || !resolver.resolve(name));
+        if (!wanted.length) return [];
+        let found = {};
+        try {
+            found = (await deps.readCharacterSources(wanted, { large })) || {};
+        } catch (error) {
+            return [];
+        }
+        return wanted.map((name) => ({ name, text: String(found[name] || '').trim() })).filter((item) => item.text);
+    }
 
     function remember(key, value) {
         cache.delete(key);
@@ -456,13 +479,17 @@ export function createAutoIllustrationService(deps) {
         await store.putFloor(key, { ...base, status: 'planning', updatedAt: now() });
         let plan;
         try {
-            const previousText = messageHost.readPreviousAiTexts(messageId, s.llm.contextFloors)
-                .map(toReadableText).join('\n').slice(-1500);
+            const floorLength = numbered.paragraphs.reduce((sum, p) => sum + p.text.length + 1, 0);
+            const context = plannerContextOf(messageId, s, floorLength);
+            const sceneAssets = readSceneAssets();
+            const characterDna = summarizeCharacterDna(numbered.characters, sceneAssets);
             const user = buildPlannerUserPrompt({
-                numberedText: formatNumberedParagraphs(numbered.paragraphs),
+                numberedText: formatNumberedParagraphs(numbered.paragraphs, context.floorChars),
                 scenes: numbered.scenes, characters: numbered.characters,
-                previousText, want: decision.want, exact: decision.exact, isNsfw: numbered.isNsfw,
-                characterDna: summarizeCharacterDna(numbered.characters, readSceneAssets()),
+                previousText: context.previousText, want: decision.want, exact: decision.exact, isNsfw: numbered.isNsfw,
+                characterDna,
+                characterSources: await readCgCharacterSources(numbered.characters, sceneAssets, context.budget > 0),
+                world: worldContextOf(sceneAssets),
                 frame: cgFramePrompt(cgSize(s)),
             });
             plan = await requestWithSoftRetry(llm, {
@@ -470,7 +497,7 @@ export function createAutoIllustrationService(deps) {
                 softSystem: numbered.isNsfw ? s.llm.prompts.illustrationSoft : '',
                 user,
                 parse: (reply) => parseIllustrationPlan(reply, { maxSlots: decision.want, paragraphCount: numbered.paragraphs.length }),
-            }, s.llm);
+            }, plannerLlmSettings(s.llm));
             // 温和模式下 LLM 只给了构图，露骨 tag 在本地补上，不经过 LLM。
             if (plan.ok && plan.soft) {
                 const extra = s.assets.templates.nsfwExtra || DEFAULT_ASSET_TEMPLATES.nsfwExtra;

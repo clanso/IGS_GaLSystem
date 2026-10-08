@@ -172,15 +172,15 @@ export function pickWorldText(material, limits = WORLD_SOURCE_LIMITS) {
     return parts.join('\n');
 }
 
-// 正文里描写这套衣服的段落：最近 floors 层（不算系统消息）里提到服装名的段落，超长时留最近的。
-export function pickOutfitContext(chat, outfit, { floors = 30, limit = 1500 } = {}) {
-    const word = String(outfit || '').trim();
-    if (!word || !Array.isArray(chat)) return '';
+// 正文里提到某个词（服装名、角色名）的段落：最近 floors 层（不算系统消息）里的，去掉 HTML（状态栏之类），超长时留最近的。
+export function pickChatMentions(chat, word, { floors = 30, limit = 1500 } = {}) {
+    const key = String(word || '').trim();
+    if (!key || !Array.isArray(chat)) return '';
     const paragraphs = chat.slice(-floors)
         .filter((msg) => msg && !msg.is_system && typeof msg.mes === 'string')
         .flatMap((msg) => msg.mes.split(/\n+/))
-        .map((line) => line.trim())
-        .filter((line) => line.includes(word));
+        .map((line) => line.replace(/<[^>]*>/g, ' ').replace(/\s{2,}/g, ' ').trim())
+        .filter((line) => line.includes(key));
     const kept = [];
     let used = 0;
     for (let i = paragraphs.length - 1; i >= 0; i -= 1) {
@@ -193,5 +193,5 @@ export function pickOutfitContext(chat, outfit, { floors = 30, limit = 1500 } = 
 
 export function formatCharacterSources(sources) {
     const value = sources && typeof sources === 'object' ? sources : {};
-    return [value.card, value.worldbook, value.database].map((part) => String(part || '').trim()).filter(Boolean).join('\n\n');
+    return [value.card, value.worldbook, value.database, value.chat].map((part) => String(part || '').trim()).filter(Boolean).join('\n\n');
 }

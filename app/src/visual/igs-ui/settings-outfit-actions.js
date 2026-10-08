@@ -7,7 +7,7 @@ import { draftAssetLibrary, draftEffectiveAssets, rememberAssetScope } from '../
 import { getSillyTavernContext } from '../../host/tavern-helper-adapter.js';
 import { createSettingsDialogs } from './settings-dialog.js';
 import { beginSettingsProgress, remountSettingsNotice, SETTINGS_NOTICE_MS } from './settings-notice.js';
-import { pickOutfitContext, readSourceMaterial } from '../../host/character-sources.js';
+import { pickChatMentions, readSourceMaterial } from '../../host/character-sources.js';
 import { collectOutfitClues } from '../../data/shujuku/outfit-clues.js';
 import { prepareWorldContext } from './world-context.js';
 
@@ -353,7 +353,7 @@ async function wardrobeWritingBackground(ctx, globalObj, { character = '', outfi
     const clues = character ? collectOutfitClues(material.tables, [character, ...aliases]) : { profile: [], worn: [] };
     return {
         world: prepared.world,
-        context: pickOutfitContext(material.chat, outfit),
+        context: pickChatMentions(material.chat, outfit),
         clues: [...clues.profile, ...clues.worn].filter((line) => outfit && String(line).includes(outfit)).join('\n'),
     };
 }

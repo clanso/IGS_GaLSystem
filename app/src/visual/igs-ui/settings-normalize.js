@@ -10,6 +10,7 @@ import { normalizeRenderQualitySetting } from './render-quality.js';
 import { spriteIdentity } from '../../scene/character-outfits.js';
 import { normalizeImageCacheCount } from '../../media/tavern-image-cache.js';
 import { normalizeStatusHudPercent } from '../../data/shujuku/status-hud-model.js';
+import { CONTEXT_BUDGETS } from '../../generated-images/illustration/planner-context.js';
 
 
 export function normalizeReaderMode(mode, bridge) {
@@ -110,6 +111,7 @@ export function normalizeSettingsValue(path, value) {
     if (/^bridge\.autoIllustration\.(nsfwCount|interludeProbability|interludeMaxCount|assets\.maxPerFloor|llm\.contextFloors|llm\.timeoutMs|nai\.steps|nai\.scale|nai\.timeoutMs)$/.test(path)) {
         return Number(value);
     }
+    if (path === 'bridge.autoIllustration.llm.contextBudget') return Object.keys(CONTEXT_BUDGETS).includes(value) ? value : 'standard';
     if (path === 'bridge.autoIllustration.llm.source' || path === 'bridge.autoIllustration.nai.transport') {
         return String(value || '');
     }

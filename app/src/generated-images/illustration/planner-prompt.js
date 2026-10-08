@@ -1,4 +1,5 @@
 import { FICTION_FRAME, CG_COMPOSITION_GUIDE, TAG_WRITING_RULES, SOFT_MODE_NOTE } from './prompt-kit.js';
+import { worldContextLines } from '../dbgen-prompt.js';
 
 const PLANNER_OUTPUT_FORMAT = [
     '【输出格式】不要输出 JSON、不要代码块、不要解释。每张图按以下字段一行一个输出，多张图依次排列：',
@@ -51,8 +52,11 @@ export const PLANNER_SOFT_SYSTEM_PROMPT = [
 ].join('\n');
 
 // characterDna：[{ name, identity, defaultAppearance }]，由调用方按别名归约后提供；为空时输出与旧版一致。
-export function buildPlannerUserPrompt({ numberedText, scenes, characters, previousText, want, exact, isNsfw, characterDna = [], frame = '' }) {
-    const lastScene = scenes && scenes.length ? scenes[scenes.length - 1] : null;
+// characterSources：[{ name, text }] 角色卡 / 世界书 / 数据库节选；world：世界观与世界设定提要。
+export function buildPlannerUserPrompt({ numberedText, scenes, characters, previousText, want, exact, isNsfw, characterDna = [], characterSources = [], world = null, frame = '' }) {
+    const sceneLabel = (scene) => `${scene.scene}｜${scene.time}｜${scene.weather}${scene.nsfw ? '｜NSFW' : ''}`;
+    // 一楼常有好几个场景：按出现顺序列全（去掉连续重复），插图要画在对应场景的段落里。
+    const sceneList = (Array.isArray(scenes) ? scenes : []).map(sceneLabel).filter((label, index, list) => label !== list[index - 1]);
     const flat = (text) => String(text || '').replace(/\s*\n\s*/g, ' ').trim();
     const dnaLines = (Array.isArray(characterDna) ? characterDna : [])
         .filter((d) => d && d.name && (flat(d.identity) || flat(d.defaultAppearance)))
@@ -60,17 +64,23 @@ export function buildPlannerUserPrompt({ numberedText, scenes, characters, previ
     const dnaBlock = dnaLines.length
         ? `【角色 DNA】固定身份任何时候都不得改变；默认外观只在正文未交代换装时使用，正文明确换装时按正文写：\n${dnaLines.join('\n')}`
         : '';
-    const sceneLine = lastScene
-        ? `${lastScene.scene}｜${lastScene.time}｜${lastScene.weather}${lastScene.nsfw ? '｜NSFW' : ''}`
-        : '未标注';
+    const sceneLine = !sceneList.length ? '未标注'
+        : sceneList.length === 1 ? sceneList[0]
+            : `本楼按顺序经过：${sceneList.join(' → ')}`;
     const countLine = exact
         ? `本楼需要恰好 ${want} 张插图。`
         : `本楼需要 1 到 ${want} 张插图，按剧情判断，画面感不足时只出 1 张。`;
+    const worldLines = worldContextLines(world);
+    const sourceLines = (Array.isArray(characterSources) ? characterSources : [])
+        .filter((item) => item && item.name && String(item.text || '').trim())
+        .map((item) => `「${item.name}」：\n${String(item.text).trim()}`);
     return [
         frame ? `【画面】${frame}` : '',
+        worldLines.length ? `【世界观】\n${worldLines.join('\n')}` : '',
         `【场景】${sceneLine}`,
         `【出场角色】${characters && characters.length ? characters.join('、') : '未标注'}`,
         dnaBlock,
+        sourceLines.length ? `【角色资料】下面是提到这些角色的节选，每段开头标了出处。长相和服装以 DNA 与正文为准，没写到的按资料补；资料里的剧情不要画进去。\n${sourceLines.join('\n')}` : '',
         previousText ? `【前文摘要】\n${previousText}` : '',
         `【本楼正文（已编号）】\n${numberedText}`,
         `【要求】${countLine}${isNsfw ? '本楼为 NSFW 场景，请选择最具代表性的画面。' : ''}`,

@@ -61,15 +61,18 @@ const IGS_VERSION = '0.35.3';
 const SCENE_ASSETS_INJECTION_INITIAL_DELAY_MS = 3000;
 const SCENE_ASSETS_INJECTION_RETRY_MS = 1500;
 const SCENE_ASSETS_INJECTION_MAX_ATTEMPTS = 5;
-// 楼内补立绘给副 LLM 的角色资料节选：每个角色限得比手动生成时短。
+// 副 LLM 规划（楼内补立绘 / 背景、剧情 CG）的资料节选：标准长度时每项限得比手动生成时短；
+// 「读取上下文」加大预算时（large）给长的，世界书相关条目尽量整条带上。
 const PLANNER_SOURCE_LIMITS = Object.freeze({ card: 800, worldbook: 1200, entry: 600, database: 500 });
+const LARGE_PLANNER_SOURCE_LIMITS = Object.freeze({ card: 8000, worldbook: 20000, entry: 5000, database: 5000 });
 
-// 楼内补立绘 / 背景：一次读角色卡 / 世界书 / 数据库，再按名字挑节选（每个限得短，规划说明不膨胀）。
-async function readPlannerSources(globalObject, names, pick) {
+// 一次读角色卡 / 世界书 / 数据库，再按名字挑节选。
+async function readPlannerSources(globalObject, names, pick, { large = false } = {}) {
     const material = await readSourceMaterial(globalObject);
+    const limits = large ? LARGE_PLANNER_SOURCE_LIMITS : PLANNER_SOURCE_LIMITS;
     const out = {};
     for (const name of names) {
-        const text = formatCharacterSources(pick(material, { name, limits: PLANNER_SOURCE_LIMITS }));
+        const text = formatCharacterSources(pick(material, { name, limits }));
         if (text) out[name] = text;
     }
     return out;
@@ -169,6 +172,8 @@ export function bootstrapIGS(options = {}) {
         getViewport: () => readCgViewport(globalObject, readerModeNow()),
         getSceneAssets: () => sceneAssetsNow(readImageBridge().sceneAssets),
         getSourceFilter: () => readImageBridge().sourceFilter,
+        // 剧情 CG 规划：出场角色的角色卡 / 世界书 / 数据库节选。
+        readCharacterSources: (names, sourceOptions) => readPlannerSources(globalObject, names, pickCharacterSources, sourceOptions),
         events,
         random: options.random,
         report: reportImageJob,
@@ -189,9 +194,9 @@ export function bootstrapIGS(options = {}) {
         getViewport: () => readCgViewport(globalObject, readerModeNow()),
         getSourceFilter: () => readImageBridge().sourceFilter,
         // 楼内补立绘：按角色名挑节选。
-        readCharacterSources: (names) => readPlannerSources(globalObject, names, pickCharacterSources),
+        readCharacterSources: (names, options) => readPlannerSources(globalObject, names, pickCharacterSources, options),
         // 楼内补背景：同样按地点名挑角色卡描述 / 场景栏、世界书、数据库节选。
-        readSceneSources: (names) => readPlannerSources(globalObject, names, pickSceneSources),
+        readSceneSources: (names, options) => readPlannerSources(globalObject, names, pickSceneSources, options),
         events,
         report: reportImageJob,
         thumbStore: options.assetThumbStore !== undefined ? options.assetThumbStore : createIndexedDbAssetThumbStore(globalObject),

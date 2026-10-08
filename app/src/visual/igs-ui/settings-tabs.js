@@ -115,7 +115,7 @@ const IMAGE_LLM_TEMPLATE = `
     <div class="igs-source-filter-note">{{autoLlmNote}}</div>
     <div class="igs-source-filter-note" data-image-feature="llm-warn"{{autoLlmWarnHidden}}>{{autoLlmWarn}}</div>
     <div class="igs-source-filter-grid">
-      {{autoLlmSourceField}}{{autoLlmContextField}}
+      {{autoLlmSourceField}}{{autoLlmContextField}}{{autoLlmContextBudgetField}}
     </div>
     <div class="igs-settings-sub"{{autoLlmApiHidden}}>
       <div class="igs-source-filter-grid">

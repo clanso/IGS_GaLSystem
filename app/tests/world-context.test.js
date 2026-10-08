@@ -11,7 +11,7 @@ import {
     worldContextLines,
 } from '../src/generated-images/dbgen-prompt.js';
 import { buildAssetPlannerUserPrompt } from '../src/generated-images/illustration/asset-prompt.js';
-import { pickCharacterSources, pickOutfitContext, pickWorldText, readSourceMaterial } from '../src/host/character-sources.js';
+import { pickCharacterSources, pickChatMentions, pickWorldText, readSourceMaterial } from '../src/host/character-sources.js';
 import { writeWorldSummary } from '../src/generated-images/illustration/persona-writer.js';
 import { handleSettingsAction } from '../src/visual/igs-ui/settings-actions.js';
 
@@ -90,9 +90,9 @@ test('gate:world:sources-for-world-and-outfit-context', () => {
     assert.equal(pickWorldText(material), '【角色卡·场景】\n故事发生在一个架空王朝。\n【世界书·设定·世界】\n王朝以丝绸闻名。');
     assert.equal(pickWorldText({ card: null, books: [] }), '');
     // 服装上下文：只看最近 30 层、不看系统消息，只留提到服装名的那几行。
-    assert.equal(pickOutfitContext(chat, '浴衣'), '冬月换上浴衣。\n浴衣上绣着白鹤。');
-    assert.equal(pickOutfitContext(chat, '浴衣', { limit: 10 }), '浴衣上绣着白鹤。', '超长时留最近的');
-    assert.equal(pickOutfitContext(chat, ''), '');
+    assert.equal(pickChatMentions(chat, '浴衣'), '冬月换上浴衣。\n浴衣上绣着白鹤。');
+    assert.equal(pickChatMentions(chat, '浴衣', { limit: 10 }), '浴衣上绣着白鹤。', '超长时留最近的');
+    assert.equal(pickChatMentions(chat, ''), '');
     assert.match(pickCharacterSources(material, { name: '冬月' }).worldbook, /冬月的身世/);
 });
 
