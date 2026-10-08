@@ -123,7 +123,7 @@ export function outfitStateLines(outfitName) {
 // 给写词看的样板（已有立绘、分批的第一份）去掉临时状态；这一套由程序按孕期加肚子时，怀孕的词也去掉。
 function lastingStateCaption(caption, enforcedPregnancy) {
     const enforced = enforcedPregnancy > 0;
-    return filterCaptionTags(caption, (key) => !TRANSIENT_STATE_TAG_RE.test(key) && !(enforced && PREGNANCY_TAG_RE.test(key)));
+    return filterCaptionTags(caption, (key) => !TRANSIENT_STATE_TAG_RE.test(key) && !isMoodDetailTag(key) && !(enforced && PREGNANCY_TAG_RE.test(key)));
 }
 
 // 按标签键过滤正面 caption（base 和各角色块），负面不动。
@@ -198,7 +198,7 @@ export function buildExpressionDiffDescription(name, prompt, labels, dna, outfit
         clothesLine,
         clothes && clothes.nsfwBoost && !nude ? nsfwClothingBoostLine('character') : '',
         clothesPrompt ? `服装提示词：\n${clothesPrompt}` : '',
-        anchored ? `这一组表情分几次写，下面是前面已经写好的一份。外貌、服装和长期身体状态要和它完全一致，只有表情和动作按各自的情绪重写：\n${anchored}` : '',
+        anchored ? `这一组表情分几次写，下面是前面已经写好的几份共有的外貌、服装和长期身体状态（表情和动作已经去掉）。这几项要和它完全一致，表情和动作按各自的情绪写，不要照搬别的份：\n${anchored}` : '',
         `正文和资料里写着的长期身体状态（${LASTING_STATE_TEXT}），每一份都要写上，各份写法一致；这不算改长相。${statedMonth ? '' : `怀孕按孕期写肚子大小：${pregnancyGuideText()}。`}`,
         `${TRANSIENT_STATE_TEXT}这类一会儿就过去的状态不要当成身体状态每份都写；某个表情本身要的（哭泣的眼泪、害羞的脸红、紧张的汗珠）只写在那一份里。`,
         ...outfitStateLines(outfitName),
@@ -504,6 +504,53 @@ function isExpressionPoseTag(tag) {
     return EXPRESSION_POSE_RE.test(tagKey(tag));
 }
 
+// 某一张差分自己的神态和动作：眉毛、眼神、嘴、头的角度、手和手臂、肩膀、身体姿势。
+// 从别的图拿长相（原装那张、分批写词的样板）时去掉，不然平和那张的「眉头放松、双手交叠」会叠到委屈上。
+// 只认带姿态词的写法：瞳色（green eyes）、裸肩（bare shoulders）、袖套（arm warmers）、痣这类长相和衣服不动。
+const MOOD_DETAIL_RE = new RegExp(`^(?!mole\\b)(?:${[
+    '.*\\b(?:eyebrows?|brows?)\\b.*',
+    '.*\\b(?:gaze|glance|stare|staring|looking|wink|winking)\\b.*',
+    '.*\\blooks? (?:at|away|down|up)\\b.*',
+    '(?:.* )?(?:closed|half-closed|narrowed|downcast|averted|teary|wet|upturned|sleepy|tired|shining|sparkling|glaring|squinting|wide|watery|empty|dull) eyes?',
+    'eyes? (?:closed|half-closed|narrowed|wide|averted|downcast|shut).*',
+    'one eye closed',
+    '.*\\b(?:pout|pouting|lips|mouth|smile|smiling|grin|grinning|smirk|frown|frowning|laugh|laughing|sneer|scowl)\\b.*',
+    '.*\\bhead (?:tilt|tilted|down|lowered|up|raised|turned|back|bowed)\\b.*',
+    '.*\\btilt(?:ed|ing)? head\\b.*',
+    'chin (?:.* )?(?:up|down|raised|lowered|tucked).*',
+    '.*\\b(?:tearing|sobbing|crying|sniffling|trembling lips)\\b.*',
+    '.*\\b(?:own )?hands? (?:on|in|together|behind|up|raised|clasped|resting|reaching|holding|over|near|to|at|covering|in front)\\b.*',
+    '.*\\b(?:hands|fingers) (?:together|interlocked|intertwined|clasped)\\b.*',
+    '.*\\bclasped hands\\b.*',
+    '.*\\bfingers? (?:to|on|touching)\\b.*',
+    '(?:other|one|another) (?:hand|arm)\\b.*',
+    '.*\\b(?:reaching|holding|gripping|grabbing|clutching)\\b.*',
+    '.*\\barms? (?:crossed|folded|behind|at sides|up|raised|outstretched|around|on|across|resting|down)\\b.*',
+    'crossed arms',
+    '(?:relaxed|raised|tense|tensed|slumped|hunched|drooping|stiff|squared) shoulders',
+    '.*\\b(?:shrug|shrugging|leaning|posture|bowing|slouching)\\b.*',
+].join('|')})$`);
+
+export function isMoodDetailTag(tag) {
+    return isExpressionPoseTag(tag) || MOOD_DETAIL_RE.test(tagKey(tag));
+}
+
+// 分批写词的样板：取第一批里过半数份都有的 tag。长相、衣服、长期身体状态每份都写，留得下；
+// 表情和动作每份不同，自然筛掉。结构照第一份，返回 null 表示第一批没有可用的。
+export function sharedLookCaption(captions) {
+    const list = (Array.isArray(captions) ? captions : []).filter((item) => item && item.v4_prompt && item.v4_prompt.caption);
+    if (!list.length) return null;
+    const keysOf = (caption) => {
+        const pos = caption.v4_prompt.caption;
+        const chars = Array.isArray(pos.char_captions) ? pos.char_captions : [];
+        return new Set(splitTags([pos.base_caption, chars[0] && chars[0].char_caption].filter(Boolean).join(', ')).map(tagKey));
+    };
+    const counts = new Map();
+    for (const keys of list.map(keysOf)) for (const key of keys) counts.set(key, (counts.get(key) || 0) + 1);
+    const half = list.length / 2;
+    return filterCaptionTags(list[0], (key) => list.length === 1 || (counts.get(key) || 0) > half);
+}
+
 // 默认立绘被写成无表情时，差分照抄会带上这些词。
 const NEUTRAL_FACE_TAGS = new Set(['expressionless', 'emotionless', 'neutral expression', 'blank expression', 'blank stare', 'straight face', 'closed mouth', 'arms at sides'].map(tagKey));
 
@@ -537,9 +584,9 @@ export function expressionLookTags(basePrompt, outfit) {
     const clothesPrompt = clothes ? String(clothes.prompt || '').trim() : '';
     if (clothesPrompt) return dnaEnglishTags(clothesPrompt).join(', ');
     if (clothes && !clothes.ownImage) return '';
-    // 原装那张画的时候出汗、湿身之类的临时状态不跟到别的表情里。
+    // 原装那张自己的神态、手势，和画的时候出汗、湿身之类的临时状态，都不跟到别的表情里。
     return splitTags(storedCharTags(basePrompt))
-        .filter((tag) => !isExpressionPoseTag(tag) && !LOOK_SKIP_TAGS.has(tagKey(tag)) && !TRANSIENT_STATE_TAG_RE.test(tagKey(tag)))
+        .filter((tag) => !isMoodDetailTag(tag) && !LOOK_SKIP_TAGS.has(tagKey(tag)) && !TRANSIENT_STATE_TAG_RE.test(tagKey(tag)))
         .join(', ');
 }
 

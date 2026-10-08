@@ -70,10 +70,10 @@ test('gate:body-state:writer-is-told-the-outfit-state-and-pregnancy-is-left-to-t
     const burn = buildExpressionDiffDescription('阿黛尔', null, ['平和'], null, { name: '亚麻长裙-左臂烧伤' });
     assert.match(burn, /这一套的身体状态是「左臂烧伤」：每一份都要画出来，各份写法一致。/);
     assert.match(burn, /怀孕按孕期写肚子大小/);
-    // 已有立绘当样板时去掉临时状态，孕期由程序定时连怀孕词一起去掉。
-    const base = { caption: cap('silver hair, sweat, damp skin, pregnant, huge belly, smile') };
+    // 已有立绘当样板时去掉临时状态和那张自己的表情，孕期由程序定时连怀孕词一起去掉。
+    const base = { caption: cap('silver hair, sweat, damp skin, pregnant, huge belly, smile, white robe') };
     const shown = buildExpressionDiffDescription('阿黛尔', base, ['平和'], null, { name: '薄睡袍-孕晚期' });
-    assert.match(shown, /char: 0\.5,0\.5 \| silver hair, smile\n/);
+    assert.match(shown, /char: 0\.5,0\.5 \| silver hair, white robe\n/);
 });
 
 test('gate:body-state:pregnancy-tags-replace-whatever-the-writer-wrote', () => {
