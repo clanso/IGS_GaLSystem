@@ -14,8 +14,6 @@ import { assetOwnerKey, draftAssetLibrary, draftEffectiveAssets, effectiveSceneA
 import { buildCharacterCardPack, buildImageZip, buildPresetArchive, mergeLabelGroups, parseCharacterCardPack, parsePresetArchive, parseSettingsArchive, spriteEntriesForNames } from '../../scene/card-pack.js';
 import { getSillyTavernContext } from '../../host/tavern-helper-adapter.js';
 import { collectCharacterSources, formatCharacterSources, pickCharacterSources, pickChatMentions, readSourceMaterial } from '../../host/character-sources.js';
-import { normalizeAutoIllustrationSettings } from '../../generated-images/illustration/auto-illustration-settings.js';
-import { contextBudgetChars } from '../../generated-images/illustration/planner-context.js';
 import { extractWorldSummary, prepareWorldContext } from './world-context.js';
 import { localImageCacheFor } from '../../media/tavern-image-cache.js';
 import { createIndexedDbAssetThumbStore } from '../../media/asset-thumb-store.js';
@@ -98,7 +96,7 @@ function assetFolderScope(settingsState, options) {
 
 const CHARACTER_FIELDS = ['characters', 'characterOutfits', 'characterDna', 'characterAliases', 'statusAvatars'];
 const SCENE_ACTION = /^scene-(?:(?:add|remove|rename|set|toggle|pick)-(?:bg|bg-word|bg-url|time|time-url|weather|weather-url)|variant-(?:set|retry))$/;
-const CHARACTER_ACTION = /^(?:scene-(?:add|remove|rename|set|toggle|pick)-(?:char|char-alias|mood|mood-url|dna-char|outfit-mood)|status-avatar-(?:pick|clear|set-url|generate)|char-generate-sprite|char-persona-extract|outfit-generate-nude|char-expression-(?:prompt|set|retry|resume)|outfit-expression-(?:prompt|set|retry|resume))$/;
+const CHARACTER_ACTION = /^(?:scene-(?:add|remove|rename|set|toggle|pick)-(?:char|char-alias|mood|mood-url|dna-char|outfit-mood)|status-avatar-(?:pick|clear|set-url|generate)|char-generate-sprite|char-persona-extract|outfit-generate-nude|char-expression-(?:prompt|set|retry|resume)|outfit-expression-(?:prompt|set|retry|resume)|sprite-clear(?:-pick|-all|-apply)?)$/;
 
 // 服装的适用场景可能指向另一边的场景：场景改名、删除时全局和本卡的服装都要跟上。
 function linkedCharacterOutfits(settingsState) {
@@ -218,17 +216,14 @@ async function extractCharacterPersona({ service, globalObj, sceneAssets, name }
 }
 
 // 画默认立绘、头像时给写词的角色资料节选：比提炼性格时短，只补 DNA 没写到的长相和穿着。
-// 「副 LLM → 读取上下文」加大了预算就给长的，正文里提到这个角色的段落也往前多翻。
+// 「副 LLM → 读取上下文」加大了预算时，素材服务另在说明前附上全部设定资料和正文原文。
 const SPRITE_SOURCE_LIMITS = Object.freeze({ card: 2000, worldbook: 2500, entry: 1000, database: 800 });
-const LARGE_SPRITE_SOURCE_LIMITS = Object.freeze({ card: 8000, worldbook: 20000, entry: 5000, database: 5000 });
 const characterAliasesOf = (sceneAssets, name) => (sceneAssets.characterAliases && Array.isArray(sceneAssets.characterAliases[name]) ? sceneAssets.characterAliases[name] : []);
 
 // 角色卡 / 世界书 / 数据库节选，加上正文里提到这个角色的段落（长相、穿着常写在剧情里）。
-function characterSourcesText(settingsState, material, sceneAssets, name) {
-    const bridge = settingsState && settingsState.draft && settingsState.draft.bridge ? settingsState.draft.bridge : {};
-    const large = contextBudgetChars(normalizeAutoIllustrationSettings(bridge.autoIllustration).llm) > 0;
-    const sources = pickCharacterSources(material, { name, aliases: characterAliasesOf(sceneAssets, name), limits: large ? LARGE_SPRITE_SOURCE_LIMITS : SPRITE_SOURCE_LIMITS });
-    const chat = pickChatMentions(material.chat, name, large ? { floors: 300, limit: 20000 } : { floors: 30, limit: 1500 });
+function characterSourcesText(material, sceneAssets, name) {
+    const sources = pickCharacterSources(material, { name, aliases: characterAliasesOf(sceneAssets, name), limits: SPRITE_SOURCE_LIMITS });
+    const chat = pickChatMentions(material.chat, name);
     return formatCharacterSources({ ...sources, chat: chat ? `【前文·提到「${name}」的段落】\n${chat}` : '' });
 }
 
@@ -237,7 +232,7 @@ async function spriteWritingBackground({ settingsState, service, globalObj, scen
     const material = await readSourceMaterial(globalObj);
     const prepared = await prepareWorldContext({ settingsState, service, globalObj, material, onProgress, persist });
     if (prepared.note) showGeneratedNotice(globalObj, prepared.note, prepared.tone);
-    return { world: prepared.world, sourcesText: characterSourcesText(settingsState, material, sceneAssets, name) };
+    return { world: prepared.world, sourcesText: characterSourcesText(material, sceneAssets, name) };
 }
 
 // 存进这个角色的 DNA（和 DNA 一起跟着角色走）；返回更新后的 DNA。
@@ -869,6 +864,53 @@ export async function handleSettingsAction(action, ctx) {
             if (result && result.ok === false) return result;
         }
         asyncState.assetSelect = null;
+        return rerenderSettings();
+    }
+    // 清空一套服装（原装 outfit 为空）下选中的立绘：只清图和这格存下的写词注记，情绪格留着，之后可以重新生成。
+    // 多选只记在界面状态里（asyncState.spriteClear），清空时才改草稿并保存。
+    const clearMatch = /^sprite-clear(?:-(pick|all|apply))?:([^:]*):([^:]*)(?::(.*))?$/.exec(normalizedAction);
+    if (clearMatch) {
+        const [, op = 'toggle', c, o, m = ''] = clearMatch;
+        const character = decodeSeg(c);
+        const outfit = decodeSeg(o);
+        const asyncState = settingsState.asyncState;
+        const cur = asyncState.spriteClear && asyncState.spriteClear.character === character && asyncState.spriteClear.outfit === outfit
+            ? asyncState.spriteClear : null;
+        const liveAssets = draftAssetLibrary(settingsState, editTarget);
+        const outfitEntry = outfit ? ((liveAssets.characterOutfits || {})[character] || {})[outfit] : null;
+        const slots = outfit
+            ? (outfitEntry && outfitEntry.moods && typeof outfitEntry.moods === 'object' ? outfitEntry.moods : {})
+            : ((liveAssets.characters || {})[character] || {});
+        const filled = Object.keys(slots).filter((mood) => String(slots[mood] || '').trim());
+        if (op === 'toggle') {
+            asyncState.spriteClear = cur ? null : { character, outfit, moods: new Set() };
+            return rerenderSettings();
+        }
+        if (!cur) return rerenderSettings();
+        if (op === 'pick') {
+            const mood = decodeSeg(m);
+            if (cur.moods.has(mood)) cur.moods.delete(mood); else cur.moods.add(mood);
+            return rerenderSettings();
+        }
+        if (op === 'all') {
+            cur.moods = cur.moods.size === filled.length ? new Set() : new Set(filled);
+            return rerenderSettings();
+        }
+        const moods = [...cur.moods].filter((mood) => filled.includes(mood));
+        if (!moods.length) return rerenderSettings();
+        const where = `「${character}」${outfit ? `「${outfit}」` : '原装'}`;
+        const preview = moods.slice(0, 6).map((mood) => `「${mood}」`).join('') + (moods.length > 6 ? ` 等 ${moods.length} 张` : '');
+        if (typeof dialogs.confirm === 'function' && !(await dialogs.confirm(`清空${where}的 ${preview}立绘？情绪格会留着，可以重新生成；这几格存下的提示词也一起清掉。`))) return rerenderSettings();
+        let library = normalizeGeneratedLibrary(liveAssets.generated);
+        const noteKey = expressionNoteKey(character, outfit);
+        for (const mood of moods) {
+            slots[mood] = '';
+            library = clearExpressionNote(library, noteKey, mood);
+        }
+        liveAssets.generated = library;
+        asyncState.spriteClear = null;
+        const persisted = persistSettingsDraft();
+        if (persisted.ok === false) return persisted;
         return rerenderSettings();
     }
     if (normalizedAction.startsWith('asset-filter:')) {
@@ -2362,7 +2404,7 @@ export async function handleSettingsAction(action, ctx) {
         const progress = startExpressionProgress(globalObj, `${charName}·Q版头像`);
         try {
             // 头像只带现有的世界背景，不为它单独提炼世界设定；角色资料照默认立绘那样附上，DNA 空着时发色瞳色不靠猜。
-            const sourcesText = characterSourcesText(settingsState, await readSourceMaterial(globalObj), sceneAssets, charName);
+            const sourcesText = characterSourcesText(await readSourceMaterial(globalObj), sceneAssets, charName);
             result = await service.generateCharacterAvatar({ name: charName, dna: characterExpressionDna(sceneAssets, charName), world: worldContextOf(draftEffectiveAssets(settingsState)), sourcesText, onProgress: progress.onProgress });
         } catch (error) {
             result = { ok: false, error: errorText(error, '') };

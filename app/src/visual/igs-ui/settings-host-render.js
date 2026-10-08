@@ -437,6 +437,7 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
                 spriteHeight: { sceneAssets, reader },
                 resolveUrl: resolveGenerated,
                 expressionNotes: normalizeGeneratedLibrary(sceneAssets.generated).expressionNotes,
+                spriteClear: asyncState.spriteClear || null,
                 folderSelect: (name, opts) => renderAssetFolderSelect('characters', name, assetFolders.characters, opts),
                 scopeTag,
                 isOpen: (key) => Boolean(asyncState.advancedOpen && asyncState.advancedOpen[key]),

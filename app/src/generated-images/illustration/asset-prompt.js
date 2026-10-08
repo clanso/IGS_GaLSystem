@@ -54,7 +54,9 @@ export function describeAssetNeed(need, index) {
     return { id: `ch${index + 1}`, line: [`立绘｜角色：${need.name}`, ...dnaNotes].join('｜') };
 }
 
-export function buildAssetPlannerUserPrompt({ needs = [], readableText = '', previousText = '', lore = [], world = null } = {}) {
+// settingMaterial：「读取上下文」加大预算时的全部设定资料（整张角色卡、世界书、数据库），放在最前面；
+// 这时提示词很长，末尾再列一遍要写的素材。
+export function buildAssetPlannerUserPrompt({ needs = [], readableText = '', previousText = '', lore = [], settingMaterial = '', world = null } = {}) {
     const listed = needs.map((need, index) => {
         const { id, line } = describeAssetNeed(need, index);
         return `${id}｜${line}`;
@@ -65,7 +67,9 @@ export function buildAssetPlannerUserPrompt({ needs = [], readableText = '', pre
         ? `${describeAssetNeed(need, index).id}「${need.name}」：\n${String(need.sources).trim()}` : '')).filter(Boolean);
     const sources = sourcesOf('sprite');
     const sceneSources = sourcesOf('background');
+    const material = String(settingMaterial || '').trim();
     return [
+        material ? `【设定资料】下面是角色卡、世界书和数据库的全部设定（每段开头标了出处），地点和角色的样子都以这些设定和正文为准。\n${material}` : '',
         `【需要生成的素材】\n${listed.join('\n')}`,
         worldLines.length ? `【世界观】\n${worldLines.join('\n')}` : '',
         needs.some((need) => need.type === 'sprite' && need.dna)
@@ -75,8 +79,9 @@ export function buildAssetPlannerUserPrompt({ needs = [], readableText = '', pre
             : '',
         sources.length ? `【角色资料】下面是提到这些角色的节选，每段开头标了出处（角色卡、世界书、数据库或前文）。长相和服装以 DNA 为准；DNA 没写到的按资料补，只取长相、穿着和身份气质，资料里的剧情不要画进去。\n${sources.join('\n')}` : '',
         sceneSources.length ? `【场景资料】下面是提到这些地点的节选，每段开头标了出处。背景 tags 要写出资料里地点的档次、规模、建筑风格、年代、陈设和氛围；资料里的人物和剧情不要画进去。\n${sceneSources.join('\n')}` : '',
-        previousText ? `【前文摘要】\n${previousText}` : '',
+        previousText ? `【前文（原文，从早到近）】\n${previousText}` : '',
         `【本楼正文】\n${readableText}`,
+        material ? `【再列一遍要写的素材】\n${listed.join('\n')}` : '',
         '请直接按输出格式给出字段。',
     ].filter(Boolean).join('\n\n');
 }

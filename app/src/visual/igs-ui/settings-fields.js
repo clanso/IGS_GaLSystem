@@ -5,7 +5,7 @@ import { TOOLBAR_ACTIONS } from './reader-host-constants.js';
 import { STAGE_SHAKE_INTENSITIES } from './stage-shake-runtime.js';
 import { CHAT_SHOW_BUBBLE_RADIUS_LEVELS, CHAT_SHOW_DIM_LEVELS, CHAT_SHOW_PROMPT_RULE } from './chat-show-runtime.js';
 import { CHAT_SFX_PRESET_LABELS } from './chat-sfx.js';
-import { SLOT_ICONS, menuItem, transferIcons, renderCharacterSlotTabs, renderReviewCard, renderRowMenu, slotActions } from './settings-outfit-fields.js';
+import { SLOT_ICONS, menuItem, transferIcons, renderCharacterSlotTabs, renderReviewCard, renderRowMenu, slotActions, spriteClearPick } from './settings-outfit-fields.js';
 import { MAGIC_HOUSES, normalizeMagicHouse } from './dialog-theme-css-skins.js';
 import { resolveCharacterMagicHouse } from './magic-house.js';
 import { VOICE_PITCH_LIMIT, VOICE_SPEED_RANGE, normalizeCharacterVoice, resolveCharacterVoice, voicePackOptions } from './voice-bark.js';
@@ -441,6 +441,8 @@ export function renderCharacterAssetList(characters, options = {}) {
     const outfitMap = options.characterOutfits && typeof options.characterOutfits === 'object' && !Array.isArray(options.characterOutfits)
         ? options.characterOutfits : {};
     const outfitTabs = options.outfitTabs && typeof options.outfitTabs === 'object' ? options.outfitTabs : {};
+    // 「清空立绘」多选：{ character, outfit, moods: Set }，不在多选时为 null。
+    const spriteClear = options.spriteClear && options.spriteClear.moods instanceof Set ? options.spriteClear : null;
     // 折叠区的展开状态由宿主按 data-advanced 记住，重渲染后不会收起。
     const isOpen = typeof options.isOpen === 'function' ? options.isOpen : () => false;
     // 魔法星夜才显示学院行；未指定时按 DNA 自动识别，识别不出用全局配色。
@@ -501,7 +503,9 @@ export function renderCharacterAssetList(characters, options = {}) {
                 menuItem(`scene-rename-mood:${c}:${m}`, '重命名'),
                 menuItem(`scene-remove-mood:${c}:${m}`, '删除', ' is-danger'),
             ], `「${mood}」的操作`);
+            const clearing = spriteClear && spriteClear.character === charName && spriteClear.outfit === '';
             const collapsedRow = `<div class="igs-btn-mgr-row igs-scene-mood-row">`
+                + (clearing ? spriteClearPick(c, '', m, rawUrl, spriteClear.moods.has(mood)) : '')
                 + rowThumb
                 + `<span class="igs-btn-mgr-label">${esc(mood)}</span>`
                 + (imageId ? '' : `<input class="igs-scene-url-input" data-scene-char="${esc(charName)}" data-scene-mood="${esc(mood)}" value="${esc(url || '')}" placeholder="URL或data:image/...">`)
@@ -525,6 +529,7 @@ export function renderCharacterAssetList(characters, options = {}) {
             sceneAssets: options.sceneAssets || { characters, characterAliases: aliasesByCharacter, characterOutfits: outfitMap, moodGroups },
             icons: { pencil, trash },
             isOpen,
+            spriteClear,
         });
         // 和场景一样，每个角色平时只有一行；点名字或右边箭头才展开服装和立绘。
         const openKey = `char-open:${charName}`;

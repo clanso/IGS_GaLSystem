@@ -7,6 +7,7 @@ import { findBaibaiApi, requestBaibaiImage } from './baibai-client.js';
 import { waitFloorPromptTags } from './floor-prompt-tags.js';
 import { writeCaptionsWithLlm } from './illustration/caption-writer.js';
 import { clampPixelPair } from './illustration/cg-pixel-cap.js';
+import { plannerLlmSettings } from './illustration/planner-context.js';
 
 // 生图来源：nai = IGS 内置 NAI；dbgen = 数据库生图插件（window.NaiDbGen）；
 // extension = 智绘姬：剧情 CG、素材与物品图经智绘姬的出图事件生成，剧情 CG 优先用它写在楼层里的词；
@@ -201,7 +202,7 @@ export function createImageBackend({ nai, getBridge, global: globalObject = glob
     // 表情差分、头像、立绘与服装：数据库生图之外的来源由副 LLM 写词，返回形状与插件一致。
     async function writeDbgenPrompt(meta = {}) {
         if (describe().mode !== 'dbgen') {
-            return writeCaptionsWithLlm(llm, normalizeAutoIllustrationSettings(readBridge().autoIllustration).llm, meta.description);
+            return writeCaptionsWithLlm(llm, plannerLlmSettings(normalizeAutoIllustrationSettings(readBridge().autoIllustration).llm), meta.description);
         }
         const api = findDbgenApi(globalObject);
         if (!api) return { ok: false, error: `未检测到${DBGEN_LABEL}` };
