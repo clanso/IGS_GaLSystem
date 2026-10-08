@@ -58,6 +58,7 @@ function nextRequestId() {
 
 // 发一次出图请求并等待同 id 的回执。结果：{ ok: true, imageData } 或 { ok: false, reason, error }。
 // imageData 原样返回（可能是 data URL、blob URL 或同源路径），转换由调用方负责。
+// options.width / height：请求里带上宽高时，智绘姬的 NovelAI / SD / ComfyUI / RunningHub 出图优先用它，不带就用智绘姬自己设的尺寸。
 export function requestChatu8Image(host, prompt, options = {}) {
     const text = String(prompt || '').trim();
     if (!host || !host.eventSource) return Promise.resolve({ ok: false, reason: 'chatu8-missing', error: '未检测到智绘姬' });
@@ -67,6 +68,9 @@ export function requestChatu8Image(host, prompt, options = {}) {
     const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : CHATU8_DEFAULT_TIMEOUT_MS;
     const setTimer = typeof options.setTimeout === 'function' ? options.setTimeout : globalThis.setTimeout;
     const clearTimer = typeof options.clearTimeout === 'function' ? options.clearTimeout : globalThis.clearTimeout;
+    const width = Number(options.width);
+    const height = Number(options.height);
+    const size = width > 0 && height > 0 ? { width, height } : null;
 
     return new Promise((resolve) => {
         let settled = false;
@@ -100,7 +104,7 @@ export function requestChatu8Image(host, prompt, options = {}) {
         if (timer && typeof timer.unref === 'function') timer.unref();
         try {
             // 酒馆 eventSource.emit 返回 Promise；监听器抛错时同样按失败收尾。
-            const pending = eventSource.emit(CHATU8_REQUEST_EVENT, { id, prompt: text });
+            const pending = eventSource.emit(CHATU8_REQUEST_EVENT, { id, prompt: text, ...size });
             if (pending && typeof pending.catch === 'function') {
                 pending.catch((error) => fail('chatu8-failed', `智绘姬出图失败：${(error && error.message) || error}`));
             }

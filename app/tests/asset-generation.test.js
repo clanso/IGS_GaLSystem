@@ -227,6 +227,53 @@ function fakeHost(text, chatId = 'chat-1') {
 // 这些楼层正文都只有十来个字，专测补素材流程的用例传 minBodyChars: 0；「少于 50 字不自动生图」单独测。
 const FLOOR_TEXT = '[igs-scene:废弃工厂|夜晚|雨]\n雨声很大。\n[igs-char:神秘少女|平静|你来了。]\n[igs-char:艾莉|惊讶|是谁？]';
 
+// 智绘姬常设成竖的立绘尺寸：背景要带上 IGS 的背景尺寸（横图），立绘不带，照旧用智绘姬自己的尺寸。
+test('gate:assets:chatu8-backgrounds-carry-igs-background-size', async () => {
+    const { createImageBackend } = await import('../src/generated-images/image-backend.js');
+    const requests = [];
+    const bridge = { imageApi: { mode: 'extension' }, autoIllustration: { assets: { spriteEnabled: true, backgroundEnabled: true, strictMatch: true } } };
+    const backend = createImageBackend({
+        global: {}, getBridge: () => bridge,
+        nai: { generate: async () => { throw new Error('不应走 NAI'); } },
+        chatu8: { findHost: () => ({ win: {} }), request: async (host, prompt, options) => { requests.push({ prompt, options }); return { ok: true, imageData: 'data:image/png;base64,AAA' }; } },
+    });
+    let readerMode = 'pc';
+    const service = createAssetGenerationService({
+        messageHost: fakeHost(FLOOR_TEXT),
+        llm: { async request() { return 'id: bg1\ntags: factory, night, rain\nid: ch2\ntags: 1girl, silver hair, black coat'; } },
+        nai: backend,
+        store: createMemoryGeneratedAssetStore(),
+        matte: async (url) => url,
+        getSettings: () => ({ autoIllustration: bridge.autoIllustration, sceneAssets: USER_ASSETS }),
+        getReaderMode: () => readerMode,
+        minBodyChars: 0,
+    });
+    const result = await service.processMessage(3);
+    assert.deepEqual([result.ok, result.count], [true, 2]);
+    assert.match(requests[0].prompt, /factory/);
+    assert.deepEqual(requests[0].options, { width: 1216, height: 832 }, '背景按 IGS 的背景尺寸出横图');
+    assert.match(requests[1].prompt, /silver hair/);
+    assert.deepEqual(requests[1].options, {}, '立绘不带尺寸，沿用智绘姬设置');
+
+    // 场景时间 / 天气差分同样带背景尺寸；手机模式按设计对调成竖图。
+    const stored = { positive: 'factory, night, rain, scenery', negative: 'lowres' };
+    const store = createMemoryGeneratedAssetStore();
+    await store.putImage({ id: 'base', dataUrl: 'data:image/png;base64,AAA', type: 'background', prompt: stored, createdAt: 'x' });
+    const variants = createAssetGenerationService({
+        messageHost: fakeHost(FLOOR_TEXT), llm: null, nai: backend, store, matte: async (url) => url,
+        getSettings: () => ({ autoIllustration: bridge.autoIllustration, sceneAssets: USER_ASSETS }),
+        getReaderMode: () => readerMode,
+    });
+    requests.length = 0;
+    const painted = await variants.generateSceneVariants({ baseImageId: 'base', scene: '废弃工厂', variants: [{ time: '白天' }] });
+    assert.equal(painted.ok, true);
+    assert.deepEqual(requests[0].options, { width: 1216, height: 832 });
+    readerMode = 'mobile';
+    requests.length = 0;
+    await variants.generateSceneVariants({ baseImageId: 'base', scene: '废弃工厂', variants: [{ time: '白天' }] });
+    assert.deepEqual(requests[0].options, { width: 832, height: 1216 });
+});
+
 test('gate:assets:service-generates-missing-assets-and-reviews', async () => {
     const store = createMemoryGeneratedAssetStore();
     const emitted = [];
@@ -575,6 +622,10 @@ test('gate:chatu8-client:pairs-response-by-id-and-cleans-up', async () => {
     await es.emit(CHATU8_RESPONSE_EVENT, { id: 'req-1', success: true, imageData: 'data:image/png;base64,T0s=' });
     assert.deepEqual(await pending, { ok: true, imageData: 'data:image/png;base64,T0s=' });
     assert.equal(responseCount(es), 0, '收到回执后解绑监听');
+
+    const sized = createFakeEventSource();
+    void requestChatu8Image({ eventSource: sized }, 'room', { id: 'bg', width: 1216, height: 832, ...fakeTimers });
+    assert.deepEqual(sized.emitted[0].data, { id: 'bg', prompt: 'room', width: 1216, height: 832 }, '带宽高时一并发给智绘姬');
 
     const es2 = createFakeEventSource();
     const video = requestChatu8Image({ eventSource: es2 }, 'x', { id: 'v', ...fakeTimers });

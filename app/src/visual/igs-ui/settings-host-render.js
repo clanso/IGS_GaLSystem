@@ -218,7 +218,7 @@ export function createSettingsRenderer({ normalizeUnifiedSettings, options, rere
             const sourceNotes = {
                 nai: '使用你的NAI Key直接生成剧情CG、素材和重画。',
                 dbgen: '提示词、画师串和NAI Key在数据库生图插件里设置。',
-                extension: '画风沿用智绘姬；填写 NAI Key 后，生成失败时将改用 NAI。',
+                extension: '画风和尺寸沿用智绘姬，场景背景按 IGS 的背景尺寸出图；填写 NAI Key 后，生成失败时将改用 NAI。',
                 baibai: '后端与画风沿用柏宝绘；填写 NAI Key 后，生成失败时将改用 NAI。',
             };
             const contentNotes = {
