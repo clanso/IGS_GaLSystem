@@ -887,9 +887,9 @@ export function createAssetGenerationService(deps) {
 
     // 标签顺序：DNA → 表情 → 衣服与长相 → 写词结果。
     async function paintExpressionCaption(name, mood, caption, dna, { look = '', seed, nsfw = false } = {}) {
-        // 表情 tag 是否兜底只看写词结果本身，不看后拼的长相；情绪组的 tag 设置从当前素材库读。
+        // 情绪组的 tag 设置从当前素材库读；只有打开「固定加上」的组才会放。
         const groups = readSettings().sceneAssets.moodGroups;
-        const moodCaption = applyMoodToCaption(applyLookToCaption(caption, look), mood, { nsfw, groups, written: caption });
+        const moodCaption = applyMoodToCaption(applyLookToCaption(caption, look), mood, { nsfw, groups });
         const upright = uprightSpriteCaption(applyCharacterDnaToCaption(moodCaption, dna)) || caption;
         const { meta, alreadyTransparent } = expressionPaintMeta();
         let painted;

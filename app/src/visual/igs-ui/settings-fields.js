@@ -652,7 +652,7 @@ export function renderWorldSummarySection(sceneAssets) {
         + `<div class="igs-settings-row"><button type="button" class="igs-settings-action" data-action="world-summary-extract">${world.summary ? '重新从资料提炼' : '从角色卡 / 世界书提炼'}</button></div>`;
 }
 
-// 表情差分用的表情 tag：开关打开就每次放到最前；关着只在写词漏写表情时兜底。输入框空着用预设（自建组没有预设）。
+// 表情差分用的表情 tag：开关打开就每次放到最前；关着不加，表情全按写词的来。输入框空着用预设（自建组没有预设）。
 function renderMoodGroupExpressionTags(group, label) {
     const always = group.alwaysTags === true;
     const custom = typeof group.tags === 'string' ? group.tags : '';
@@ -660,7 +660,7 @@ function renderMoodGroupExpressionTags(group, label) {
     return `<div class="igs-mood-group-tags">`
         + `<button type="button" class="igs-switch${always ? ' is-on' : ''}" data-action="mood-group-always:${encSeg(label)}" aria-pressed="${always ? 'true' : 'false'}"><i></i><span>表情差分固定加上这组 tag</span></button>`
         + `<input class="igs-scene-url-input" data-mood-group-tags="${esc(label)}" value="${esc(custom)}" placeholder="${esc(preset || '自建组没有预设 tag，填了才会用')}" aria-label="「${esc(label)}」的表情 tag">`
-        + `<div class="igs-source-filter-note">${always ? '每张差分都放在提示词最前。' : '关着时只在写词没写表情时补上；写了就按角色性格写的来。'}清空回到预设。</div>`
+        + `<div class="igs-source-filter-note">${always ? '每张差分都放在提示词最前。' : '关着时不加，表情全按写词时照角色性格写的来。'}清空回到预设。</div>`
         + `</div>`;
 }
 

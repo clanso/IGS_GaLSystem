@@ -22,11 +22,19 @@ test('gate:persona:stored-with-dna-but-never-in-image-prompts', () => {
     assert.doesNotMatch(JSON.stringify(applyCharacterDnaToCaption(charCaption('1girl'), dna)), /tsundere|内敛/);
 });
 
-test('gate:persona:expression-description-carries-persona-before-act-baselines', () => {
-    const withPersona = buildExpressionDiffDescription('冬月', null, ['委屈'], { identity: '1girl', persona: PERSONA }, null);
-    assert.match(withPersona, /「冬月」的性格与表情习惯（据此决定每个表情的幅度和方式，优先于下面的动作基准；只管表情和动作，不要据此改长相和衣服）：\n高雅内敛/);
-    assert.ok(withPersona.indexOf('性格与表情习惯') < withPersona.indexOf('下面的动作是基准'));
+test('gate:persona:expression-description-carries-persona-and-only-scene-of-each-mood', () => {
+    const withPersona = buildExpressionDiffDescription('冬月', null, ['委屈', '动情'], { identity: '1girl', persona: PERSONA }, null, { nsfw: true });
+    assert.match(withPersona, /「冬月」的性格与表情习惯（据此决定每个表情怎么做、做到多大；只管表情和动作，不要据此改长相和衣服）：\n高雅内敛/);
+    // 每份只交代场面，不给固定的招牌动作；要求先想这个角色真实会怎么反应，不套动漫画法。
+    assert.match(withPersona, /各份表情用在什么场面（只说场面，怎么做按这个角色来）：\n1 委屈：用在被冤枉、被凶了想讨说法的时候。\n2 动情：用在告白前后、接吻前、距离一下子拉近的时候。这一份画 NSFW 版，情欲上来时的样子。/);
+    assert.doesNotMatch(withPersona, /噘嘴，眼眶含泪忍着不掉|动作是基准|禁止仅替换面部|平视/);
+    assert.match(withPersona, /先想这个角色在那种场面里真实会怎么反应/);
+    assert.match(withPersona, /不要套最常见的动漫画法/);
+    assert.match(withPersona, /头的角度、视线方向、手和肩膀可以随情绪动/);
+    assert.ok(withPersona.indexOf('性格与表情习惯') < withPersona.indexOf('各份表情用在什么场面'));
     assert.doesNotMatch(buildExpressionDiffDescription('冬月', null, ['委屈'], { identity: '1girl' }, null), /性格与表情习惯/);
+    assert.doesNotMatch(buildExpressionDiffDescription('冬月', null, ['委屈', '动情'], null, null), /NSFW 版/, '不开 NSFW 时动情是全年龄版');
+    assert.doesNotMatch(buildExpressionDiffDescription('冬月', null, ['发呆'], null, null), /各份表情用在什么场面/, '自建组没有预设场面，只在份数清单里');
 });
 
 test('gate:persona:sources-pick-only-what-mentions-the-character', () => {
