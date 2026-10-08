@@ -241,6 +241,7 @@ export const SETTINGS_PANEL_TAB_CONTRACT = Object.freeze({
             'bridge.autoIllustration.llm.apiKey',
             'bridge.autoIllustration.llm.model',
             'bridge.autoIllustration.llm.contextFloors',
+            'bridge.autoIllustration.llm.contextBudget',
             'bridge.autoIllustration.llm.prompts.illustration',
             'bridge.autoIllustration.llm.prompts.illustrationSoft',
             'bridge.autoIllustration.llm.prompts.asset',

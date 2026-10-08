@@ -48,7 +48,7 @@ export function numberParagraphs(raw, options = {}) {
         const line = stripOutfitFields(lines[i], options && options.outfitResolver);
         // 场景标签整楼都认。写在第一段 </content> 之后的转场也要算进 NSFW 和背景。
         for (const m of line.matchAll(SCENE_RE)) {
-            scenes.push({ scene: m[1].trim(), time: m[2].trim(), weather: m[3].trim(), nsfw: String(m[4] || '').trim().toLowerCase() === 'nsfw' });
+            scenes.push({ scene: m[1].trim(), time: m[2].trim(), weather: m[3].trim(), nsfw: String(m[4] || '').trim().toLowerCase() === 'nsfw', lineIndex: i });
         }
         if (!lineInSpans(i, spans)) continue;
         for (const m of line.matchAll(CHAR_RE)) characters.add(m[1].trim());
