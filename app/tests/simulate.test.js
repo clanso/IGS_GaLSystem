@@ -2191,6 +2191,9 @@ test('gate:illustration:image-settings-render-and-persist-roundtrip', () => {
         assert.match(initial.html, /data-segment-path="bridge\.imageApi\.mode" data-segment-value="nai"/);
         assert.match(initial.html, /data-segment-value="dbgen"[^>]*>[\s\S]*?数据库生图插件/);
         assert.match(initial.html, /data-segment-value="extension"[^>]*>[\s\S]*?智绘姬/);
+        assert.equal(auto.assets.spriteBackground, 'auto');
+        assert.match(initial.html, /data-segment-path="bridge\.autoIllustration\.assets\.spriteBackground" data-segment-value="transparent"/);
+        assert.match(initial.html, /按图像来源/);
         assert.match(initial.html, /data-path="bridge\.autoIllustration\.nai\.scale"[^>]*step="any"/);
         assert.doesNotMatch(initial.html, /data-path="bridge\.imageApi\.apiKey"/, '不再有第二套 NAI Key');
         assert.doesNotMatch(initial.html, /data-switch="bridge\.autoIllustration\.nsfwEnabled"/);
@@ -2206,7 +2209,7 @@ test('gate:illustration:image-settings-render-and-persist-roundtrip', () => {
         assert.match(llmPane.html, /data-path="bridge\.autoIllustration\.llm\.endpoint"[^>]*disabled/);
         const rendered = initial.html + content.html + llmPane.html;
         for (const path of initial.activeContract.requiredPaths.filter((item) => item.startsWith('bridge.autoIllustration.'))) {
-            assert.ok(rendered.includes(`data-path="${path}"`) || rendered.includes(`data-switch="${path}"`), `Missing image field: ${path}`);
+            assert.ok(rendered.includes(`data-path="${path}"`) || rendered.includes(`data-switch="${path}"`) || rendered.includes(`data-segment-path="${path}"`), `Missing image field: ${path}`);
         }
         assert.equal(opened.controller.switchImageSubTab('other').snapshot.imageSubTab, 'source', '旧的「其他生图」子页并入图像来源');
         opened.controller.switchImageSubTab('auto');
@@ -2231,6 +2234,9 @@ test('gate:illustration:image-settings-render-and-persist-roundtrip', () => {
         assert.equal(opened.controller.setValue('bridge.autoIllustration.assets.templates.sprite', '{tags}, custom character').ok, true);
         assert.equal(opened.controller.setValue('bridge.autoIllustration.assets.templates.spriteNegative', 'no crowd').ok, true);
         assert.equal(opened.controller.setValue('bridge.autoIllustration.assets.templates.nsfwExtra', 'adult scene').ok, true);
+        assert.equal(opened.controller.setValue('bridge.autoIllustration.assets.spriteBackground', 'bogus').ok, true);
+        assert.equal(opened.controller.getSnapshot().draft.bridge.autoIllustration.assets.spriteBackground, 'auto');
+        assert.equal(opened.controller.setValue('bridge.autoIllustration.assets.spriteBackground', 'transparent').ok, true);
         assert.equal(opened.controller.getSnapshot().draft.bridge.autoIllustration.nsfwCount, 2);
         assert.equal(Boolean(vn.getUnifiedSettings({ mode: 'pc' }).bridge.autoIllustration?.nsfwEnabled), false);
         assert.equal(opened.controller.close().ok, true);
@@ -2241,6 +2247,7 @@ test('gate:illustration:image-settings-render-and-persist-roundtrip', () => {
         assert.equal(saved.assets.templates.sprite, '{tags}, custom character');
         assert.equal(saved.assets.templates.spriteNegative, 'no crowd');
         assert.equal(saved.assets.templates.nsfwExtra, 'adult scene');
+        assert.equal(saved.assets.spriteBackground, 'transparent');
         assert.equal(saved.nsfwCount, 2);
         assert.equal(saved.interludeEnabled, true);
         assert.equal(saved.interludeMaxCount, 16);

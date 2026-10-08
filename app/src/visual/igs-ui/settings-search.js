@@ -48,6 +48,7 @@ const EXTRA_ENTRIES = Object.freeze([
     { id: 'body-format', label: '正文格式化', aliases: ['正则', '格式', '分页不对', '乱码'], location: '基础 › 正文格式化', target: { tab: 'basic', open: ['body-format'] } },
     { id: 'toolbar-dock', label: '工具栏位置', aliases: ['工具栏', '按钮', '顶部', '紧贴对话框'], location: '阅读器 › 界面 › 工具栏', target: { tab: 'reader', readerSubTab: 'interface', open: [] } },
     { id: 'sprite-scale', label: '立绘缩放与高度', aliases: ['立绘太大', '立绘太小', '缩放', '高度', '人物大小'], location: '素材 › 角色 › 立绘设置', target: { tab: 'scene', sceneSubTab: 'characters', open: ['sprite-display'] } },
+    { id: 'sprite-background', label: '立绘底色', aliases: ['透明底', '透明背景', '灰底', '浅灰底', '抠图', '背景tag'], location: '生图 › 图像来源 › 立绘底色', target: { tab: 'image', imageSubTab: 'source', open: [] } },
     { id: 'text-effect', label: '文字增强', aliases: ['描边', '看不清', '投影', '字看不清'], location: '阅读器 › 文字 › 排版', target: { tab: 'reader', readerSubTab: 'text', open: [] } },
     { id: 'camera-kenburns', label: '背景缓慢推镜', group: 'stage', open: ['perf-camera'], aliases: ['推镜', '背景移动', '镜头'] },
     { id: 'camera-parallax', label: '鼠标视差', group: 'stage', open: ['perf-camera'], aliases: ['视差', '镜头'] },

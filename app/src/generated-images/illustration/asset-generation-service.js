@@ -7,7 +7,7 @@ import { supportsNaiTransparentBackground } from '../request-builders/nai-v4-bui
 import { collectAssetNeeds, tempAssetKeyOf, GENERATED_ASSET_URL_PREFIX, generatedAssetIdOf, isGeneratedAssetUrl } from '../../scene/asset-match.js';
 import { floorKeyOf } from '../../media/illustration-store.js';
 import { GENERATED_IMAGE_SCHEMA_VERSION, isLegacyGeneratedImage, isQuotaError, normalizeGeneratedImageRecord } from '../../media/generated-asset-store.js';
-import { buildCharacterAvatarDescription, buildCharacterSpriteDescription, buildDbgenAssetDescription, buildDbgenBackgroundBatchDescription, buildDbgenSpriteBatchDescription, buildExpressionDiffDescription, buildWardrobeClothingDescription, nsfwClothingBoostLine, applyCharacterDnaToCaption, applyLookToCaption, applyMoodToCaption, expressionLookTags, expressionPaintDna, expressionSpritePrompts, splitExpressionWriteBatches, splitWriteBatches, uprightSpriteCaption } from '../dbgen-prompt.js';
+import { dropBackgroundTags, buildCharacterAvatarDescription, buildCharacterSpriteDescription, buildDbgenAssetDescription, buildDbgenBackgroundBatchDescription, buildDbgenSpriteBatchDescription, buildExpressionDiffDescription, buildWardrobeClothingDescription, nsfwClothingBoostLine, applyCharacterDnaToCaption, applyLookToCaption, applyMoodToCaption, expressionLookTags, expressionPaintDna, expressionSpritePrompts, splitExpressionWriteBatches, splitWriteBatches, uprightSpriteCaption } from '../dbgen-prompt.js';
 import { normalizeStoredPrompt, promptFromCaption } from '../generation-prompt.js';
 import { promptTimeBucket, sceneVariantCaption, sceneVariantTags } from '../scene-variant-tags.js';
 import { sceneTimeBucket } from '../../scene/time-bucket.js';
@@ -228,8 +228,8 @@ export function createAssetGenerationService(deps) {
     }
 
     // 立绘图片记录 schema v2：保存不可变原图、当前透明结果、遮罩与 revision；dataUrl 仍是旧消费者读取的透明结果。
-    async function buildSpriteImageRecord(imageId, originalDataUrl, transparent, createdAt) {
-        const raw = await matte(originalDataUrl, { alreadyTransparent: transparent, detailed: true });
+    async function buildSpriteImageRecord(imageId, originalDataUrl, alreadyTransparent, createdAt) {
+        const raw = await matte(originalDataUrl, { alreadyTransparent, detailed: true });
         // 兼容旧注入：matte 只返回字符串时按旧契约处理，没有遮罩。
         const result = typeof raw === 'string'
             ? { dataUrl: raw, alphaMaskDataUrl: '' }
@@ -266,24 +266,35 @@ export function createAssetGenerationService(deps) {
         }
     }
 
+    // 立绘底色（「生图 → 立绘底色」）：选了透明底 / 浅灰底就照选的写底色标签；
+    // 自动时数据库生图、NAI V5，或模板 / 画师串里写了 transparent background 走透明底，其余（智绘姬、柏宝绘、NAI 4.5 等）浅灰底。
+    // alreadyTransparent 只在 IGS 能要求原生透明出图（数据库生图、NAI V5）时为真，抠图直接裁边；
+    // 智绘姬 / 柏宝绘照透明底写词也不一定真回透明图，交给抠图看四边自己判断。
+    function spriteBackgroundOf(s) {
+        const via = nai && typeof nai.describe === 'function' ? nai.describe().via : 'nai';
+        const native = via === 'dbgen' || (via === 'nai' && supportsNaiTransparentBackground(s.auto.nai.model));
+        const mode = s.auto.assets.spriteBackground;
+        const asked = /transparent background/i.test(`${s.auto.assets.templates.sprite} ${s.auto.nai.artistPrefix}`);
+        const transparent = mode === 'transparent' || (mode === 'auto' && (native || asked));
+        return { transparent, alreadyTransparent: transparent && native };
+    }
+
     async function generateItem(item, s, floor, floorKey) {
         const isSprite = item.need.type === 'sprite';
-        // 智绘姬 / 柏宝绘出图不保证透明底：走它们时按浅灰底模板出图并抠图，不信任 NAI 模型的原生透明能力。
-        // 数据库生图的立绘默认要透明底，不看沉浸式插件自己填的 NAI 模型。
-        const plannedVia = nai && typeof nai.describe === 'function' ? nai.describe().via : 'nai';
-        const transparent = isSprite && plannedVia !== 'chatu8' && plannedVia !== 'baibai'
-            && (plannedVia === 'dbgen' || supportsNaiTransparentBackground(s.auto.nai.model));
-        const slot = buildAssetSlot(item, { transparent, templates: s.auto.assets.templates, positiveContext: s.auto.nai.artistPrefix });
+        const bg = isSprite ? spriteBackgroundOf(s) : { transparent: false, alreadyTransparent: false };
+        const slot = buildAssetSlot(item, { transparent: bg.transparent, templates: s.auto.assets.templates });
         const size = isSprite ? s.auto.assets.spriteSize : backgroundSize(s);
         // 数据库生图：描述只说明画什么。正负模板随 userPrompts 传出，出图前合并进最终 caption。
-        const userPrompts = { positive: slot.scene, negative: slot.sceneUc };
+        const userPrompts = { positive: slot.scene, negative: slot.sceneUc, ...(isSprite && { spriteBackground: true }) };
         const meta = {
             messageId: floor.messageId, size, description: buildDbgenAssetDescription(item.need), userPrompts,
             skipRecall: true,
-            ...(isSprite && plannedVia === 'dbgen' && { transparent: true }),
+            ...(isSprite && { transparent: bg.transparent }),
         };
+        // 立绘走内置 NAI 时画师串排在最前，里面的底色标签也去掉，底色只留「立绘底色」那一组。
+        const naiSettings = { ...s.auto.nai, size, ...(isSprite && { artistPrefix: dropBackgroundTags(s.auto.nai.artistPrefix) }) };
         let result;
-        try { result = await nai.generate(slot, { ...s.auto.nai, size }, meta); } catch (error) { result = { ok: false, error: `NAI 生成失败：${(error && error.message) || error}` }; }
+        try { result = await nai.generate(slot, naiSettings, meta); } catch (error) { result = { ok: false, error: `NAI 生成失败：${(error && error.message) || error}` }; }
         const key = tempAssetKeyOf(floor.chatId, item.need);
         const base = {
             key, chatId: floor.chatId, floorKey, messageId: floor.messageId, swipeId: floor.swipeId,
@@ -294,7 +305,7 @@ export function createAssetGenerationService(deps) {
         if (result && result.ok && result.dataUrl) {
             const imageId = newId();
             const image = isSprite
-                ? await buildSpriteImageRecord(imageId, result.dataUrl, transparent, base.createdAt)
+                ? await buildSpriteImageRecord(imageId, result.dataUrl, bg.alreadyTransparent, base.createdAt)
                 : { id: imageId, dataUrl: result.dataUrl, type: item.need.type, createdAt: base.createdAt };
             const prompt = normalizeStoredPrompt(result.prompt);
             if (prompt) image.prompt = prompt;
@@ -417,6 +428,7 @@ export function createAssetGenerationService(deps) {
     async function generateSpriteBatch(items, s, floor, floorKey) {
         const records = [];
         let stopError = '';
+        const bg = spriteBackgroundOf(s);
         const putSpriteRecord = async (item, result) => {
             const key = tempAssetKeyOf(floor.chatId, item.need);
             const base = {
@@ -427,7 +439,7 @@ export function createAssetGenerationService(deps) {
             let record;
             if (result && result.ok && result.dataUrl) {
                 const imageId = newId();
-                const image = await buildSpriteImageRecord(imageId, result.dataUrl, true, base.createdAt);
+                const image = await buildSpriteImageRecord(imageId, result.dataUrl, bg.alreadyTransparent, base.createdAt);
                 const prompt = normalizeStoredPrompt(result.prompt);
                 if (prompt) image.prompt = prompt;
                 const saved = await putImageWithQuotaFallback(image);
@@ -466,7 +478,7 @@ export function createAssetGenerationService(deps) {
                 const item = batch[index];
                 const found = captions.find((entry) => Number(entry.slotId) === index + 1);
                 const caption = found && found.caption;
-                const slot = buildAssetSlot(item, { transparent: true, templates: s.auto.assets.templates });
+                const slot = buildAssetSlot(item, { transparent: bg.transparent, templates: s.auto.assets.templates });
                 const prompts = expressionSpritePrompts(slot.scene, slot.sceneUc);
                 let result;
                 if (!caption) {
@@ -477,8 +489,8 @@ export function createAssetGenerationService(deps) {
                             caption: applyCharacterDnaToCaption(caption, item.need && item.need.dna),
                             size: s.auto.assets.spriteSize,
                             messageId: floor.messageId,
-                            transparent: true,
-                            userPrompts: { positive: prompts.positive, negative: prompts.negative },
+                            transparent: bg.transparent,
+                            userPrompts: { positive: prompts.positive, negative: prompts.negative, spriteBackground: true },
                         });
                     } catch (error) {
                         result = { ok: false, error: `NAI 生成失败：${(error && error.message) || error}` };
@@ -690,27 +702,29 @@ export function createAssetGenerationService(deps) {
         return record && record.dataUrl ? record.dataUrl : '';
     }
 
-    // 透明底只信数据库生图与支持原生透明的 NAI 模型；智绘姬 / 柏宝绘 / 其余 NAI 模型按浅灰底出图再抠图。
+    // 表情差分、默认立绘与衣柜参考图出图用的 meta；底色按「立绘底色」设置，见 spriteBackgroundOf。
     function expressionPaintMeta() {
         const s = readSettings();
-        const via = nai && typeof nai.describe === 'function' ? nai.describe().via : 'nai';
-        const transparent = via === 'dbgen' || (via === 'nai' && supportsNaiTransparentBackground(s.auto.nai.model));
+        const bg = spriteBackgroundOf(s);
         const slot = buildAssetSlot(
             { need: { type: 'sprite', name: '' }, tags: '', uc: '' },
-            { transparent, templates: s.auto.assets.templates, positiveContext: s.auto.nai.artistPrefix },
+            { transparent: bg.transparent, templates: s.auto.assets.templates },
         );
         const prompts = expressionSpritePrompts(slot.scene, slot.sceneUc);
         return {
-            size: s.auto.assets.spriteSize,
-            userPrompts: { positive: prompts.positive, negative: prompts.negative },
-            transparent,
+            meta: {
+                size: s.auto.assets.spriteSize,
+                userPrompts: { positive: prompts.positive, negative: prompts.negative, spriteBackground: true },
+                transparent: bg.transparent,
+            },
+            alreadyTransparent: bg.alreadyTransparent,
         };
     }
 
     // 标签顺序：DNA → 表情 → 衣服与长相 → 写词结果。
     async function paintExpressionCaption(name, mood, caption, dna, { look = '', seed, nsfw = false } = {}) {
         const upright = uprightSpriteCaption(applyCharacterDnaToCaption(applyMoodToCaption(applyLookToCaption(caption, look), mood, { nsfw }), dna)) || caption;
-        const meta = expressionPaintMeta();
+        const { meta, alreadyTransparent } = expressionPaintMeta();
         let painted;
         try {
             painted = await nai.generateDbgenCaption({ ...meta, caption: upright, ...(seed != null && { seed }) });
@@ -728,7 +742,7 @@ export function createAssetGenerationService(deps) {
         }
         const imageId = newId();
         const createdAt = now();
-        const image = await buildSpriteImageRecord(imageId, painted.dataUrl, meta.transparent, createdAt);
+        const image = await buildSpriteImageRecord(imageId, painted.dataUrl, alreadyTransparent, createdAt);
         const prompt = normalizeStoredPrompt(painted.prompt) || promptFromCaption(upright);
         if (prompt) image.prompt = prompt;
         await putImageWithQuotaFallback(image);
@@ -969,7 +983,7 @@ export function createAssetGenerationService(deps) {
         const text = String(prompt || '').trim();
         if (!text) return { ok: false, error: '这套衣服还没有提示词' };
         if (!nai || typeof nai.generateDbgenCaption !== 'function') return { ok: false, error: '当前图像来源不能出参考图' };
-        const meta = expressionPaintMeta();
+        const { meta, alreadyTransparent } = expressionPaintMeta();
         let painted;
         try {
             painted = await nai.generateDbgenCaption({ ...meta, caption: clothingCaption(text, { nsfwBoost }) });
@@ -979,7 +993,7 @@ export function createAssetGenerationService(deps) {
         if (!painted || !painted.ok || !painted.dataUrl) return { ok: false, error: (painted && painted.error) || '出参考图失败' };
         const imageId = newId();
         const createdAt = now();
-        const image = await buildSpriteImageRecord(imageId, painted.dataUrl, meta.transparent, createdAt);
+        const image = await buildSpriteImageRecord(imageId, painted.dataUrl, alreadyTransparent, createdAt);
         const stored = normalizeStoredPrompt(painted.prompt) || { positive: text, negative: '' };
         if (stored) image.prompt = stored;
         await putImageWithQuotaFallback(image);

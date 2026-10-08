@@ -34,6 +34,30 @@ export function mergeTags(...groups) {
     return out.join(', ');
 }
 
+// 底色标签：以 background / backdrop 结尾的都算，含 no background、加权与括号写法。
+const BACKGROUND_TAG_RE = /(?:^|\s)(?:background|backdrop)(?::-?[\d.]+)?$/;
+
+export function isBackgroundTag(tag) {
+    return BACKGROUND_TAG_RE.test(tagKey(tag));
+}
+
+// 去掉所有底色标签；没有可去的就原样返回，不重排用户的写法。
+export function dropBackgroundTags(text) {
+    const tags = splitTags(text);
+    return tags.some(isBackgroundTag) ? tags.filter((tag) => !isBackgroundTag(tag)).join(', ') : String(text || '');
+}
+
+// 立绘只留一种底色：去掉原有的底色标签，在末尾接上指定的那组。
+export function withOnlyBackground(text, background) {
+    return mergeTags(dropBackgroundTags(text), background);
+}
+
+// 去掉 text 里和 tags 相同的标签（比较时忽略权重写法），用于负面别和正面的底色打架。
+export function dropMatchingTags(text, tags) {
+    const keys = new Set(splitTags(tags).map(tagKey));
+    return splitTags(text).filter((tag) => !keys.has(tagKey(tag))).join(', ');
+}
+
 // 插件 LLM 回给程序的是扁平字段。已有立绘按这个格式放进用户描述。
 function formatReturnedCaption(caption) {
     const pos = caption && caption.v4_prompt && caption.v4_prompt.caption;
@@ -90,6 +114,9 @@ export function splitExpressionWriteBatches(items) {
     return splitEven(list, list.length <= EXPRESSION_DIFF_BATCH_MAX * 2 ? 2 : 3);
 }
 
+// 立绘底色由程序按「立绘底色」设置统一加；写词时也写底色，会和程序加的那组混在一起。
+const SPRITE_NO_BACKGROUND_LINE = '不要写背景、场景和底色，底色由程序统一加。';
+
 // note 是用户这次临时补的要求（性格、某个情绪的特别表现），只影响写词这一步；
 // nsfw 为 true 时「动情」改用它在 NSFW 下的动作说明。
 export function buildExpressionDiffDescription(name, prompt, labels, dna, outfit, { note = '', nsfw = false } = {}) {
@@ -134,7 +161,7 @@ export function buildExpressionDiffDescription(name, prompt, labels, dna, outfit
         '下面的动作是基准，不是照抄的模板。先按角色的性格改幅度和形式：三无、高冷、内敛的性格幅度极小，靠眼神和嘴角的细微变化，动作克制；开朗、外向的性格按基准写；狂躁、元气、暴烈的性格幅度夸张，带动肩、手、重心，甚至打破站姿。',
         String(note || '').trim() ? `这次额外的要求：\n${String(note).trim()}` : '',
         caption ? '上面那份立绘的表情和动作不要沿用，每份的表情、嘴型、眼神和手势都按各自的情绪重写。' : '',
-        '无背景，透明底。',
+        SPRITE_NO_BACKGROUND_LINE,
         ...characterDnaLines(name, dna),
         ...moods.map((mood, index) => {
             const act = moodPresetAct(mood, { nsfw });
@@ -225,7 +252,7 @@ export function buildCharacterSpriteDescription(name, dna, options) {
         '规格：大腿以上（cowboy shot）。朝向正面，直立，平视。禁止全身，禁止露出脚，禁止侧身，禁止倾斜构图。',
         SPRITE_DAILY_POSE_LINE,
         note ? `这次额外的要求：\n${note}` : '',
-        '无背景，透明底。',
+        SPRITE_NO_BACKGROUND_LINE,
         ...characterDnaLines(name, dna),
         '只写一份，slotid 为 1。',
     ].filter(Boolean).join('\n');
@@ -282,7 +309,7 @@ export function buildDbgenSpriteBatchDescription(needs = []) {
         profiles.length ? '角色外貌与服装依据正文补充；下面列了设定的角色，长相按设定写。' : '角色外貌与服装依据正文补充。',
         ...profiles,
         SPRITE_DAILY_POSE_LINE,
-        '无背景，透明底。',
+        SPRITE_NO_BACKGROUND_LINE,
         '不要写生成点，不要从正文摘挂载句。',
     ].join('\n');
 }
@@ -307,7 +334,8 @@ export function buildDbgenAssetDescription(need = {}) {
     if (need.type === 'sprite') {
         return [
             `画角色「${need.name || ''}」的立绘。`,
-            '角色外貌与服装依据正文补充。无背景，透明底。',
+            '角色外貌与服装依据正文补充。',
+            SPRITE_NO_BACKGROUND_LINE,
             SPRITE_DAILY_POSE_LINE,
             ...characterDnaLines(need.name, need.dna),
         ].join('\n');
@@ -323,12 +351,16 @@ export function buildDbgenAssetDescription(need = {}) {
 
 // 正面：插件内容在前、前端正向模板追加在后，并去掉与前端负面冲突的标签；
 // 负面：插件负面加上前端负面。角色 caption 结构与坐标原样保留。
+// spriteBackground 为 true（立绘）时底色只用正向模板里的：写词结果里的底色标签全部去掉，负面里和模板底色相同的也去掉。
 export function applyUserPromptsToCaption(caption, prompts = {}) {
     const positive = splitTags(prompts.positive);
     const negative = splitTags(prompts.negative);
     if (!caption || typeof caption !== 'object' || (!positive.length && !negative.length)) return caption;
+    const ownBackground = prompts.spriteBackground === true;
     const blocked = new Set(negative.map(tagKey));
-    const keep = (text) => splitTags(text).filter((tag) => !blocked.has(tagKey(tag))).join(', ');
+    const keep = (text) => splitTags(text).filter((tag) => !blocked.has(tagKey(tag)) && !(ownBackground && isBackgroundTag(tag))).join(', ');
+    const background = ownBackground ? positive.filter(isBackgroundTag).join(', ') : '';
+    const unblock = (text) => dropMatchingTags(text, background);
     const posPrompt = caption.v4_prompt || {};
     const negPrompt = caption.v4_negative_prompt || {};
     const pos = posPrompt.caption || {};
@@ -348,8 +380,9 @@ export function applyUserPromptsToCaption(caption, prompts = {}) {
             ...negPrompt,
             caption: {
                 ...neg,
-                base_caption: mergeTags(neg.base_caption, negative.join(', ')),
-                char_captions: Array.isArray(neg.char_captions) ? neg.char_captions : [],
+                base_caption: unblock(mergeTags(neg.base_caption, negative.join(', '))),
+                char_captions: (Array.isArray(neg.char_captions) ? neg.char_captions : [])
+                    .map((c) => (ownBackground ? { ...c, char_caption: unblock(c && c.char_caption) } : c)),
             },
         },
     };
@@ -383,7 +416,7 @@ export function applyMoodToCaption(caption, mood, { nsfw = false } = {}) {
 
 // 衣服跟着同一份来源走，不靠写词插件每份重写：换装有服装词就用服装词；
 // 原装或这套有自己的立绘时，用那张立绘的提示词去掉表情、姿势后剩下的长相和衣服。
-const LOOK_SKIP_TAGS = new Set(['solo', 'cowboy shot', 'facing viewer', 'straight-on', 'centered', 'transparent background', 'simple background', 'grey background', 'light grey background', 'flat color background', 'no background'].map(tagKey));
+const LOOK_SKIP_TAGS = new Set(['solo', 'cowboy shot', 'facing viewer', 'straight-on', 'centered'].map(tagKey));
 
 function storedCharTags(prompt) {
     const stored = prompt && typeof prompt === 'object' ? prompt : {};
@@ -401,7 +434,7 @@ export function expressionLookTags(basePrompt, outfit) {
     if (clothesPrompt) return dnaEnglishTags(clothesPrompt).join(', ');
     if (clothes && !clothes.ownImage) return '';
     return splitTags(storedCharTags(basePrompt))
-        .filter((tag) => !isExpressionPoseTag(tag) && !LOOK_SKIP_TAGS.has(tagKey(tag)))
+        .filter((tag) => !isExpressionPoseTag(tag) && !LOOK_SKIP_TAGS.has(tagKey(tag)) && !isBackgroundTag(tag))
         .join(', ');
 }
 
