@@ -2,6 +2,7 @@ import { numberParagraphs } from './marker-placer.js';
 import { MIN_AUTO_IMAGE_BODY_CHARS, floorBodyLength } from './floor-body-length.js';
 import { buildAssetPlannerUserPrompt, parseAssetPlan, buildAssetSlot, buildDictionaryAssetItems } from './asset-prompt.js';
 import { requestWithSoftRetry } from './prompt-kit.js';
+import { writeCharacterPersona } from './persona-writer.js';
 import { normalizeAutoIllustrationSettings, isStrictBackgroundMatch } from './auto-illustration-settings.js';
 import { cgSizeForMode } from './auto-illustration-service.js';
 import { supportsNaiTransparentBackground } from '../request-builders/nai-v4-builder.js';
@@ -823,7 +824,9 @@ export function createAssetGenerationService(deps) {
 
     // 标签顺序：DNA → 表情 → 衣服与长相 → 写词结果。exact：用户改过的词原样出图，不硬合，新图继续记为「改过」。
     async function paintExpressionCaption(name, mood, caption, dna, { look = '', seed, nsfw = false, exact = false } = {}) {
-        const upright = exact ? caption : (uprightSpriteCaption(applyCharacterDnaToCaption(applyMoodToCaption(applyLookToCaption(caption, look), mood, { nsfw }), dna)) || caption);
+        // 表情 tag 是否兜底只看写词结果本身，不看后拼的长相；情绪组的 tag 设置从当前素材库读。
+        const groups = readSettings().sceneAssets.moodGroups;
+        const upright = exact ? caption : (uprightSpriteCaption(applyCharacterDnaToCaption(applyMoodToCaption(applyLookToCaption(caption, look), mood, { nsfw, groups, written: caption }), dna)) || caption);
         const meta = expressionPaintMeta();
         let painted;
         try {
@@ -1192,6 +1195,8 @@ export function createAssetGenerationService(deps) {
         processMessage, resolveUrl, resolveThumbUrl, thumbSourceId, tempBackground, tempSceneTime, tempSprite, listReview, listTemp, setStatus, deleteImages, getImageDataUrl, getImagePrompt, saveImagePrompt, readStoredImage, writeStoredImage, importAssetImage,
         generateExpressionSet, generateExpressionImage, paintExpressionCaptions, generateSceneVariants, generateCharacterSprite, generateCharacterAvatar, writeWardrobePrompt, paintWardrobeReference,
         getEditableImage, saveMatteEdit,
+        // 表情差分写词前提炼「性格与表情习惯」：资料由调用方从角色卡 / 世界书 / 数据库收集，这里只管交给副 LLM。
+        summarizeCharacterPersona: ({ name, sourcesText } = {}) => writeCharacterPersona(llm, readSettings().auto.llm, { name, sourcesText }),
         getRecord: (key) => currentTempRecords().get(key) || null,
         start() {
             if (offRendered) return;
