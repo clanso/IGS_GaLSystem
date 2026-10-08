@@ -1,7 +1,8 @@
 import { numberParagraphs } from './marker-placer.js';
 import { buildAssetPlannerUserPrompt, parseAssetPlan, buildAssetSlot, buildDictionaryAssetItems } from './asset-prompt.js';
 import { requestWithSoftRetry } from './prompt-kit.js';
-import { writeCharacterPersona } from './persona-writer.js';
+import { writeCharacterPersona, writeWorldSummary } from './persona-writer.js';
+import { worldContextOf } from '../../scene/worldview.js';
 import { normalizeAutoIllustrationSettings, isStrictBackgroundMatch } from './auto-illustration-settings.js';
 import { cgSizeForMode } from './auto-illustration-service.js';
 import { supportsNaiTransparentBackground } from '../request-builders/nai-v4-builder.js';
@@ -451,7 +452,7 @@ export function createAssetGenerationService(deps) {
             let written;
             try {
                 written = await nai.writeDbgenPrompt({
-                    description: buildDbgenSpriteBatchDescription(batch.map((item) => item.need)),
+                    description: buildDbgenSpriteBatchDescription(batch.map((item) => item.need), { world: worldContextOf(s.sceneAssets) }),
                     messageId: floor.messageId,
                 });
             } catch (error) {
@@ -511,6 +512,7 @@ export function createAssetGenerationService(deps) {
         const variantNeeds = backgroundNeeds.filter((need) => need.variantOf);
         const needs = [...backgroundNeeds.filter((need) => !need.variantOf), ...spriteNeeds];
         attachCharacterDna(needs, s.sceneAssets);
+        await attachCharacterSources(needs);
         if (!needs.length && !variantNeeds.length) {
             await store.putFloor(key, { status: 'done', count: 0, updatedAt: now() });
             return { ok: true, reason: 'nothing-missing' };
@@ -547,7 +549,7 @@ export function createAssetGenerationService(deps) {
                 plan = await requestWithSoftRetry(llm, {
                     system: s.auto.llm.prompts.asset,
                     softSystem: s.auto.llm.prompts.assetSoft,
-                    user: buildAssetPlannerUserPrompt({ needs, readableText: toReadableText(floor.text).slice(0, 6000), previousText }),
+                    user: buildAssetPlannerUserPrompt({ needs, readableText: toReadableText(floor.text).slice(0, 6000), previousText, world: worldContextOf(s.sceneAssets) }),
                     parse: (reply) => parseAssetPlan(reply, needs),
                 }, s.auto.llm);
             } catch (error) {
@@ -600,6 +602,22 @@ export function createAssetGenerationService(deps) {
             result.error = `${failedCount} 项失败${count ? `（成功 ${count} 项）` : ''}：${unique.length === 1 ? unique[0] : errors.join('；')}`;
         }
         return result;
+    }
+
+    // 本楼新角色的立绘：附上角色卡 / 世界书 / 数据库里提到他的节选（宿主读；没接或读不到就不附，照旧补图）。
+    async function attachCharacterSources(needs) {
+        const sprites = needs.filter((need) => need && need.type === 'sprite' && need.name);
+        if (!sprites.length || typeof deps.readCharacterSources !== 'function') return;
+        let found = {};
+        try {
+            found = (await deps.readCharacterSources(sprites.map((need) => need.name))) || {};
+        } catch (error) {
+            return;
+        }
+        for (const need of sprites) {
+            const text = String(found[need.name] || '').trim();
+            if (text) need.sources = text;
+        }
     }
 
     async function processMessage(messageId, { manual = false } = {}) {
@@ -748,7 +766,7 @@ export function createAssetGenerationService(deps) {
     // 一批写完并逐张出完，再写下一批；某一张失败不影响后面的。
     // 插件少给某几份时只在这一批里补写；signal 中止后已画好的图保留，还没写的批不再写。
     // 一次点击里各批共用一颗新种子：衣服、画风接近；删掉重来、补画都是新种子，不会画回旧图。
-    async function generateExpressionSet({ name, basePrompt, moods, dna, outfit, note, nsfw, onProgress, signal } = {}) {
+    async function generateExpressionSet({ name, basePrompt, moods, dna, outfit, note, nsfw, world = null, onProgress, signal } = {}) {
         const labels = (Array.isArray(moods) ? moods : []).map((item) => String(item || '').trim()).filter(Boolean);
         if (!labels.length) return { ok: false, error: '没有表情分组' };
         if (!nai || typeof nai.writeDbgenPrompt !== 'function' || typeof nai.generateDbgenCaption !== 'function') {
@@ -778,7 +796,7 @@ export function createAssetGenerationService(deps) {
                 let written;
                 try {
                     written = await nai.writeDbgenPrompt({
-                        description: buildExpressionDiffDescription(name, basePrompt, pending, dna, outfit, { note, nsfw: paint.nsfw }),
+                        description: buildExpressionDiffDescription(name, basePrompt, pending, dna, outfit, { note, nsfw: paint.nsfw, world }),
                     });
                 } catch (error) {
                     const message = (error && error.message) || '写提示词失败';
@@ -847,7 +865,7 @@ export function createAssetGenerationService(deps) {
 
     // 单张重画：有这一格的提示词就不再写词（写词要等插件的模型，单张也得几十秒），
     // 直接叠上当前的表情、衣服、DNA 硬合再出图；显式换一颗随机种子——不传种子时插件用自己的配置，固定种子会画出同一张。
-    async function generateExpressionImage({ name, mood, caption, basePrompt, dna, outfit, note, nsfw, onProgress } = {}) {
+    async function generateExpressionImage({ name, mood, caption, basePrompt, dna, outfit, note, nsfw, world = null, onProgress } = {}) {
         const label = String(mood || '').trim();
         if (!label) return { ok: false, error: '没有表情' };
         if (caption) {
@@ -856,7 +874,7 @@ export function createAssetGenerationService(deps) {
             const item = await paintExpressionCaption(name, label, caption, expressionPaintDna(dna, outfit), { look, seed: randomSeed(), nsfw: nsfw === true });
             return { ok: true, items: [item] };
         }
-        return generateExpressionSet({ name, basePrompt, moods: [label], dna, outfit, note, nsfw, onProgress });
+        return generateExpressionSet({ name, basePrompt, moods: [label], dna, outfit, note, nsfw, world, onProgress });
     }
 
     // 场景时间/天气差分：读场景原图存下的提示词，换上目标时间天气标签直接出图，不写词。
@@ -905,7 +923,7 @@ export function createAssetGenerationService(deps) {
     }
 
     // 状态栏头像：Q 版大头，方图、不抠图，直接把图交回去，由设置页缩小后存进头像。
-    async function generateCharacterAvatar({ name, dna, onProgress } = {}) {
+    async function generateCharacterAvatar({ name, dna, world = null, onProgress } = {}) {
         const who = String(name || '').trim();
         if (!who) return { ok: false, error: '没有角色' };
         if (!nai || typeof nai.writeDbgenPrompt !== 'function' || typeof nai.generateDbgenCaption !== 'function') {
@@ -914,7 +932,7 @@ export function createAssetGenerationService(deps) {
         reportExpressionProgress(onProgress, { phase: 'write', done: 0, total: 1, mood: '头像' });
         let written;
         try {
-            written = await nai.writeDbgenPrompt({ description: buildCharacterAvatarDescription(who, dna) });
+            written = await nai.writeDbgenPrompt({ description: buildCharacterAvatarDescription(who, dna, { world }) });
         } catch (error) {
             return { ok: false, error: (error && error.message) || '写提示词失败' };
         }
@@ -937,7 +955,8 @@ export function createAssetGenerationService(deps) {
     }
 
     // 设置页主动出一张默认立绘：一定先让 LLM 重写提示词，再出图。不拿已有提示词直接画，也不经过楼内补图。
-    async function generateCharacterSprite({ name, dna, nude = false, note = '', onProgress } = {}) {
+    // world 是世界观与世界设定提要；sourcesText 是角色卡 / 世界书 / 数据库里这个角色的节选，只补 DNA 没写到的。
+    async function generateCharacterSprite({ name, dna, nude = false, note = '', world = null, sourcesText = '', onProgress } = {}) {
         const who = String(name || '').trim();
         if (!who) return { ok: false, error: '没有角色' };
         if (!nai || typeof nai.writeDbgenPrompt !== 'function' || typeof nai.generateDbgenCaption !== 'function') {
@@ -946,7 +965,7 @@ export function createAssetGenerationService(deps) {
         reportExpressionProgress(onProgress, { phase: 'write', done: 0, total: 1, mood: '默认' });
         let written;
         try {
-            written = await nai.writeDbgenPrompt({ description: buildCharacterSpriteDescription(who, dna, { nude: nude === true, note }) });
+            written = await nai.writeDbgenPrompt({ description: buildCharacterSpriteDescription(who, dna, { nude: nude === true, note, world, sourcesText }) });
         } catch (error) {
             return { ok: false, error: (error && error.message) || '写提示词失败' };
         }
@@ -991,14 +1010,14 @@ export function createAssetGenerationService(deps) {
         return { ok: true, imageId };
     }
 
-    async function writeWardrobePrompt({ character, outfit, nsfwBoost = false } = {}) {
+    async function writeWardrobePrompt({ character, outfit, nsfwBoost = false, world = null, context = '', clues = '' } = {}) {
         const name = String(character || '').trim();
         const clothes = String(outfit || '').trim();
         if (!clothes) return { ok: false, error: '没有待确认的服装' };
         if (!nai || typeof nai.writeDbgenPrompt !== 'function') return { ok: false, error: '当前图像来源不能写服装提示词' };
         let written;
         try {
-            written = await nai.writeDbgenPrompt({ description: buildWardrobeClothingDescription(name, clothes, { nsfwBoost }) });
+            written = await nai.writeDbgenPrompt({ description: buildWardrobeClothingDescription(name, clothes, { nsfwBoost, world, context, clues }) });
         } catch (error) {
             return { ok: false, error: (error && error.message) || '写服装提示词失败' };
         }
@@ -1070,6 +1089,8 @@ export function createAssetGenerationService(deps) {
         getEditableImage, saveMatteEdit,
         // 表情差分写词前提炼「性格与表情习惯」：资料由调用方从角色卡 / 世界书 / 数据库收集，这里只管交给副 LLM。
         summarizeCharacterPersona: ({ name, sourcesText } = {}) => writeCharacterPersona(llm, readSettings().auto.llm, { name, sourcesText }),
+        // 世界设定提要：资料（角色卡场景栏、世界书常驻条目）由调用方收集。
+        summarizeWorldSetting: ({ label, sourcesText } = {}) => writeWorldSummary(llm, readSettings().auto.llm, { label, sourcesText }),
         getRecord: (key) => currentTempRecords().get(key) || null,
         start() {
             if (offRendered) return;

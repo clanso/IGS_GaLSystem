@@ -96,23 +96,81 @@ async function readWorldbooks(helper, notes) {
     return books;
 }
 
-export async function collectCharacterSources(globalObject, { name, aliases = [], limits = CHARACTER_SOURCE_LIMITS } = {}) {
-    const names = nameList(name, aliases);
+// 角色卡、世界书、数据库一次读进来，再按名字挑：一层里补好几个角色立绘时不必每人重读世界书。
+export async function readSourceMaterial(globalObject) {
     const notes = [];
-    if (!names.length) return { card: '', worldbook: '', database: '', notes };
     const ctx = getSillyTavernContext(globalObject);
     const card = ctx && ctx.characters && ctx.characterId != null ? ctx.characters[ctx.characterId] : null;
     if (!card) notes.push('当前没有打开单人角色卡');
     const helper = getTavernHelper(globalObject);
-    let worldbook = '';
+    let books = [];
     if (helper && typeof helper.getWorldbook === 'function' && typeof helper.getCharWorldbookNames === 'function') {
-        worldbook = pickWorldbookText(await readWorldbooks(helper, notes), names, limits);
+        books = await readWorldbooks(helper, notes);
     } else {
         notes.push('没有找到酒馆助手的世界书接口');
     }
     const api = globalObject && (globalObject.AutoCardUpdaterAPI || (globalObject.top && globalObject.top.AutoCardUpdaterAPI));
-    const database = api ? pickDatabaseText(createShujukuClient(api).readTables(), names, limits.database) : '';
-    return { card: pickCardText(card, names, limits.card), worldbook, database, notes };
+    const tables = api ? createShujukuClient(api).readTables() : null;
+    return { card, books, tables, notes, chat: ctx && Array.isArray(ctx.chat) ? ctx.chat : [] };
+}
+
+export function pickCharacterSources(material, { name, aliases = [], limits = CHARACTER_SOURCE_LIMITS } = {}) {
+    const names = nameList(name, aliases);
+    const notes = material && Array.isArray(material.notes) ? material.notes.slice() : [];
+    if (!names.length || !material) return { card: '', worldbook: '', database: '', notes };
+    return {
+        card: pickCardText(material.card, names, limits.card),
+        worldbook: material.books.length ? pickWorldbookText(material.books, names, limits) : '',
+        database: material.tables ? pickDatabaseText(material.tables, names, limits.database) : '',
+        notes,
+    };
+}
+
+export async function collectCharacterSources(globalObject, { name, aliases = [], limits = CHARACTER_SOURCE_LIMITS } = {}) {
+    if (!nameList(name, aliases).length) return { card: '', worldbook: '', database: '', notes: [] };
+    return pickCharacterSources(await readSourceMaterial(globalObject), { name, aliases, limits });
+}
+
+// 世界设定的原始资料：角色卡的「场景」栏，加上世界书里常驻（蓝灯）的已启用条目。
+export const WORLD_SOURCE_LIMITS = Object.freeze({ scenario: 2000, worldbook: 5000, entry: 1500 });
+
+export function pickWorldText(material, limits = WORLD_SOURCE_LIMITS) {
+    if (!material) return '';
+    const card = material.card && typeof material.card === 'object' ? material.card : null;
+    const data = card && card.data && typeof card.data === 'object' ? card.data : {};
+    const scenario = card ? String(card.scenario ?? data.scenario ?? '').trim() : '';
+    const parts = scenario ? [`【角色卡·场景】\n${clip(scenario, limits.scenario)}`] : [];
+    let used = 0;
+    for (const { name: book, entries } of material.books || []) {
+        for (const entry of Array.isArray(entries) ? entries : []) {
+            const constant = entry && entry.strategy && entry.strategy.type === 'constant';
+            if (!constant || entry.enabled === false || !String(entry.content || '').trim()) continue;
+            const text = `【世界书·${book}·${entry.name || '条目'}】\n${clip(entry.content, limits.entry)}`;
+            if (used + text.length > limits.worldbook) break;
+            parts.push(text);
+            used += text.length;
+        }
+    }
+    return parts.join('\n');
+}
+
+// 正文里描写这套衣服的段落：最近 floors 层（不算系统消息）里提到服装名的段落，超长时留最近的。
+export function pickOutfitContext(chat, outfit, { floors = 30, limit = 1500 } = {}) {
+    const word = String(outfit || '').trim();
+    if (!word || !Array.isArray(chat)) return '';
+    const paragraphs = chat.slice(-floors)
+        .filter((msg) => msg && !msg.is_system && typeof msg.mes === 'string')
+        .flatMap((msg) => msg.mes.split(/\n+/))
+        .map((line) => line.trim())
+        .filter((line) => line.includes(word));
+    const kept = [];
+    let used = 0;
+    for (let i = paragraphs.length - 1; i >= 0; i -= 1) {
+        if (used + paragraphs[i].length > limit) break;
+        kept.unshift(paragraphs[i]);
+        used += paragraphs[i].length;
+    }
+    return kept.join('\n');
 }
 
 export function formatCharacterSources(sources) {

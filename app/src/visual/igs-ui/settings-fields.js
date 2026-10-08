@@ -1,5 +1,6 @@
 import { esc } from './reader-value-utils.js';
 import { moodPresetTags, normalizeMoodGroups } from '../../scene/mood-groups.js';
+import { worldContextOf } from '../../scene/worldview.js';
 import { TOOLBAR_ACTIONS } from './reader-host-constants.js';
 import { STAGE_SHAKE_INTENSITIES } from './stage-shake-runtime.js';
 import { CHAT_SHOW_BUBBLE_RADIUS_LEVELS, CHAT_SHOW_DIM_LEVELS, CHAT_SHOW_PROMPT_RULE } from './chat-show-runtime.js';
@@ -634,6 +635,14 @@ export function renderDnaOnlyCharacterList(characterDna, characters) {
 function storedMoodGroups(value) {
     if (!Array.isArray(value)) return normalizeMoodGroups(value);
     return value.filter((group) => group && String(group.label || '').trim());
+}
+
+// 「场景 → 规则」的世界设定提要：给画立绘、服装和表情差分的写词参考；空着时第一次生成会自动提炼。
+export function renderWorldSummarySection(sceneAssets) {
+    const world = worldContextOf(sceneAssets);
+    return `<div class="igs-source-filter-note">当前世界观：${esc(world.label)}（在首页「适配世界」里改）。画立绘、服装和表情差分时，写词会参考世界观和这段提要；提要空着时，第一次生成会自动从角色卡的场景栏和世界书的常驻条目提炼。</div>`
+        + `<textarea class="igs-scene-url-input igs-dna-input" rows="4" data-world-summary="1" aria-label="世界设定提要" placeholder="例：架空的中式王朝，丝绸与刺绣常见，女子多着襦裙、披帛，饰品用玉和银；不出现现代衣物和电子产品。">${esc(world.summary)}</textarea>`
+        + `<div class="igs-settings-row"><button type="button" class="igs-settings-action" data-action="world-summary-extract">${world.summary ? '重新从资料提炼' : '从角色卡 / 世界书提炼'}</button></div>`;
 }
 
 // 表情差分用的表情 tag：开关打开就每次放到最前；关着只在写词漏写表情时兜底。输入框空着用预设（自建组没有预设）。

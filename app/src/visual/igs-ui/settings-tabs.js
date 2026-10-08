@@ -330,6 +330,10 @@ export const SCENE_RULES_TEMPLATE = `
     {{promptRuleOutfitHint}}
     {{promptAdvanced}}
   </div>
+  <div class="igs-source-filter" data-world-section>
+    <div class="igs-source-filter-title">世界设定提要<span class="igs-outfit-muted">生图用</span></div>
+    {{worldSection}}
+  </div>
   <div class="igs-source-filter" data-wardrobe-section>
     <div class="igs-source-filter-title">衣柜提示词<span class="igs-outfit-muted">生图用</span><button class="igs-btn-mgr-icon igs-title-add" data-action="wardrobe-add" type="button" title="添加一条衣柜提示词" aria-label="添加一条衣柜提示词">+</button></div>
     <div class="igs-source-filter-note">画服装立绘时用的衣服描述，没指定就取同名那条。</div>
