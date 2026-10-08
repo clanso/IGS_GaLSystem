@@ -10,7 +10,9 @@ import { collectAssetZipEntries } from '../../scene/asset-zip.js';
 import { assetOwnerKey, draftAssetLibrary, draftEffectiveAssets, effectiveSceneAssets, ensureCardLibrary, libraryHasContent, moveLibraryEntry, rememberAssetScope, sceneAssetsForContext } from '../../scene/asset-scope.js';
 import { buildCharacterCardPack, buildImageZip, buildPresetArchive, mergeLabelGroups, parseCharacterCardPack, parsePresetArchive, parseSettingsArchive, spriteEntriesForNames } from '../../scene/card-pack.js';
 import { getSillyTavernContext } from '../../host/tavern-helper-adapter.js';
-import { collectCharacterSources, formatCharacterSources, pickCharacterSources, readSourceMaterial } from '../../host/character-sources.js';
+import { collectCharacterSources, formatCharacterSources, pickCharacterSources, pickChatMentions, readSourceMaterial } from '../../host/character-sources.js';
+import { normalizeAutoIllustrationSettings } from '../../generated-images/illustration/auto-illustration-settings.js';
+import { contextBudgetChars } from '../../generated-images/illustration/planner-context.js';
 import { extractWorldSummary, prepareWorldContext } from './world-context.js';
 import { localImageCacheFor } from '../../media/tavern-image-cache.js';
 import { buildPageDiagnostic } from './page-diagnostic.js';
@@ -207,17 +209,27 @@ async function extractCharacterPersona({ service, globalObj, sceneAssets, name }
     return { ok: true, persona: written.persona };
 }
 
-// 画默认立绘时给写词的角色资料节选：比提炼性格时短，只补 DNA 没写到的长相和穿着。
+// 画默认立绘、头像时给写词的角色资料节选：比提炼性格时短，只补 DNA 没写到的长相和穿着。
+// 「副 LLM → 读取上下文」加大了预算就给长的，正文里提到这个角色的段落也往前多翻。
 const SPRITE_SOURCE_LIMITS = Object.freeze({ card: 2000, worldbook: 2500, entry: 1000, database: 800 });
+const LARGE_SPRITE_SOURCE_LIMITS = Object.freeze({ card: 8000, worldbook: 20000, entry: 5000, database: 5000 });
 const characterAliasesOf = (sceneAssets, name) => (sceneAssets.characterAliases && Array.isArray(sceneAssets.characterAliases[name]) ? sceneAssets.characterAliases[name] : []);
+
+// 角色卡 / 世界书 / 数据库节选，加上正文里提到这个角色的段落（长相、穿着常写在剧情里）。
+function characterSourcesText(settingsState, material, sceneAssets, name) {
+    const bridge = settingsState && settingsState.draft && settingsState.draft.bridge ? settingsState.draft.bridge : {};
+    const large = contextBudgetChars(normalizeAutoIllustrationSettings(bridge.autoIllustration).llm) > 0;
+    const sources = pickCharacterSources(material, { name, aliases: characterAliasesOf(sceneAssets, name), limits: large ? LARGE_SPRITE_SOURCE_LIMITS : SPRITE_SOURCE_LIMITS });
+    const chat = pickChatMentions(material.chat, name, large ? { floors: 300, limit: 20000 } : { floors: 30, limit: 1500 });
+    return formatCharacterSources({ ...sources, chat: chat ? `【前文·提到「${name}」的段落】\n${chat}` : '' });
+}
 
 // 画默认立绘前读一次角色卡 / 世界书 / 数据库：世界背景（还没有世界设定提要就先提炼）和这个角色的资料节选；DNA 不动。
 async function spriteWritingBackground({ settingsState, service, globalObj, sceneAssets, name, onProgress, persist }) {
     const material = await readSourceMaterial(globalObj);
     const prepared = await prepareWorldContext({ settingsState, service, globalObj, material, onProgress, persist });
     if (prepared.note) showGeneratedNotice(globalObj, prepared.note, prepared.tone);
-    const sourcesText = formatCharacterSources(pickCharacterSources(material, { name, aliases: characterAliasesOf(sceneAssets, name), limits: SPRITE_SOURCE_LIMITS }));
-    return { world: prepared.world, sourcesText };
+    return { world: prepared.world, sourcesText: characterSourcesText(settingsState, material, sceneAssets, name) };
 }
 
 // 存进这个角色的 DNA（和 DNA 一起跟着角色走）；返回更新后的 DNA。
@@ -2210,8 +2222,9 @@ export async function handleSettingsAction(action, ctx) {
         let result;
         const progress = startExpressionProgress(globalObj, `${charName}·Q版头像`);
         try {
-            // 头像只带现有的世界背景，不为它单独提炼世界设定。
-            result = await service.generateCharacterAvatar({ name: charName, dna: characterExpressionDna(sceneAssets, charName), world: worldContextOf(draftEffectiveAssets(settingsState)), onProgress: progress.onProgress });
+            // 头像只带现有的世界背景，不为它单独提炼世界设定；角色资料照默认立绘那样附上，DNA 空着时发色瞳色不靠猜。
+            const sourcesText = characterSourcesText(settingsState, await readSourceMaterial(globalObj), sceneAssets, charName);
+            result = await service.generateCharacterAvatar({ name: charName, dna: characterExpressionDna(sceneAssets, charName), world: worldContextOf(draftEffectiveAssets(settingsState)), sourcesText, onProgress: progress.onProgress });
         } catch (error) {
             result = { ok: false, error: errorText(error, '') };
         }

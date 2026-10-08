@@ -2,6 +2,7 @@ import { NAI_DEFAULT_SETTINGS } from '../request-builders/nai-v4-builder.js';
 import { DEFAULT_ASSET_TEMPLATES } from './prompt-kit.js';
 import { PLANNER_SYSTEM_PROMPT, PLANNER_SOFT_SYSTEM_PROMPT } from './planner-prompt.js';
 import { ASSET_PLANNER_SYSTEM_PROMPT, ASSET_PLANNER_SOFT_SYSTEM_PROMPT } from './asset-prompt.js';
+import { CONTEXT_BUDGETS } from './planner-context.js';
 
 // 副 LLM 系统提示词：留空即使用内置版本，保证内置提示词升级后未改动的用户能跟着更新。
 export const DEFAULT_LLM_PROMPTS = Object.freeze({
@@ -78,6 +79,7 @@ export function normalizeAutoIllustrationSettings(value) {
             source: llm.source === 'openai' ? 'openai' : 'tavern',
             endpoint: str(llm.endpoint), apiKey: str(llm.apiKey), model: str(llm.model),
             contextFloors: clampInt(llm.contextFloors, 0, 3, 1),
+            contextBudget: Object.keys(CONTEXT_BUDGETS).includes(llm.contextBudget) ? llm.contextBudget : 'standard',
             timeoutMs: clampInt(llm.timeoutMs, 10000, 300000, 90000),
             prompts: normalizePrompts(llm.prompts),
             jailbreakHead: str(llm.jailbreakHead),

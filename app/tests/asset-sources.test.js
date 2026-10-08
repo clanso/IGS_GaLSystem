@@ -63,7 +63,7 @@ test('gate:asset-sources:planner-gets-scene-sources-and-earlier-mentions-for-bac
     assert.deepEqual([result.ok, result.count], [true, 2]);
     assert.deepEqual(calls.scenes, [['豪华旅馆']]);
     assert.deepEqual(calls.characters, [['神秘少女']]);
-    assert.deepEqual(calls.history, [[9, 30]], '前文只读一次，往前看 30 层');
+    assert.deepEqual(calls.history, [[9, 1], [9, 30]], '前文摘要读最近 1 层，找提到名字的段落往前看 30 层');
     const prompt = calls.prompts[0];
     assert.match(prompt, /【场景资料】[^\n]*\nbg1「豪华旅馆」：\n【世界书·设定·豪华旅馆】本市最豪华的五星级酒店。\n\n【前文·提到「豪华旅馆」的段落】\n他们走进豪华旅馆，大堂挂着水晶吊灯，地面是大理石。/);
     assert.ok(!prompt.includes('便利店'), '只取提到地点的段落');
