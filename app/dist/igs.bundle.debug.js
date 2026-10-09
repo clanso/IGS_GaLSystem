@@ -5030,6 +5030,8 @@ __igsRegister("src/scene/asset-scope.js", function(module, exports, require) {
 const plain = (value) => (value && typeof value === 'object' && !Array.isArray(value) ? value : {});
 
 const LIBRARY_FIELDS = ['scenes', 'characters', 'characterAliases', 'characterDna', 'characterOutfits', 'wardrobe', 'statusAvatars'];
+// 一个角色的素材分在这几处；任一处有这个名字，就算这个角色归那一边（本卡或全局）。
+const CHARACTER_FIELDS = Object.freeze(['characters', 'characterOutfits', 'characterDna', 'characterAliases', 'statusAvatars']);
 function resolveAssetScope(ctx) {
     if (!ctx || typeof ctx !== 'object') return { key: '', legacyKey: '', kind: 'global', label: '全局' };
     if (ctx.groupId != null && String(ctx.groupId) !== '') {
@@ -5314,6 +5316,7 @@ __igsDefine(exports, "assetOwnerKey", () => assetOwnerKey);
 __igsDefine(exports, "assetShadowsGlobal", () => assetShadowsGlobal);
 __igsDefine(exports, "draftAssetLibrary", () => draftAssetLibrary);
 __igsDefine(exports, "draftEffectiveAssets", () => draftEffectiveAssets);
+__igsDefine(exports, "CHARACTER_FIELDS", () => CHARACTER_FIELDS);
 });
 __igsRegister("src/host/tavern-helper-adapter.js", function(module, exports, require) {
 const { getMessagePrimaryText, getVisibleMessageTextFromElement, looksLikeHostUiHtml } = require("src/scene/message-source.js");
@@ -11139,7 +11142,7 @@ const { normalizeBridgeConfig, normalizeReaderSettings } = require("src/visual/i
 const { extractSceneDirectives, resolveSceneStateAtIndex, resolveSceneAtSourceOffset, resolveIllustrationForPage, resolveHeldSourceOffsets, locateNarrativeOffset, stripIllustrationMarkers } = require("src/scene/scene-directives.js");
 const { classifySceneKey, resolveCharacterKey } = require("src/scene/scene-directives.js");
 const { recordOutfitReview, dropConfirmedOutfitReview } = require("src/scene/outfit-review-store.js");
-const { draftAssetLibrary, ensureCardLibrary, relocateLegacyCard, rememberAssetScope, resolveAssetScope, sceneAssetsForContext } = require("src/scene/asset-scope.js");
+const { CHARACTER_FIELDS, assetOwnerKey, draftAssetLibrary, ensureCardLibrary, relocateLegacyCard, rememberAssetScope, resolveAssetScope, sceneAssetsForContext } = require("src/scene/asset-scope.js");
 const { getSillyTavernContext } = require("src/host/tavern-helper-adapter.js");const { isMarkerDirectiveLine, stripMarkerDirectives } = require("src/scene/directive-tags.js");
 const { extractFxDirectives, resolveFxAtPage } = require("src/scene/fx-directives.js");
 const { readStoryNow, resolveDuePromises } = require("src/scene/promise-reminder.js");
@@ -11195,7 +11198,9 @@ const { renderAssetReviewPanel } = require("src/visual/igs-ui/asset-review-panel
 const { ensureEmbeddedHost, findEmbeddedHost, hideEmbeddedSourceText, hideStorySpan, isEmbeddedEditTrigger, isStoryHidden, resolveEmbeddedHostParent, restoreEmbeddedSourceText, restoreStorySpan, storyLines } = require("src/visual/igs-ui/embedded-reader-runtime.js");
 const { buildReaderSourceSignature, createReaderSourceCache } = require("src/visual/igs-ui/reader-source-cache.js");
 const { createImageResourceCache } = require("src/media/resource-cache.js");
-const { collectFloorAssetUrls } = require("src/visual/igs-ui/floor-asset-prefetch.js");
+const { collectFloorAssetUrls, collectMissingExpressions } = require("src/visual/igs-ui/floor-asset-prefetch.js");
+const { checkExpressionGroups, expressionFillQuestion, expressionFillSummary, expressionGroupLabel, expressionProgressText, fillFloorExpressions } = require("src/visual/igs-ui/expression-fill.js");
+const { prepareWorld } = require("src/visual/igs-ui/world-context.js");
 const { createChatStreamObserver } = require("src/host/chat-stream-observer.js");
 const { findAcuDice, formatCheckMessage, resolveDiceCommand } = require("src/choices/dice-check.js");
 const { buildResultFxPlan, normalizeResultFxSettings, resultDetailOf } = require("src/visual/igs-ui/fx-result-model.js");
@@ -11761,14 +11766,19 @@ function createIgsReaderHost(options = {}) {
         return model;
     }
 
+    // 这一楼的原文（带 igs 标签）：立绘预取和补表情都按它找每句是谁、什么表情、穿哪套。
+    function floorSourceText(payload) {
+        const liveMessage = (payload.message && payload.message.raw) || payload.message || payload.raw || '';
+        return String(payload.raw || (typeof liveMessage === 'string' ? liveMessage : '') || '');
+    }
+
     function warmActiveFloorImages(mountedSnapshot) {
         const current = state.activeReader;
         const payload = current && current.payload;
         const snapshot = mountedSnapshot || (current && current.snapshot);
         if (!payload || !snapshot) return;
         const readerSettings = snapshot.readerSettings || {};
-        const liveMessage = (payload.message && payload.message.raw) || payload.message || payload.raw || '';
-        const source = String(payload.raw || (typeof liveMessage === 'string' ? liveMessage : '') || '');
+        const source = floorSourceText(payload);
         const slots = snapshot.content && Array.isArray(snapshot.content.imageSlots) ? snapshot.content.imageSlots : [];
         const key = `${firstDefined(payload.messageId, payload.message && payload.message.id, '')}:${source.length}:${slots.map((slot) => (slot && slot.url) || '').join('|')}`;
         if (floorAssetPlan.key !== key) {
@@ -13293,7 +13303,9 @@ function createIgsReaderHost(options = {}) {
         }
     }
 
-    async function runManualAssetGeneration({ deferSkip = false } = {}) {
+    // 「补全立绘与背景」：没登记的人物和缺的背景照旧交给素材补全（生成后待确认）；
+    // 已登记的角色按这一楼实际用到的「服装 + 表情」只补空着的那几格，先问一句再画，画好直接放进那一格。
+    async function runManualAssetGeneration() {
         const current = state.activeReader;
         if (!current) return { ok: false, reason: 'reader-not-open' };
         const feedback = (level, message, generating = false) => {
@@ -13302,14 +13314,6 @@ function createIgsReaderHost(options = {}) {
             if (generating) writeGenerating();
             else imageNotice(level, message);
         };
-        // 没有可补全素材时交给重画当前图，这类跳过不必单独提示。
-        const skip = (result, message) => {
-            if (!deferSkip) {
-                feedback('warn', message);
-                return result;
-            }
-            return { ...result, skipMessage: message };
-        };
         const service = options.generatedAssets;
         if (!service || typeof service.processMessage !== 'function') {
             feedback('error', '补全素材不可用：素材生成服务未就绪');
@@ -13317,37 +13321,132 @@ function createIgsReaderHost(options = {}) {
         }
         const target = readManualFloor(current);
         const messageId = target.messageId;
-        if (!target.floor) return skip({ ok: true, reason: target.reason }, `补全素材已跳过：${target.message}`);
+        if (!target.floor) {
+            feedback('warn', `补全素材已跳过：${target.message}`);
+            return { ok: true, reason: target.reason };
+        }
         if (current.assetGenerationPending) {
             feedback('info', '补全素材处理中，请等待当前任务完成', true);
             return { ok: true, reason: 'busy' };
         }
         current.assetGenerationPending = true;
-        feedback('info', `第 ${messageId} 楼补全素材：正在检查未登记的人物和场景…`, true);
         try {
-            const result = await service.processMessage(Number(messageId), { manual: true });
-            const skipped = {
-                disabled: '请在设置中开启自动背景或自动立绘并保存',
-                'scene-assets-disabled': '请在设置中开启场景素材并保存',
-                'not-eligible': '当前楼层不是最新的非空 AI 回复',
-                'nothing-missing': '本楼没有未登记的人物或场景，已登记的素材不会重复生成',
-            };
-            if (!result || !result.ok) {
-                feedback('error', `补全素材失败：${result && result.error || '素材生成失败（未返回具体原因）'}`);
-            } else if (result.reason === 'already-decided') {
-                feedback('warn', '补全素材已跳过：当前楼层已处理，请等待当前任务完成后重试');
-            } else if (skipped[result.reason]) {
-                return skip(result || { ok: false, reason: 'error' }, `补全素材已跳过：${skipped[result.reason]}`);
-            } else {
-                feedback('success', `补全素材完成：已生成 ${result.count || 0} 项素材，待确认`);
+            const expressions = await planFloorExpressions(current, service);
+            const fill = expressions.ready.length > 0 && await pageModal.confirm(expressionFillQuestion(expressions.ready));
+            feedback('info', `第 ${messageId} 楼补全素材：正在检查未登记的人物和场景…`, true);
+            let result;
+            let asset;
+            try {
+                result = await service.processMessage(Number(messageId), { manual: true });
+                asset = assetGenerationNotice(result, expressions);
+            } catch (error) {
+                result = { ok: false, reason: 'error' };
+                asset = { level: 'error', text: `补全素材异常：${(error && error.message) || error || '未知错误'}` };
             }
-            return result || { ok: false, reason: 'error' };
-        } catch (error) {
-            feedback('error', `补全素材异常：${(error && error.message) || error || '未知错误'}`);
-            return { ok: false, reason: 'error' };
+            const outcome = fill ? await runFloorExpressionFill(current, service, expressions.ready) : null;
+            const summary = expressionFillSummary({ outcome, ...expressions });
+            // 补了表情时，素材补全那边「没有要补的」就不用再说一遍。
+            const notices = [!outcome || !asset.skipped || !summary ? asset : null, summary].filter(Boolean);
+            const level = ['error', 'warn', 'success'].find((name) => notices.some((item) => item.level === name)) || 'info';
+            feedback(level, notices.map((item) => item.text).join('；'));
+            return outcome ? { ...result, expressions: outcome } : (result || { ok: false, reason: 'error' });
         } finally {
             current.assetGenerationPending = false;
         }
+    }
+
+    function assetGenerationNotice(result, expressions) {
+        const skipped = {
+            disabled: '请在设置中开启自动背景或自动立绘并保存',
+            'scene-assets-disabled': '请在设置中开启场景素材并保存',
+            'not-eligible': '当前楼层不是最新的非空 AI 回复',
+            'nothing-missing': '本楼没有未登记的人物或场景',
+        };
+        if (!result || !result.ok) return { level: 'error', text: `补全素材失败：${result && result.error || '素材生成失败（未返回具体原因）'}` };
+        if (result.reason === 'already-decided') return { level: 'warn', text: '补全素材已跳过：当前楼层已处理，请等待当前任务完成后重试' };
+        if (skipped[result.reason]) {
+            const allDrawn = result.reason === 'nothing-missing' && !expressions.ready.length && !expressions.skipped.length
+                && !expressions.unmapped.length && !expressions.pendingOutfits.length;
+            return { level: 'warn', skipped: true, text: `补全素材已跳过：${skipped[result.reason]}${allDrawn ? '，已登记角色用到的表情也都有图' : ''}` };
+        }
+        return { level: 'success', text: `补全素材完成：已生成 ${result.count || 0} 项素材，待确认` };
+    }
+
+    // 读当前合并后的素材库（本卡盖过全局）：补表情要看存档里最新的，不用阅读器上次渲染时的快照。
+    function readCurrentSceneAssets(current) {
+        const bridge = resolveBridgeConfigSnapshot({ mode: current.mode }).bridge;
+        return bridge.sceneAssets ? sceneAssetsForContext(bridge.sceneAssets, getSillyTavernContext(options.global || globalThis)) || {} : {};
+    }
+
+    // 已登记角色这一楼用到、还没有图的表情，按角色和服装分组；没有带提示词的生成立绘、照着写不了的组挪到 skipped。
+    async function planFloorExpressions(current, service) {
+        const none = { ready: [], skipped: [], unmapped: [], pendingOutfits: [] };
+        if (typeof service.generateExpressionSet !== 'function' || typeof service.getImagePrompt !== 'function') return none;
+        const payload = current.payload || {};
+        try {
+            const sceneAssets = readCurrentSceneAssets(current);
+            const missing = collectMissingExpressions({
+                source: floorSourceText(payload),
+                sceneAssets,
+                inheritedOutfits: payload.inheritedOutfits,
+                inheritedScene: payload.inheritedSceneState,
+                systemRole: current.snapshot && current.snapshot.readerSettings && current.snapshot.readerSettings.systemRole,
+                readClues: (names) => collectOutfitClues(readStatusHudTablesSafe(), names),
+            });
+            const checked = missing.groups.length ? await checkExpressionGroups({ groups: missing.groups, service, assets: sceneAssets }) : none;
+            return { ready: checked.ready, skipped: checked.skipped, unmapped: missing.unmapped, pendingOutfits: missing.pendingOutfits };
+        } catch (error) {
+            // 查不出来就只做原来的素材补全，原因记进生图日志。
+            if (options.imageJobLog && typeof options.imageJobLog.add === 'function') options.imageJobLog.add('warn', `查已登记角色缺的表情时出错：${(error && error.message) || error}`);
+            return none;
+        }
+    }
+
+    // 写词和设置里的「表情差分」同一条路；每组画完存进这个角色那一项所在的一边，阅读器马上换上。
+    function runFloorExpressionFill(current, service, groups) {
+        const globalObj = options.global || globalThis;
+        const bridge = resolveBridgeConfigSnapshot({ mode: current.mode }).bridge;
+        let world = null;
+        return fillFloorExpressions({
+            groups,
+            service,
+            globalObj,
+            readAssets: () => readCurrentSceneAssets(current),
+            save: (field, name, mutator) => {
+                const saved = mutateSceneLibrary(mutator, { collections: [field], name });
+                const ok = Boolean(saved && saved.ok !== false);
+                if (ok && state.activeReader === current) rerenderActiveReader();
+                return ok;
+            },
+            moodNoteOf: characterMoodNote,
+            // 世界设定提要和设置页一样记在当前角色卡上；这一次点击里只提炼一回。
+            getWorld: (report) => world || (world = prepareWorld({
+                assets: readCurrentSceneAssets(current),
+                service,
+                globalObj,
+                onProgress: report,
+                save: (summary) => mutateSceneLibrary((assets) => {
+                    assets.worldSummary = summary;
+                    return { ok: true };
+                }),
+            }).then((prepared) => prepared.world)),
+            nsfw: Boolean(bridge.autoIllustration && bridge.autoIllustration.nsfwEnabled === true),
+            onProgress: (group, event) => {
+                if (state.activeReader === current) generationStrip.manual(expressionProgressText(expressionGroupLabel(group), event));
+            },
+        });
+    }
+
+    // 设置里写表情差分时给这个角色记下的注意事项：记在角色所在的那一边，没有再看全局。
+    function characterMoodNote(name) {
+        const root = resolveBridgeConfigSnapshot({ mode: state.activeReader ? state.activeReader.mode : 'default' }).bridge.sceneAssets || {};
+        const scope = resolveAssetScope(getSillyTavernContext(options.global || globalThis));
+        const owner = assetOwnerKey(root, scope.key, CHARACTER_FIELDS, name);
+        const read = (library) => {
+            const notes = library && library.characterMoodNotes;
+            return notes && typeof notes[name] === 'string' ? notes[name].trim() : '';
+        };
+        return (owner && read((root.cards || {})[owner])) || read(root);
     }
 
     async function regenerateCurrentImage() {
@@ -15041,10 +15140,11 @@ function createIgsReaderHost(options = {}) {
         });
     }
 
-    function mutateSceneLibrary(mutator) {
+    // target = { collections, name }：改的是已有的那一条时写回它所在的一边（本卡或全局）；不给就写当前角色卡（没打开卡时写全局）。
+    function mutateSceneLibrary(mutator, target = null) {
         if (state.activeSettings) {
             rememberAssetScope(state.activeSettings, getSillyTavernContext(options.global || globalThis));
-            const sceneAssets = draftAssetLibrary(state.activeSettings);
+            const sceneAssets = draftAssetLibrary(state.activeSettings, target);
             const result = mutator(sceneAssets);
             if (!result || result.ok === false) return result || { ok: false };
             const persisted = persistSettingsDraft();
@@ -15056,7 +15156,8 @@ function createIgsReaderHost(options = {}) {
             const root = bridge.sceneAssets = bridge.sceneAssets || {};
             const scope = resolveAssetScope(getSillyTavernContext(options.global || globalThis));
             relocateLegacyCard(root, scope.key, scope.legacyKey);
-            const bucket = scope.key ? ensureCardLibrary(root, scope.key) : root;
+            const owner = target ? assetOwnerKey(root, scope.key, target.collections, target.name) : scope.key;
+            const bucket = owner ? ensureCardLibrary(root, owner) : root;
             result = mutator(bucket);
             if (!result || result.ok === false) return null;
             return { sceneAssets: root };
@@ -34883,11 +34984,12 @@ const { formatEditablePrompt, formatStoredPrompt, normalizeStoredPrompt, parseEd
 const { getNextSettingsTheme, normalizeSettingsTheme } = require("src/visual/igs-ui/settings-theme.js");
 const { DEFAULT_MOOD_GROUPS, MOOD_PRESET, moodPresetEntry, moodTierLabels, normalizeMoodGroups, resolvePresetGroup } = require("src/scene/mood-groups.js");
 const { collectAssetZipEntries } = require("src/scene/asset-zip.js");
-const { assetOwnerKey, draftAssetLibrary, draftEffectiveAssets, effectiveSceneAssets, ensureCardLibrary, libraryHasContent, moveLibraryEntry, rememberAssetScope, sceneAssetsForContext } = require("src/scene/asset-scope.js");
+const { CHARACTER_FIELDS, assetOwnerKey, draftAssetLibrary, draftEffectiveAssets, effectiveSceneAssets, ensureCardLibrary, libraryHasContent, moveLibraryEntry, rememberAssetScope, sceneAssetsForContext } = require("src/scene/asset-scope.js");
 const { buildCharacterCardPack, buildImageZip, buildPresetArchive, mergeLabelGroups, parseCharacterCardPack, parsePresetArchive, parseSettingsArchive, spriteEntriesForNames } = require("src/scene/card-pack.js");
 const { getSillyTavernContext } = require("src/host/tavern-helper-adapter.js");
-const { collectCharacterSources, formatCharacterSources, pickCharacterSources, pickChatMentions, readSourceMaterial } = require("src/host/character-sources.js");
+const { formatCharacterSources, pickCharacterSources, pickChatMentions, readSourceMaterial } = require("src/host/character-sources.js");
 const { extractWorldSummary, prepareWorldContext } = require("src/visual/igs-ui/world-context.js");
+const { applyCharacterExpression, applyOutfitExpression, characterAliasesOf, characterExpressionDna, clearExpressionNote, expressionBasePrompt, expressionNoteKey, expressionOutfitSpec, expressionProgressText, extractCharacterPersona, firstGeneratedOutfitUrl, paintThenWriteExpressions, saveCharacterPersona } = require("src/visual/igs-ui/expression-fill.js");
 const { localImageCacheFor } = require("src/media/tavern-image-cache.js");
 const { createIndexedDbAssetThumbStore } = require("src/media/asset-thumb-store.js");
 const { buildPageDiagnostic } = require("src/visual/igs-ui/page-diagnostic.js");
@@ -34915,8 +35017,6 @@ const { deleteTavernFont, loadCustomFonts, pickFontFile, saveCustomFonts, upload
 const { normalizeSpriteHeads } = require("src/visual/igs-ui/fx-anchor.js");
 const { formatImageJobLogText } = require("src/generated-images/image-job-log.js");
 const { addGeneratedAssetToLibrary, bindGeneratedBackground, bindGeneratedSprite, collectGeneratedImageIds, generatedAssetIdOf, isGeneratedAssetUrl, normalizeGeneratedLibrary, removeGeneratedLibraryEntry, renameGeneratedLibraryEntry, setGeneratedExpressionNote } = require("src/scene/asset-match.js");
-const { resolveCharacterDna } = require("src/scene/character-dna.js");
-const { resolveCharacterKey } = require("src/scene/scene-directives.js");
 const { normalizeCharacterDna, normalizeCharacterDnaMap, removeCharacterDna, renameCharacterDna } = require("src/scene/character-dna.js");
 const { normalizeCharacterHouses } = require("src/visual/igs-ui/magic-house.js");
 const { normalizeCharacterVoice, normalizeCharacterVoices, normalizeVoiceBarkSettings, previewVoicePack, resolveCharacterVoice } = require("src/visual/igs-ui/voice-bark.js");
@@ -34926,7 +35026,7 @@ const { handleOutfitAction } = require("src/visual/igs-ui/settings-outfit-action
 const { beginSettingsProgress, markSettingsButtonBusy, remountSettingsNotice } = require("src/visual/igs-ui/settings-notice.js");
 const { createSettingsDialogs } = require("src/visual/igs-ui/settings-dialog.js");
 const { SETTINGS_SECTIONS, buildSettingsExport, parseSettingsImport, resetSettingsSection, settingsExportFileName } = require("src/visual/igs-ui/settings-sections.js");
-const { isBuiltinNudeOutfit, normalizeCharacterOutfits, normalizeWardrobe, renameOutfitScene, resolveWardrobePrompt } = require("src/scene/character-outfits.js");const { migrateSpriteKeys } = require("src/visual/igs-ui/sprite-key-migration.js");
+const { isBuiltinNudeOutfit, normalizeCharacterOutfits, normalizeWardrobe, renameOutfitScene } = require("src/scene/character-outfits.js");const { migrateSpriteKeys } = require("src/visual/igs-ui/sprite-key-migration.js");
 const { NAI_OFFICIAL_MODELS } = require("src/generated-images/request-builders/nai-v4-builder.js");
 const { ASSET_FOLDER_KINDS, addAssetFolder, forgetAssetItem, loadAssetFoldersFor: loadAssetFolders, mergeAssetFolderScope, moveAssetToFolder, removeAssetFolder, renameAssetFolder, renameAssetItem, saveAssetFolders, setAssetView, toggleAssetFolder } = require("src/visual/igs-ui/asset-folders.js");
 const { mergeDefaultBackgrounds } = require("src/backgrounds/merge-default-backgrounds.js");
@@ -34963,7 +35063,6 @@ function assetFolderScope(settingsState, options) {
     return { globalObj, storage: globalObj.localStorage, scope: String(asyncState.assetScopeKey || '') };
 }
 
-const CHARACTER_FIELDS = ['characters', 'characterOutfits', 'characterDna', 'characterAliases', 'statusAvatars'];
 const SCENE_ACTION = /^scene-(?:(?:add|remove|rename|set|toggle|pick)-(?:bg|bg-word|bg-url|time|time-url|weather|weather-url)|variant-(?:set|retry))$/;
 const CHARACTER_ACTION = /^(?:scene-(?:add|remove|rename|set|toggle|pick)-(?:char|char-alias|mood|mood-url|dna-char|outfit-mood)|status-avatar-(?:pick|clear|set-url|generate)|char-generate-sprite|char-persona-extract|outfit-generate-nude|char-expression-(?:prompt|set|retry|resume)|outfit-expression-(?:prompt|set|retry|resume)|sprite-clear(?:-pick|-all|-apply)?)$/;
 
@@ -35061,33 +35160,9 @@ function installGeneratedCharacter(sceneAssets, name, replace = false) {
     return bound;
 }
 
-function characterExpressionDna(sceneAssets, name) {
-    const hit = resolveCharacterDna(
-        sceneAssets.characterDna,
-        name,
-        (raw) => resolveCharacterKey(sceneAssets.characters || {}, sceneAssets.characterAliases || {}, raw) || '',
-    );
-    return hit ? hit.dna : null;
-}
-
-// 「性格与表情习惯」：从角色卡 / 世界书 / 数据库收集提到这个角色的资料，交给副 LLM 提炼。
-async function extractCharacterPersona({ service, globalObj, sceneAssets, name }) {
-    if (!service || typeof service.summarizeCharacterPersona !== 'function') return { ok: false, error: '当前不能提炼性格' };
-    const sources = await collectCharacterSources(globalObj, { name, aliases: characterAliasesOf(sceneAssets, name) });
-    const sourcesText = formatCharacterSources(sources);
-    if (!sourcesText) {
-        return { ok: false, error: `角色卡、世界书和数据库里都没找到「${name}」的资料${sources.notes.length ? `（${sources.notes.join('，')}）` : ''}` };
-    }
-    const written = await service.summarizeCharacterPersona({ name, sourcesText });
-    if (!written || !written.ok) return { ok: false, error: (written && written.error) || '提炼失败' };
-    if (written.insufficient) return { ok: false, error: `资料里看不出「${name}」的性格` };
-    return { ok: true, persona: written.persona };
-}
-
 // 画默认立绘、头像时给写词的角色资料节选：比提炼性格时短，只补 DNA 没写到的长相和穿着。
 // 「副 LLM → 读取上下文」加大了预算时，素材服务另在说明前附上全部设定资料和正文原文。
 const SPRITE_SOURCE_LIMITS = Object.freeze({ card: 2000, worldbook: 2500, entry: 1000, database: 800 });
-const characterAliasesOf = (sceneAssets, name) => (sceneAssets.characterAliases && Array.isArray(sceneAssets.characterAliases[name]) ? sceneAssets.characterAliases[name] : []);
 
 // 角色卡 / 世界书 / 数据库节选，加上正文里提到这个角色的段落（长相、穿着常写在剧情里）。
 function characterSourcesText(material, sceneAssets, name) {
@@ -35104,74 +35179,9 @@ async function spriteWritingBackground({ settingsState, service, globalObj, scen
     return { world: prepared.world, sourcesText: characterSourcesText(material, sceneAssets, name) };
 }
 
-// 存进这个角色的 DNA（和 DNA 一起跟着角色走）；返回更新后的 DNA。
-function saveCharacterPersona(sceneAssets, name, persona) {
-    const map = sceneAssets.characterDna && typeof sceneAssets.characterDna === 'object' && !Array.isArray(sceneAssets.characterDna)
-        ? sceneAssets.characterDna : (sceneAssets.characterDna = {});
-    map[name] = normalizeCharacterDna({ ...normalizeCharacterDna(Object.hasOwn(map, name) ? map[name] : null), persona });
-    return map[name];
-}
-
-function expressionNoteKey(name, outfit) {
-    return outfit ? `${name}\u0001${outfit}` : name;
-}
-
-function firstGeneratedOutfitUrl(entry) {
-    const base = String(entry && entry.base || '').trim();
-    if (isGeneratedAssetUrl(base)) return base;
-    const moods = entry && entry.moods && typeof entry.moods === 'object' ? entry.moods : {};
-    for (const url of Object.values(moods)) {
-        const text = String(url || '').trim();
-        if (isGeneratedAssetUrl(text)) return text;
-    }
-    return '';
-}
-
-function clearExpressionNote(library, key, mood) {
-    if (!library.expressionNotes[key]) return library;
-    const notes = { ...library.expressionNotes[key] };
-    delete notes[mood];
-    if (Object.keys(notes).length) library.expressionNotes[key] = notes;
-    else delete library.expressionNotes[key];
-    return library;
-}
-
-function applyCharacterExpression(sceneAssets, name, item) {
-    const characters = { ...(sceneAssets.characters || {}) };
-    const current = { ...(characters[name] || {}) };
-    let library = normalizeGeneratedLibrary(sceneAssets.generated);
-    if (item && item.ok && item.imageId) {
-        current[item.mood] = `igs-gen:${item.imageId}`;
-        library = clearExpressionNote(library, name, item.mood);
-    } else {
-        // 停下没画的不建空槽，只把写好的词记在注记里，给「继续生图」用。
-        if (!Object.prototype.hasOwnProperty.call(current, item.mood) && item.error !== '已停止') current[item.mood] = '';
-        const noted = setGeneratedExpressionNote(library, name, item.mood, {
-            positive: item && item.prompt ? item.prompt.positive : '',
-            negative: item && item.prompt ? item.prompt.negative : '',
-            error: (item && item.error) || '出图失败',
-            caption: item && item.caption,
-        });
-        if (noted.ok) library = noted.library;
-    }
-    characters[name] = current;
-    sceneAssets.characters = characters;
-    sceneAssets.generated = library;
-}
-
 function settingsProgressHost(globalObj) {
     const doc = globalObj && globalObj.document;
     return doc && typeof doc.getElementById === 'function' ? doc.getElementById('igs-unified-settings') : null;
-}
-
-// 进度条写明在画谁：写词和出图分开说，一批多张带上第几张。
-function expressionProgressText(who, event) {
-    if (event && event.phase === 'write') return `写提示词：${who}`;
-    if (event && event.phase === 'persona') return `提炼性格：${who}`;
-    if (event && event.phase === 'world') return `提炼世界设定：${who}`;
-    const total = Number(event && event.total) || 0;
-    if (total > 1) return `生图中：${who}·${event.mood || ''} ${Number(event.done) || 0}/${total}`;
-    return `生图中：${who}`;
 }
 
 // 点下去就挂一条进度，结束时只收自己这一条；同时在画的其他格子进度还在。
@@ -35221,63 +35231,12 @@ function generationFailure(globalObj, dialogs, message, reason) {
     return { ok: false, reason };
 }
 
-// 已有提示词的先补画，不重写；剩下没有词的再写再画。补画中途停下就不再写。
-async function paintThenWriteExpressions({ service, name, paintItems, writeLabels, basePrompt, dna, outfit, note, nsfw, world = null, onProgress, signal }) {
-    const paint = paintItems.length && typeof service.paintExpressionCaptions === 'function'
-        ? await service.paintExpressionCaptions({ name, items: paintItems, basePrompt, dna, outfit, nsfw, onProgress, signal })
-        : null;
-    if (paint && !paint.ok) return paint;
-    if (paint && (paint.stopped || (signal && signal.aborted))) return paint;
-    const written = await service.generateExpressionSet({ name, basePrompt, moods: writeLabels, dna, outfit, note, nsfw, world, onProgress, signal });
-    if (!paint) return written;
-    const paintedItems = paint.items || [];
-    const wroteItems = written && written.items;
-    const failedWrite = !written || !written.ok
-        ? writeLabels.map((mood) => ({ mood, ok: false, error: (written && written.error) || '写提示词失败' }))
-        : [];
-    return {
-        ok: Boolean(written && written.ok) || paintedItems.some((item) => item.ok),
-        stopped: Boolean(written && written.stopped),
-        items: paintedItems.concat(wroteItems || failedWrite),
-        error: written && written.ok ? '' : (written && written.error),
-    };
-}
-
 function markExpressionActionBusy(globalObj, action, label = '生图中') {
     const host = settingsProgressHost(globalObj);
     const button = host && typeof host.querySelector === 'function'
         ? host.querySelector(`[data-action="${action}"]`)
         : null;
     return markSettingsButtonBusy(button, label);
-}
-
-function applyOutfitExpression(sceneAssets, name, outfitName, item) {
-    const mood = item && item.mood;
-    if (!mood || mood === '默认') return;
-    const all = { ...(sceneAssets.characterOutfits || {}) };
-    const outfits = { ...(all[name] || {}) };
-    const entry = { ...(outfits[outfitName] || { words: [], moods: {} }) };
-    const moods = { ...(entry.moods && typeof entry.moods === 'object' ? entry.moods : {}) };
-    const noteKey = expressionNoteKey(name, outfitName);
-    let library = normalizeGeneratedLibrary(sceneAssets.generated);
-    if (item.ok && item.imageId) {
-        moods[mood] = `igs-gen:${item.imageId}`;
-        library = clearExpressionNote(library, noteKey, mood);
-    } else {
-        if (!Object.prototype.hasOwnProperty.call(moods, mood) && item.error !== '已停止') moods[mood] = '';
-        const noted = setGeneratedExpressionNote(library, noteKey, mood, {
-            positive: item && item.prompt ? item.prompt.positive : '',
-            negative: item && item.prompt ? item.prompt.negative : '',
-            error: (item && item.error) || '出图失败',
-            caption: item && item.caption,
-        });
-        if (noted.ok) library = noted.library;
-    }
-    entry.moods = moods;
-    outfits[outfitName] = entry;
-    all[name] = outfits;
-    sceneAssets.characterOutfits = all;
-    sceneAssets.generated = library;
 }
 
 function persistGeneratedLibrary(persistSettingsDraft) {
@@ -36542,18 +36501,7 @@ async function handleSettingsAction(action, ctx) {
             ? moodTierLabels(tier, { nsfw })
             : allGroups.map((group) => group.label);
         const ownUrl = outfitMode ? firstGeneratedOutfitUrl(outfitEntry) : '';
-        const baseUrl = ownUrl || String(character['默认'] || '');
-        const defaultId = generatedAssetIdOf(baseUrl);
-        let basePrompt = null;
-        try { basePrompt = defaultId ? await service.getImagePrompt(defaultId) : null; }
-        catch (error) { basePrompt = null; }
-        if (!basePrompt) {
-            const originId = generatedAssetIdOf(String(character['默认'] || ''));
-            if (originId && originId !== defaultId) {
-                try { basePrompt = await service.getImagePrompt(originId); }
-                catch (error) { basePrompt = null; }
-            }
-        }
+        const basePrompt = await expressionBasePrompt(service, character, ownUrl);
         const library = normalizeGeneratedLibrary(sceneAssets.generated);
         const noteKey = expressionNoteKey(name, outfitName);
         const note = retry ? (library.expressionNotes[noteKey] || {})[mood] : null;
@@ -36581,9 +36529,7 @@ async function handleSettingsAction(action, ctx) {
             if (!savedCaption && note && note.caption) savedCaption = note.caption;
         }
         let dna = characterExpressionDna(sceneAssets, name);
-        const nude = outfitMode && isBuiltinNudeOutfit(outfitEntry.wardrobe);
-        const clothes = outfitMode && !nude ? resolveWardrobePrompt(draftEffectiveAssets(settingsState).wardrobe || {}, outfitEntry, outfitName) : null;
-        const outfit = outfitMode ? { name: outfitName, words: nude ? [] : outfitEntry.words, ownImage: Boolean(ownUrl), prompt: nude ? '' : (clothes ? clothes.prompt : ''), nude, nsfwBoost: Boolean(!nude && clothes && clothes.nsfwBoost) } : null;
+        const outfit = outfitMode ? expressionOutfitSpec(draftEffectiveAssets(settingsState).wardrobe, outfitName, outfitEntry, ownUrl) : null;
         if (retry && !mood) {
             endProgress();
             return rerenderSettings();
@@ -44110,35 +44056,365 @@ __igsRegister("src/visual/igs-ui/world-context.js", function(module, exports, re
 const { draftAssetLibrary, draftEffectiveAssets } = require("src/scene/asset-scope.js");
 const { worldContextOf } = require("src/scene/worldview.js");
 const { pickWorldText, readSourceMaterial } = require("src/host/character-sources.js");
-// 返回 { ok, summary } 或 { ok: false, error }；成功时已写进草稿，由调用方决定何时保存。
-async function extractWorldSummary({ settingsState, service, globalObj, material = null }) {
+async function summarizeWorld({ assets, service, globalObj, material }) {
     if (!service || typeof service.summarizeWorldSetting !== 'function') return { ok: false, error: '当前不能提炼世界设定' };
-    const world = worldContextOf(draftEffectiveAssets(settingsState));
     const sourcesText = pickWorldText(material || await readSourceMaterial(globalObj));
     if (!sourcesText) return { ok: false, error: '角色卡的场景栏和世界书的常驻条目里都没有内容' };
-    const written = await service.summarizeWorldSetting({ label: world.label, sourcesText });
+    const written = await service.summarizeWorldSetting({ label: worldContextOf(assets).label, sourcesText });
     if (!written || !written.ok) return { ok: false, error: (written && written.error) || '提炼失败' };
     if (written.insufficient || !written.summary) return { ok: false, error: '资料里看不出这个世界的设定' };
-    draftAssetLibrary(settingsState, null).worldSummary = written.summary;
     return { ok: true, summary: written.summary };
 }
 
-// 写词前调用：已有提要直接用；没有就试着提炼一次并保存。提炼不了只带世界观，不挡生成。
-// 返回 { world, note, tone }：note 是要提示用户的一句话（空串就不提示），tone 为 info 时是好消息。
-async function prepareWorldContext({ settingsState, service, globalObj, material = null, onProgress, persist }) {
-    const world = worldContextOf(draftEffectiveAssets(settingsState));
+// 返回 { ok, summary } 或 { ok: false, error }；成功时已写进草稿，由调用方决定何时保存。
+async function extractWorldSummary({ settingsState, service, globalObj, material = null }) {
+    const extracted = await summarizeWorld({ assets: draftEffectiveAssets(settingsState), service, globalObj, material });
+    if (extracted.ok) draftAssetLibrary(settingsState, null).worldSummary = extracted.summary;
+    return extracted;
+}
+
+// 写词前调用：已有提要直接用；没有就试着提炼一次，交给 save(summary) 保存。提炼不了只带世界观，不挡生成。
+// assets 是当前合并后的素材库。返回 { world, note, tone }：note 是要提示用户的一句话（空串就不提示），tone 为 info 时是好消息。
+async function prepareWorld({ assets, service, globalObj, material = null, onProgress, save }) {
+    const world = worldContextOf(assets);
     if (world.summary || !service || typeof service.summarizeWorldSetting !== 'function') return { world, note: '', tone: '' };
     const source = material || await readSourceMaterial(globalObj);
     if (!pickWorldText(source)) return { world, note: '', tone: '' };
     if (typeof onProgress === 'function') onProgress({ phase: 'world' });
-    const extracted = await extractWorldSummary({ settingsState, service, globalObj, material: source });
+    const extracted = await summarizeWorld({ assets, service, globalObj, material: source });
     if (!extracted.ok) return { world, note: `没能提炼世界设定提要（${extracted.error}），这次只按世界观「${world.label}」写。`, tone: '' };
-    if (typeof persist === 'function') persist();
+    if (typeof save === 'function') save(extracted.summary);
     return { world: { ...world, summary: extracted.summary }, note: '已提炼世界设定提要，写立绘和服装时会参考；可在「场景 → 规则」里查看和修改。', tone: 'info' };
 }
 
+// 设置页用：提炼出的提要写进草稿（当前角色卡那一边），再 persist。
+async function prepareWorldContext({ settingsState, service, globalObj, material = null, onProgress, persist }) {
+    return prepareWorld({
+        assets: draftEffectiveAssets(settingsState),
+        service,
+        globalObj,
+        material,
+        onProgress,
+        save: (summary) => {
+            draftAssetLibrary(settingsState, null).worldSummary = summary;
+            if (typeof persist === 'function') persist();
+        },
+    });
+}
+
 __igsDefine(exports, "extractWorldSummary", () => extractWorldSummary);
+__igsDefine(exports, "prepareWorld", () => prepareWorld);
 __igsDefine(exports, "prepareWorldContext", () => prepareWorldContext);
+});
+__igsRegister("src/visual/igs-ui/expression-fill.js", function(module, exports, require) {
+// 表情差分的共用步骤：设置页「表情差分」和阅读器「补全立绘与背景」（给已登记角色补本楼用到的表情）都走这里。
+// 这里只算画哪几格、怎么画，以及把结果记进一份素材库；写进草稿还是存档、写到本卡还是全局由调用方决定。
+const { pendingExpressionCaptions } = require("src/visual/igs-ui/settings-outfit-fields.js");
+const { collectCharacterSources, formatCharacterSources } = require("src/host/character-sources.js");
+const { generatedAssetIdOf, isGeneratedAssetUrl, normalizeGeneratedLibrary, setGeneratedExpressionNote } = require("src/scene/asset-match.js");
+const { normalizeCharacterDna, resolveCharacterDna } = require("src/scene/character-dna.js");
+const { isBuiltinNudeOutfit, resolveWardrobePrompt } = require("src/scene/character-outfits.js");
+const { resolveCharacterKey } = require("src/scene/scene-directives.js");
+const characterAliasesOf = (sceneAssets, name) => (sceneAssets.characterAliases && Array.isArray(sceneAssets.characterAliases[name]) ? sceneAssets.characterAliases[name] : []);
+function characterExpressionDna(sceneAssets, name) {
+    const hit = resolveCharacterDna(
+        sceneAssets.characterDna,
+        name,
+        (raw) => resolveCharacterKey(sceneAssets.characters || {}, sceneAssets.characterAliases || {}, raw) || '',
+    );
+    return hit ? hit.dna : null;
+}
+
+// 「性格与表情习惯」：从角色卡 / 世界书 / 数据库收集提到这个角色的资料，交给副 LLM 提炼。
+async function extractCharacterPersona({ service, globalObj, sceneAssets, name }) {
+    if (!service || typeof service.summarizeCharacterPersona !== 'function') return { ok: false, error: '当前不能提炼性格' };
+    const sources = await collectCharacterSources(globalObj, { name, aliases: characterAliasesOf(sceneAssets, name) });
+    const sourcesText = formatCharacterSources(sources);
+    if (!sourcesText) {
+        return { ok: false, error: `角色卡、世界书和数据库里都没找到「${name}」的资料${sources.notes.length ? `（${sources.notes.join('，')}）` : ''}` };
+    }
+    const written = await service.summarizeCharacterPersona({ name, sourcesText });
+    if (!written || !written.ok) return { ok: false, error: (written && written.error) || '提炼失败' };
+    if (written.insufficient) return { ok: false, error: `资料里看不出「${name}」的性格` };
+    return { ok: true, persona: written.persona };
+}
+
+// 存进这个角色的 DNA（和 DNA 一起跟着角色走）；返回更新后的 DNA。
+// 这一份素材库里还没有这个角色的 DNA 时以 base 为底（DNA 在另一边时别只剩一句性格，把那边的长相盖掉）。
+function saveCharacterPersona(sceneAssets, name, persona, base = null) {
+    const map = sceneAssets.characterDna && typeof sceneAssets.characterDna === 'object' && !Array.isArray(sceneAssets.characterDna)
+        ? sceneAssets.characterDna : (sceneAssets.characterDna = {});
+    map[name] = normalizeCharacterDna({ ...normalizeCharacterDna(Object.hasOwn(map, name) ? map[name] : base), persona });
+    return map[name];
+}
+
+// 进度条写明在画谁：写词和出图分开说，一批多张带上第几张。
+function expressionProgressText(who, event) {
+    if (event && event.phase === 'write') return `写提示词：${who}`;
+    if (event && event.phase === 'persona') return `提炼性格：${who}`;
+    if (event && event.phase === 'world') return `提炼世界设定：${who}`;
+    const total = Number(event && event.total) || 0;
+    if (total > 1) return `生图中：${who}·${event.mood || ''} ${Number(event.done) || 0}/${total}`;
+    return `生图中：${who}`;
+}
+function expressionNoteKey(name, outfit) {
+    return outfit ? `${name}\u0001${outfit}` : name;
+}
+function firstGeneratedOutfitUrl(entry) {
+    const base = String(entry && entry.base || '').trim();
+    if (isGeneratedAssetUrl(base)) return base;
+    const moods = entry && entry.moods && typeof entry.moods === 'object' ? entry.moods : {};
+    for (const url of Object.values(moods)) {
+        const text = String(url || '').trim();
+        if (isGeneratedAssetUrl(text)) return text;
+    }
+    return '';
+}
+function clearExpressionNote(library, key, mood) {
+    if (!library.expressionNotes[key]) return library;
+    const notes = { ...library.expressionNotes[key] };
+    delete notes[mood];
+    if (Object.keys(notes).length) library.expressionNotes[key] = notes;
+    else delete library.expressionNotes[key];
+    return library;
+}
+function applyCharacterExpression(sceneAssets, name, item) {
+    const characters = { ...(sceneAssets.characters || {}) };
+    const current = { ...(characters[name] || {}) };
+    let library = normalizeGeneratedLibrary(sceneAssets.generated);
+    if (item && item.ok && item.imageId) {
+        current[item.mood] = `igs-gen:${item.imageId}`;
+        library = clearExpressionNote(library, name, item.mood);
+    } else {
+        // 停下没画的不建空槽，只把写好的词记在注记里，给「继续生图」用。
+        if (!Object.prototype.hasOwnProperty.call(current, item.mood) && item.error !== '已停止') current[item.mood] = '';
+        const noted = setGeneratedExpressionNote(library, name, item.mood, {
+            positive: item && item.prompt ? item.prompt.positive : '',
+            negative: item && item.prompt ? item.prompt.negative : '',
+            error: (item && item.error) || '出图失败',
+            caption: item && item.caption,
+        });
+        if (noted.ok) library = noted.library;
+    }
+    characters[name] = current;
+    sceneAssets.characters = characters;
+    sceneAssets.generated = library;
+}
+function applyOutfitExpression(sceneAssets, name, outfitName, item) {
+    const mood = item && item.mood;
+    if (!mood || mood === '默认') return;
+    const all = { ...(sceneAssets.characterOutfits || {}) };
+    const outfits = { ...(all[name] || {}) };
+    const entry = { ...(outfits[outfitName] || { words: [], moods: {} }) };
+    const moods = { ...(entry.moods && typeof entry.moods === 'object' ? entry.moods : {}) };
+    const noteKey = expressionNoteKey(name, outfitName);
+    let library = normalizeGeneratedLibrary(sceneAssets.generated);
+    if (item.ok && item.imageId) {
+        moods[mood] = `igs-gen:${item.imageId}`;
+        library = clearExpressionNote(library, noteKey, mood);
+    } else {
+        if (!Object.prototype.hasOwnProperty.call(moods, mood) && item.error !== '已停止') moods[mood] = '';
+        const noted = setGeneratedExpressionNote(library, noteKey, mood, {
+            positive: item && item.prompt ? item.prompt.positive : '',
+            negative: item && item.prompt ? item.prompt.negative : '',
+            error: (item && item.error) || '出图失败',
+            caption: item && item.caption,
+        });
+        if (noted.ok) library = noted.library;
+    }
+    entry.moods = moods;
+    outfits[outfitName] = entry;
+    all[name] = outfits;
+    sceneAssets.characterOutfits = all;
+    sceneAssets.generated = library;
+}
+
+// 写表情时照着画的那张图的提示词：这套服装自己的第一张生成图，没有（或读不到词）就用原装「默认」那张。
+async function expressionBasePrompt(service, character, ownUrl = '') {
+    const originUrl = String((character && character['默认']) || '');
+    const read = async (url) => {
+        const id = generatedAssetIdOf(url);
+        if (!id) return null;
+        try { return await service.getImagePrompt(id); } catch (error) { return null; }
+    };
+    const own = await read(ownUrl || originUrl);
+    if (own || !ownUrl || generatedAssetIdOf(originUrl) === generatedAssetIdOf(ownUrl)) return own;
+    return read(originUrl);
+}
+
+// 写表情时交代的这套服装：衣柜里的衣服提示词、词池词、是不是裸体、自己有没有图（没有就照原装换衣服）。原装返回 null。
+function expressionOutfitSpec(wardrobe, outfitName, outfitEntry, ownUrl = '') {
+    if (!outfitName || !outfitEntry) return null;
+    const nude = isBuiltinNudeOutfit(outfitEntry.wardrobe);
+    const clothes = nude ? null : resolveWardrobePrompt(wardrobe || {}, outfitEntry, outfitName);
+    return { name: outfitName, words: nude ? [] : outfitEntry.words, ownImage: Boolean(ownUrl), prompt: nude ? '' : (clothes ? clothes.prompt : ''), nude, nsfwBoost: Boolean(!nude && clothes && clothes.nsfwBoost) };
+}
+
+// 已有提示词的先补画，不重写；剩下没有词的再写再画。补画中途停下就不再写。
+async function paintThenWriteExpressions({ service, name, paintItems, writeLabels, basePrompt, dna, outfit, note, nsfw, world = null, onProgress, signal }) {
+    const paint = paintItems.length && typeof service.paintExpressionCaptions === 'function'
+        ? await service.paintExpressionCaptions({ name, items: paintItems, basePrompt, dna, outfit, nsfw, onProgress, signal })
+        : null;
+    if (paint && !paint.ok) return paint;
+    if (paint && (paint.stopped || (signal && signal.aborted))) return paint;
+    if (!writeLabels.length) return paint || { ok: true, items: [] };
+    const written = await service.generateExpressionSet({ name, basePrompt, moods: writeLabels, dna, outfit, note, nsfw, world, onProgress, signal });
+    if (!paint) return written;
+    const paintedItems = paint.items || [];
+    const wroteItems = written && written.items;
+    const failedWrite = !written || !written.ok
+        ? writeLabels.map((mood) => ({ mood, ok: false, error: (written && written.error) || '写提示词失败' }))
+        : [];
+    return {
+        ok: Boolean(written && written.ok) || paintedItems.some((item) => item.ok),
+        stopped: Boolean(written && written.stopped),
+        items: paintedItems.concat(wroteItems || failedWrite),
+        error: written && written.ok ? '' : (written && written.error),
+    };
+}
+
+// 给一个角色的某套服装（outfitName 为空是原装）补指定的几格：已经有图的跳过；之前写好词没画出来的直接补画，其余要写词。
+// 返回 { ok, paintItems, writeLabels, basePrompt, outfit }；要写词却没有带提示词的生成立绘时 ok 为 false。
+async function planExpressionGroup({ service, assets, name, outfitName = '', moods = [] }) {
+    const character = (assets.characters || {})[name];
+    const outfitEntry = outfitName ? ((assets.characterOutfits || {})[name] || {})[outfitName] : null;
+    if (!character || (outfitName && !outfitEntry)) return { ok: false, reason: 'missing', error: '素材库里已经没有这个角色或这套服装' };
+    const slots = outfitName ? (outfitEntry.moods || {}) : character;
+    const labels = moods.filter((label) => label && label !== '默认' && !String(slots[label] || '').trim());
+    const notes = normalizeGeneratedLibrary(assets.generated).expressionNotes[expressionNoteKey(name, outfitName)];
+    const written = new Map(pendingExpressionCaptions(notes, slots).map((item) => [item.mood, item.caption]));
+    const paintItems = labels.filter((label) => written.has(label)).map((label) => ({ mood: label, caption: written.get(label) }));
+    const writeLabels = labels.filter((label) => !written.has(label));
+    const ownUrl = outfitName ? firstGeneratedOutfitUrl(outfitEntry) : '';
+    const basePrompt = await expressionBasePrompt(service, character, ownUrl);
+    if (writeLabels.length && !basePrompt) return { ok: false, reason: 'no-base-prompt', error: '还没有带提示词的生成立绘（自己上传的图没有提示词，照着写不了表情）' };
+    return { ok: true, paintItems, writeLabels, basePrompt, outfit: expressionOutfitSpec(assets.wardrobe, outfitName, outfitEntry, ownUrl) };
+}
+const expressionGroupLabel = (group) => (group.outfit ? `${group.character}（${group.outfit}）` : group.character);
+
+// 问用户之前逐组看一遍真能画的：照着写表情要有一张带提示词的生成立绘，自己上传的图没有，单独列出来。
+async function checkExpressionGroups({ groups, service, assets }) {
+    const ready = [];
+    const skipped = [];
+    for (const group of groups) {
+        const plan = await planExpressionGroup({ service, assets, name: group.character, outfitName: group.outfit, moods: group.moods });
+        if (!plan.ok) skipped.push({ ...group, error: plan.error });
+        else if (plan.paintItems.length || plan.writeLabels.length) ready.push(group);
+    }
+    return { ready, skipped };
+}
+function expressionFillQuestion(groups) {
+    const total = groups.reduce((sum, group) => sum + group.moods.length, 0);
+    const lines = groups.map((group) => `${expressionGroupLabel(group)}：${group.moods.join('、')}`);
+    return `本楼已登记的角色还有 ${total} 张表情没有图：\n${lines.join('\n')}\n要补上这几张吗？写词和设置里的「表情差分」一样，已有的图不动。`;
+}
+
+// 阅读器「补全立绘与背景」：一组一组补（一个角色的一套服装算一组），写词、出图和设置里的「表情差分」走同一条路：
+// 还没有性格与表情习惯、世界设定提要的先提炼；「读取上下文」加大预算时附全部设定资料和正文原文（见素材服务 generateExpressionSet）。
+// 每组画完立刻存，后面出错不丢前面画好的。
+// readAssets()：当前合并后的素材库；save(field, name, mutator)：把改动写回这个角色那一项所在的一边（本卡或全局），返回是否存上；
+// moodNoteOf(name)：设置里给这个角色记下的写表情注意事项；getWorld(onProgress)：世界背景，只在要写新词时才调。
+async function fillFloorExpressions({ groups, service, globalObj, readAssets, save, moodNoteOf = () => '', getWorld = async () => null, nsfw = false, onProgress }) {
+    const outcome = { painted: 0, failed: [], skipped: [] };
+    for (const group of groups) {
+        const name = group.character;
+        const outfitName = group.outfit || '';
+        const report = (event) => { if (typeof onProgress === 'function') onProgress(group, event); };
+        const assets = readAssets();
+        const plan = await planExpressionGroup({ service, assets, name, outfitName, moods: group.moods });
+        if (!plan.ok) {
+            outcome.skipped.push({ ...group, error: plan.error });
+            continue;
+        }
+        if (!plan.paintItems.length && !plan.writeLabels.length) continue;
+        let dna = characterExpressionDna(assets, name);
+        let world = null;
+        if (plan.writeLabels.length) {
+            // 提炼失败不挡生成，这次按默认写法写。
+            if (!(dna && dna.persona)) {
+                report({ phase: 'persona' });
+                const extracted = await extractCharacterPersona({ service, globalObj, sceneAssets: assets, name });
+                if (extracted.ok) {
+                    const base = dna;
+                    let saved = null;
+                    save('characterDna', name, (bucket) => {
+                        saved = saveCharacterPersona(bucket, name, extracted.persona, base);
+                        return { ok: true };
+                    });
+                    dna = saved || normalizeCharacterDna({ ...normalizeCharacterDna(base), persona: extracted.persona });
+                }
+            }
+            world = await getWorld(report);
+        }
+        let result;
+        try {
+            result = await paintThenWriteExpressions({
+                service, name, paintItems: plan.paintItems, writeLabels: plan.writeLabels, basePrompt: plan.basePrompt,
+                dna, outfit: plan.outfit, note: moodNoteOf(name), nsfw, world, onProgress: report,
+            });
+        } catch (error) {
+            result = { ok: false, error: (error && error.message) || String(error || '') };
+        }
+        if (!result || !result.ok) {
+            outcome.failed.push({ ...group, error: (result && result.error) || '未返回原因' });
+            continue;
+        }
+        const items = (result.items || []).filter((item) => item && item.mood && item.error !== '已跳过');
+        const stored = !items.length || save(outfitName ? 'characterOutfits' : 'characters', name, (bucket) => {
+            for (const item of items) {
+                if (outfitName) applyOutfitExpression(bucket, name, outfitName, item);
+                else applyCharacterExpression(bucket, name, item);
+            }
+            return { ok: true };
+        });
+        if (!stored) {
+            outcome.failed.push({ ...group, error: '画好了，但没能存进素材库' });
+            continue;
+        }
+        const bad = items.filter((item) => !item.ok);
+        outcome.painted += items.length - bad.length;
+        if (bad.length) outcome.failed.push({ ...group, moods: bad.map((item) => item.mood), error: bad[0].error || '出图失败' });
+    }
+    return outcome;
+}
+
+// 补完之后给用户的一句话：补了几张、几张没画成、哪些补不了（为什么）。没什么可说的返回 null。
+// outcome 为 null 表示这次没补（用户没点补，或没有能补的）。
+function expressionFillSummary({ outcome = null, skipped = [], unmapped = [], pendingOutfits = [] } = {}) {
+    const parts = [];
+    const painted = outcome ? outcome.painted : 0;
+    const failed = outcome ? outcome.failed : [];
+    const failedCount = failed.reduce((sum, item) => sum + item.moods.length, 0);
+    if (painted) parts.push(`已登记角色补好 ${painted} 张表情`);
+    if (failedCount) parts.push(`${failedCount} 张表情没画成：${failed[0].error}`);
+    for (const item of skipped.concat(outcome ? outcome.skipped : [])) parts.push(`「${expressionGroupLabel(item)}」补不了表情：${item.error}`);
+    for (const item of pendingOutfits) parts.push(`「${item.character}」的「${item.outfit}」还没建，先到「素材 → 待确认」里新建再补`);
+    if (unmapped.length) parts.push(`表情词「${unmapped.slice(0, 3).map((item) => item.mood).join('、')}」${unmapped.length > 3 ? '等' : ''}还没归进情绪组，没补`);
+    if (!parts.length) return null;
+    // 除了「补好几张」之外还有话要说（没画成的、补不了的）就算提醒。
+    const level = failedCount && !painted ? 'error' : parts.length > (painted ? 1 : 0) ? 'warn' : 'success';
+    return { level, text: parts.join('；') };
+}
+
+__igsDefine(exports, "characterExpressionDna", () => characterExpressionDna);
+__igsDefine(exports, "extractCharacterPersona", () => extractCharacterPersona);
+__igsDefine(exports, "saveCharacterPersona", () => saveCharacterPersona);
+__igsDefine(exports, "expressionProgressText", () => expressionProgressText);
+__igsDefine(exports, "expressionNoteKey", () => expressionNoteKey);
+__igsDefine(exports, "firstGeneratedOutfitUrl", () => firstGeneratedOutfitUrl);
+__igsDefine(exports, "clearExpressionNote", () => clearExpressionNote);
+__igsDefine(exports, "applyCharacterExpression", () => applyCharacterExpression);
+__igsDefine(exports, "applyOutfitExpression", () => applyOutfitExpression);
+__igsDefine(exports, "expressionBasePrompt", () => expressionBasePrompt);
+__igsDefine(exports, "expressionOutfitSpec", () => expressionOutfitSpec);
+__igsDefine(exports, "paintThenWriteExpressions", () => paintThenWriteExpressions);
+__igsDefine(exports, "planExpressionGroup", () => planExpressionGroup);
+__igsDefine(exports, "checkExpressionGroups", () => checkExpressionGroups);
+__igsDefine(exports, "expressionFillQuestion", () => expressionFillQuestion);
+__igsDefine(exports, "fillFloorExpressions", () => fillFloorExpressions);
+__igsDefine(exports, "expressionFillSummary", () => expressionFillSummary);
+__igsDefine(exports, "characterAliasesOf", () => characterAliasesOf);
+__igsDefine(exports, "expressionGroupLabel", () => expressionGroupLabel);
 });
 __igsRegister("src/media/asset-thumb-store.js", function(module, exports, require) {
 // 设置页素材缩略图（IndexedDB igs-asset-thumbs）：每张生成 / 上传的图存一张 160 宽小图，
@@ -74970,10 +75246,11 @@ __igsDefine(exports, "createResourceCache", () => createResourceCache);
 __igsDefine(exports, "createImageResourceCache", () => createImageResourceCache);
 });
 __igsRegister("src/visual/igs-ui/floor-asset-prefetch.js", function(module, exports, require) {
-const { extractSceneDirectives, classifySceneKey } = require("src/scene/scene-directives.js");
+const { extractSceneDirectives, classifySceneKey, resolveCharacterKey } = require("src/scene/scene-directives.js");
 const { resolveBackgroundAsset, resolveNudeSpriteAsset, resolveSpriteAsset, isNonSpriteSpeaker } = require("src/scene/asset-match.js");
-const { createOutfitResolver, resolveSpriteOutfit } = require("src/scene/character-outfits.js");
+const { OUTFIT_RESET, createOutfitResolver, outfitsOfCharacter, resolveSpriteOutfit } = require("src/scene/character-outfits.js");
 const { resolveCharacterDna } = require("src/scene/character-dna.js");
+const { fuzzyResolveMoodGroup, resolveMoodGroup } = require("src/scene/mood-groups.js");
 const { isSystemRole } = require("src/visual/igs-ui/system-role.js");
 function pushUrl(urls, seen, url) {
     const source = String(url || '').trim();
@@ -74994,6 +75271,47 @@ function sceneBefore(directives, offset, inheritedScene) {
     return { scene, nsfw };
 }
 
+// 逐条读台词 / 心理指令（要按原文顺序调用）：这句是谁、什么表情、当时穿哪套（'' 为原装）、场景是不是 NSFW。
+// 旁白、系统角色返回 null。服装栏写了还没登记的服装时带上 pendingOutfit：显示照旧，补表情时不能当成原来那套去画。
+function spriteUseReader({ directives, sceneAssets, inheritedOutfits, inheritedScene, systemRole, readClues }) {
+    const outfitMap = sceneAssets.characterOutfits;
+    const hasOutfits = Boolean(outfitMap && Object.keys(outfitMap).length);
+    const outfitFor = (character, offset) => {
+        if (!hasOutfits) return '';
+        const sceneRaw = sceneBefore(directives, offset, inheritedScene).scene;
+        return resolveSpriteOutfit({
+            directives,
+            character,
+            offset: Number.isFinite(offset) ? offset : Number.NaN,
+            inheritedOutfits,
+            sceneAssets,
+            scene: [classifySceneKey(sceneAssets.scenes, sceneRaw).key || '', sceneRaw],
+            readClues: typeof readClues === 'function' ? readClues : () => null,
+            resolveDna: (name) => {
+                const hit = resolveCharacterDna(sceneAssets.characterDna, name);
+                return hit ? hit.dna : null;
+            },
+        }).outfit;
+    };
+    const pending = new Map();
+    return (directive) => {
+        if (!directive || (directive.type !== 'char' && directive.type !== 'thought')) return null;
+        const name = String(directive.character || '').trim();
+        if (!name || isNonSpriteSpeaker(name) || isSystemRole(name, systemRole)) return null;
+        const key = resolveCharacterKey(sceneAssets.characters, sceneAssets.characterAliases, name) || name;
+        if (directive.unknownOutfit) pending.set(key, directive.unknownOutfit);
+        else if (directive.outfit) pending.delete(key);
+        const offset = Number(directive.offset);
+        return {
+            name,
+            mood: String(directive.mood || '').trim(),
+            outfit: outfitFor(name, offset),
+            nsfw: sceneBefore(directives, offset, inheritedScene).nsfw,
+            pendingOutfit: pending.get(key) || '',
+        };
+    };
+}
+
 // 这一楼会用到的立绘和背景。翻页前一次性取齐，不在轮到出场时才去读。
 function collectFloorAssetUrls({
     source = '',
@@ -75012,28 +75330,8 @@ function collectFloorAssetUrls({
     }
     if (!sceneAssets || !sceneAssets.enabled) return urls;
     const ctx = assetMatchCtx || { sceneAssets };
-    const outfitResolver = createOutfitResolver(sceneAssets);
-    const directives = extractSceneDirectives(String(source || ''), { outfitResolver }).directives;
-    const outfitMap = sceneAssets.characterOutfits;
-    const hasOutfits = Boolean(outfitMap && Object.keys(outfitMap).length);
-    const outfitFor = (character, offset) => {
-        if (!hasOutfits) return '';
-        const place = sceneBefore(directives, offset, inheritedScene);
-        const sceneRaw = place.scene;
-        return resolveSpriteOutfit({
-            directives,
-            character,
-            offset: Number.isFinite(offset) ? offset : Number.NaN,
-            inheritedOutfits,
-            sceneAssets,
-            scene: [classifySceneKey(sceneAssets.scenes, sceneRaw).key || '', sceneRaw],
-            readClues: typeof readClues === 'function' ? readClues : () => null,
-            resolveDna: (name) => {
-                const hit = resolveCharacterDna(sceneAssets.characterDna, name);
-                return hit ? hit.dna : null;
-            },
-        }).outfit;
-    };
+    const directives = extractSceneDirectives(String(source || ''), { outfitResolver: createOutfitResolver(sceneAssets) }).directives;
+    const useOf = spriteUseReader({ directives, sceneAssets, inheritedOutfits, inheritedScene, systemRole, readClues });
     if (inheritedScene && inheritedScene.scene) {
         pushUrl(urls, seen, resolveBackgroundAsset(inheritedScene, ctx).url);
     }
@@ -75042,18 +75340,70 @@ function collectFloorAssetUrls({
             pushUrl(urls, seen, resolveBackgroundAsset(directive, ctx).url);
             continue;
         }
-        if (directive.type !== 'char' && directive.type !== 'thought') continue;
-        const name = String(directive.character || '').trim();
-        if (!name || isNonSpriteSpeaker(name) || isSystemRole(name, systemRole)) continue;
-        const outfit = outfitFor(name, Number(directive.offset));
-        pushUrl(urls, seen, resolveSpriteAsset(name, directive.mood || '', ctx, outfit).url);
-        const place = sceneBefore(directives, Number(directive.offset), inheritedScene);
-        if (place.nsfw) pushUrl(urls, seen, resolveNudeSpriteAsset(name, directive.mood || '', ctx).url);
+        const use = useOf(directive);
+        if (!use) continue;
+        pushUrl(urls, seen, resolveSpriteAsset(use.name, use.mood, ctx, use.outfit).url);
+        if (use.nsfw) pushUrl(urls, seen, resolveNudeSpriteAsset(use.name, use.mood, ctx).url);
     }
     return urls;
 }
 
+// 「补全立绘与背景」给已登记角色补表情：本楼每句用到的「角色 + 当时那套服装（或原装）+ 表情」，
+// 那一格（表情词本身，或它归入的情绪组）空着就记下；只记这一楼真用到的，按出场先后排。没登记的角色交给素材补全，不在这里。
+// 表情词归不进任何情绪组的（unmapped）、服装栏写了还没登记的服装（pendingOutfits）单独列出，不画。
+function collectMissingExpressions({
+    source = '',
+    sceneAssets = null,
+    inheritedOutfits = null,
+    inheritedScene = null,
+    systemRole = null,
+    readClues = null,
+} = {}) {
+    const result = { groups: [], unmapped: [], pendingOutfits: [] };
+    if (!sceneAssets || !sceneAssets.enabled) return result;
+    const characters = sceneAssets.characters || {};
+    const directives = extractSceneDirectives(String(source || ''), { outfitResolver: createOutfitResolver(sceneAssets) }).directives;
+    const useOf = spriteUseReader({ directives, sceneAssets, inheritedOutfits, inheritedScene, systemRole, readClues });
+    const groups = new Map();
+    const noted = new Set();
+    const note = (list, id, entry) => {
+        if (noted.has(id)) return;
+        noted.add(id);
+        list.push(entry);
+    };
+    for (const directive of directives) {
+        const use = useOf(directive);
+        if (!use || !use.mood) continue;
+        const character = resolveCharacterKey(characters, sceneAssets.characterAliases, use.name);
+        if (!character) continue;
+        if (use.pendingOutfit) {
+            note(result.pendingOutfits, `outfit|${character}|${use.pendingOutfit}`, { character, outfit: use.pendingOutfit });
+            continue;
+        }
+        const outfit = use.outfit && use.outfit !== OUTFIT_RESET ? use.outfit : '';
+        const entry = outfit ? outfitsOfCharacter(sceneAssets.characterOutfits, sceneAssets.characterAliases, character).outfits[outfit] : null;
+        if (outfit && !entry) continue;
+        const slots = outfit ? entry.moods || {} : characters[character] || {};
+        if (String(slots[use.mood] || '').trim()) continue;
+        const label = resolveMoodGroup(use.mood, sceneAssets.moodGroups)
+            || (sceneAssets.moodFuzzyMatch === true ? fuzzyResolveMoodGroup(use.mood, sceneAssets.moodGroups) : null);
+        if (!label) {
+            note(result.unmapped, `mood|${use.mood}`, { character, mood: use.mood });
+            continue;
+        }
+        // 「默认」是底图：原装那张本来就有，服装没有「默认」格（没对上的表情退回这一套的「平和」）。
+        if (label === OUTFIT_RESET || String(slots[label] || '').trim()) continue;
+        const id = `${character}\u0001${outfit}`;
+        if (!groups.has(id)) groups.set(id, { character, outfit, moods: [] });
+        const group = groups.get(id);
+        if (!group.moods.includes(label)) group.moods.push(label);
+    }
+    result.groups = Array.from(groups.values());
+    return result;
+}
+
 __igsDefine(exports, "collectFloorAssetUrls", () => collectFloorAssetUrls);
+__igsDefine(exports, "collectMissingExpressions", () => collectMissingExpressions);
 });
 __igsRegister("src/host/chat-stream-observer.js", function(module, exports, require) {
 const { getSillyTavernContext } = require("src/host/tavern-helper-adapter.js");
