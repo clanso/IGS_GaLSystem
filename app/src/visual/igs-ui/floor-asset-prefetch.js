@@ -1,7 +1,8 @@
-import { extractSceneDirectives, classifySceneKey } from '../../scene/scene-directives.js';
+import { extractSceneDirectives, classifySceneKey, resolveCharacterKey } from '../../scene/scene-directives.js';
 import { resolveBackgroundAsset, resolveNudeSpriteAsset, resolveSpriteAsset, isNonSpriteSpeaker } from '../../scene/asset-match.js';
-import { createOutfitResolver, resolveSpriteOutfit } from '../../scene/character-outfits.js';
+import { OUTFIT_RESET, createOutfitResolver, outfitsOfCharacter, resolveSpriteOutfit } from '../../scene/character-outfits.js';
 import { resolveCharacterDna } from '../../scene/character-dna.js';
+import { fuzzyResolveMoodGroup, resolveMoodGroup } from '../../scene/mood-groups.js';
 import { isSystemRole } from './system-role.js';
 
 function pushUrl(urls, seen, url) {
@@ -23,6 +24,47 @@ function sceneBefore(directives, offset, inheritedScene) {
     return { scene, nsfw };
 }
 
+// 逐条读台词 / 心理指令（要按原文顺序调用）：这句是谁、什么表情、当时穿哪套（'' 为原装）、场景是不是 NSFW。
+// 旁白、系统角色返回 null。服装栏写了还没登记的服装时带上 pendingOutfit：显示照旧，补表情时不能当成原来那套去画。
+function spriteUseReader({ directives, sceneAssets, inheritedOutfits, inheritedScene, systemRole, readClues }) {
+    const outfitMap = sceneAssets.characterOutfits;
+    const hasOutfits = Boolean(outfitMap && Object.keys(outfitMap).length);
+    const outfitFor = (character, offset) => {
+        if (!hasOutfits) return '';
+        const sceneRaw = sceneBefore(directives, offset, inheritedScene).scene;
+        return resolveSpriteOutfit({
+            directives,
+            character,
+            offset: Number.isFinite(offset) ? offset : Number.NaN,
+            inheritedOutfits,
+            sceneAssets,
+            scene: [classifySceneKey(sceneAssets.scenes, sceneRaw).key || '', sceneRaw],
+            readClues: typeof readClues === 'function' ? readClues : () => null,
+            resolveDna: (name) => {
+                const hit = resolveCharacterDna(sceneAssets.characterDna, name);
+                return hit ? hit.dna : null;
+            },
+        }).outfit;
+    };
+    const pending = new Map();
+    return (directive) => {
+        if (!directive || (directive.type !== 'char' && directive.type !== 'thought')) return null;
+        const name = String(directive.character || '').trim();
+        if (!name || isNonSpriteSpeaker(name) || isSystemRole(name, systemRole)) return null;
+        const key = resolveCharacterKey(sceneAssets.characters, sceneAssets.characterAliases, name) || name;
+        if (directive.unknownOutfit) pending.set(key, directive.unknownOutfit);
+        else if (directive.outfit) pending.delete(key);
+        const offset = Number(directive.offset);
+        return {
+            name,
+            mood: String(directive.mood || '').trim(),
+            outfit: outfitFor(name, offset),
+            nsfw: sceneBefore(directives, offset, inheritedScene).nsfw,
+            pendingOutfit: pending.get(key) || '',
+        };
+    };
+}
+
 // 这一楼会用到的立绘和背景。翻页前一次性取齐，不在轮到出场时才去读。
 export function collectFloorAssetUrls({
     source = '',
@@ -41,28 +83,8 @@ export function collectFloorAssetUrls({
     }
     if (!sceneAssets || !sceneAssets.enabled) return urls;
     const ctx = assetMatchCtx || { sceneAssets };
-    const outfitResolver = createOutfitResolver(sceneAssets);
-    const directives = extractSceneDirectives(String(source || ''), { outfitResolver }).directives;
-    const outfitMap = sceneAssets.characterOutfits;
-    const hasOutfits = Boolean(outfitMap && Object.keys(outfitMap).length);
-    const outfitFor = (character, offset) => {
-        if (!hasOutfits) return '';
-        const place = sceneBefore(directives, offset, inheritedScene);
-        const sceneRaw = place.scene;
-        return resolveSpriteOutfit({
-            directives,
-            character,
-            offset: Number.isFinite(offset) ? offset : Number.NaN,
-            inheritedOutfits,
-            sceneAssets,
-            scene: [classifySceneKey(sceneAssets.scenes, sceneRaw).key || '', sceneRaw],
-            readClues: typeof readClues === 'function' ? readClues : () => null,
-            resolveDna: (name) => {
-                const hit = resolveCharacterDna(sceneAssets.characterDna, name);
-                return hit ? hit.dna : null;
-            },
-        }).outfit;
-    };
+    const directives = extractSceneDirectives(String(source || ''), { outfitResolver: createOutfitResolver(sceneAssets) }).directives;
+    const useOf = spriteUseReader({ directives, sceneAssets, inheritedOutfits, inheritedScene, systemRole, readClues });
     if (inheritedScene && inheritedScene.scene) {
         pushUrl(urls, seen, resolveBackgroundAsset(inheritedScene, ctx).url);
     }
@@ -71,13 +93,64 @@ export function collectFloorAssetUrls({
             pushUrl(urls, seen, resolveBackgroundAsset(directive, ctx).url);
             continue;
         }
-        if (directive.type !== 'char' && directive.type !== 'thought') continue;
-        const name = String(directive.character || '').trim();
-        if (!name || isNonSpriteSpeaker(name) || isSystemRole(name, systemRole)) continue;
-        const outfit = outfitFor(name, Number(directive.offset));
-        pushUrl(urls, seen, resolveSpriteAsset(name, directive.mood || '', ctx, outfit).url);
-        const place = sceneBefore(directives, Number(directive.offset), inheritedScene);
-        if (place.nsfw) pushUrl(urls, seen, resolveNudeSpriteAsset(name, directive.mood || '', ctx).url);
+        const use = useOf(directive);
+        if (!use) continue;
+        pushUrl(urls, seen, resolveSpriteAsset(use.name, use.mood, ctx, use.outfit).url);
+        if (use.nsfw) pushUrl(urls, seen, resolveNudeSpriteAsset(use.name, use.mood, ctx).url);
     }
     return urls;
+}
+
+// 「补全立绘与背景」给已登记角色补表情：本楼每句用到的「角色 + 当时那套服装（或原装）+ 表情」，
+// 那一格（表情词本身，或它归入的情绪组）空着就记下；只记这一楼真用到的，按出场先后排。没登记的角色交给素材补全，不在这里。
+// 表情词归不进任何情绪组的（unmapped）、服装栏写了还没登记的服装（pendingOutfits）单独列出，不画。
+export function collectMissingExpressions({
+    source = '',
+    sceneAssets = null,
+    inheritedOutfits = null,
+    inheritedScene = null,
+    systemRole = null,
+    readClues = null,
+} = {}) {
+    const result = { groups: [], unmapped: [], pendingOutfits: [] };
+    if (!sceneAssets || !sceneAssets.enabled) return result;
+    const characters = sceneAssets.characters || {};
+    const directives = extractSceneDirectives(String(source || ''), { outfitResolver: createOutfitResolver(sceneAssets) }).directives;
+    const useOf = spriteUseReader({ directives, sceneAssets, inheritedOutfits, inheritedScene, systemRole, readClues });
+    const groups = new Map();
+    const noted = new Set();
+    const note = (list, id, entry) => {
+        if (noted.has(id)) return;
+        noted.add(id);
+        list.push(entry);
+    };
+    for (const directive of directives) {
+        const use = useOf(directive);
+        if (!use || !use.mood) continue;
+        const character = resolveCharacterKey(characters, sceneAssets.characterAliases, use.name);
+        if (!character) continue;
+        if (use.pendingOutfit) {
+            note(result.pendingOutfits, `outfit|${character}|${use.pendingOutfit}`, { character, outfit: use.pendingOutfit });
+            continue;
+        }
+        const outfit = use.outfit && use.outfit !== OUTFIT_RESET ? use.outfit : '';
+        const entry = outfit ? outfitsOfCharacter(sceneAssets.characterOutfits, sceneAssets.characterAliases, character).outfits[outfit] : null;
+        if (outfit && !entry) continue;
+        const slots = outfit ? entry.moods || {} : characters[character] || {};
+        if (String(slots[use.mood] || '').trim()) continue;
+        const label = resolveMoodGroup(use.mood, sceneAssets.moodGroups)
+            || (sceneAssets.moodFuzzyMatch === true ? fuzzyResolveMoodGroup(use.mood, sceneAssets.moodGroups) : null);
+        if (!label) {
+            note(result.unmapped, `mood|${use.mood}`, { character, mood: use.mood });
+            continue;
+        }
+        // 「默认」是底图：原装那张本来就有，服装没有「默认」格（没对上的表情退回这一套的「平和」）。
+        if (label === OUTFIT_RESET || String(slots[label] || '').trim()) continue;
+        const id = `${character}\u0001${outfit}`;
+        if (!groups.has(id)) groups.set(id, { character, outfit, moods: [] });
+        const group = groups.get(id);
+        if (!group.moods.includes(label)) group.moods.push(label);
+    }
+    result.groups = Array.from(groups.values());
+    return result;
 }

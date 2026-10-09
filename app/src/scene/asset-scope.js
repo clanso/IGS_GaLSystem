@@ -4,6 +4,8 @@
 const plain = (value) => (value && typeof value === 'object' && !Array.isArray(value) ? value : {});
 
 const LIBRARY_FIELDS = ['scenes', 'characters', 'characterAliases', 'characterDna', 'characterOutfits', 'wardrobe', 'statusAvatars'];
+// 一个角色的素材分在这几处；任一处有这个名字，就算这个角色归那一边（本卡或全局）。
+export const CHARACTER_FIELDS = Object.freeze(['characters', 'characterOutfits', 'characterDna', 'characterAliases', 'statusAvatars']);
 
 export function resolveAssetScope(ctx) {
     if (!ctx || typeof ctx !== 'object') return { key: '', legacyKey: '', kind: 'global', label: '全局' };
