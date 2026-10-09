@@ -126,7 +126,7 @@ test('gate:planner-context:sprite-writing-sends-all-material-and-story-with-larg
     const { createAssetGenerationService } = await import('../src/generated-images/illustration/asset-generation-service.js');
     const { createMemoryGeneratedAssetStore } = await import('../src/media/generated-asset-store.js');
     const caption = { v4_prompt: { caption: { base_caption: '1girl', char_captions: [] } }, v4_negative_prompt: { caption: { base_caption: '', char_captions: [] } } };
-    const run = async ({ contextBudget, via = 'chatu8', ownPrompts = false, moods }) => {
+    const run = async ({ contextBudget, via = 'chatu8', ownPrompts = false, moods, outfit }) => {
         const writes = [];
         const materialCalls = [];
         const service = createAssetGenerationService({
@@ -146,7 +146,8 @@ test('gate:planner-context:sprite-writing-sends-all-material-and-story-with-larg
             readSettingMaterial: async (names, options) => { materialCalls.push([names, options]); return '【角色卡「脚本家」·描述】描述全文。'; },
             getSettings: () => ({ autoIllustration: { llm: { contextBudget } }, sceneAssets: { characterAliases: { 柯萝伊: ['宫城柯萝伊'] } } }),
         });
-        if (moods) await service.generateExpressionSet({ name: '柯萝伊', moods, basePrompt: null });
+        if (outfit) await service.writeWardrobePrompt({ character: '柯萝伊', outfit });
+        else if (moods) await service.generateExpressionSet({ name: '柯萝伊', moods, basePrompt: null });
         else await service.generateCharacterSprite({ name: '柯萝伊', dna: { identity: '1girl, black hair' } });
         return { writes, materialCalls };
     };
@@ -161,4 +162,10 @@ test('gate:planner-context:sprite-writing-sends-all-material-and-story-with-larg
     const expressions = await run({ contextBudget: '1000k', moods: ['喜悦', '愤怒'] });
     assert.equal(expressions.materialCalls.length, 1, '一组表情只读一次资料');
     assert.match(expressions.writes[0], /照正文里这个角色说话做事的样子来定[\s\S]*【这次要写的】\n为角色「柯萝伊」写 2 份立绘表情差分。/);
+    // 衣柜服装提示词也一样：加大预算时先附全部资料和正文，提到这件衣服和穿着者的排前面。
+    const wardrobeStandard = await run({ contextBudget: 'standard', outfit: '白色泳装' });
+    assert.ok(wardrobeStandard.writes[0].startsWith('为服装「白色泳装」写一份生图用的服装提示词。'));
+    const wardrobe = await run({ contextBudget: '1000k', outfit: '白色泳装' });
+    assert.match(wardrobe.writes[0], /^下面先给出这个故事的设定资料（角色卡、世界书、数据库）和正文原文，供你把服装「白色泳装」写准[\s\S]*【正文（原文，从早到近）】\n（用户）我们去首都。[\s\S]*【这次要写的】\n为服装「白色泳装」写一份生图用的服装提示词。/);
+    assert.deepEqual(wardrobe.materialCalls[0][0], ['白色泳装', '柯萝伊', '宫城柯萝伊']);
 });

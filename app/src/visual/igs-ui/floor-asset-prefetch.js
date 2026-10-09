@@ -25,7 +25,7 @@ function sceneBefore(directives, offset, inheritedScene) {
 }
 
 // 逐条读台词 / 心理指令（要按原文顺序调用）：这句是谁、什么表情、当时穿哪套（'' 为原装）、场景是不是 NSFW。
-// 旁白、系统角色返回 null。服装栏写了还没登记的服装时带上 pendingOutfit：显示照旧，补表情时不能当成原来那套去画。
+// 旁白、系统角色返回 null。服装栏写了还没登记的服装时带上 pendingOutfit：显示照旧，补表情时要按这套新服装画，不能当成原来那套。
 function spriteUseReader({ directives, sceneAssets, inheritedOutfits, inheritedScene, systemRole, readClues }) {
     const outfitMap = sceneAssets.characterOutfits;
     const hasOutfits = Boolean(outfitMap && Object.keys(outfitMap).length);
@@ -103,7 +103,8 @@ export function collectFloorAssetUrls({
 
 // 「补全立绘与背景」给已登记角色补表情：本楼每句用到的「角色 + 当时那套服装（或原装）+ 表情」，
 // 那一格（表情词本身，或它归入的情绪组）空着就记下；只记这一楼真用到的，按出场先后排。没登记的角色交给素材补全，不在这里。
-// 表情词归不进任何情绪组的（unmapped）、服装栏写了还没登记的服装（pendingOutfits）单独列出，不画。
+// 服装栏写了这个角色还没建的服装（「白色泳装」「墨绿泳装-孕中期」）记成 create 组：先建这套再画，不拿原装或前半段那套顶替。
+// 表情词归不进任何情绪组的列进 unmapped，不画。
 export function collectMissingExpressions({
     source = '',
     sceneAssets = null,
@@ -112,42 +113,35 @@ export function collectMissingExpressions({
     systemRole = null,
     readClues = null,
 } = {}) {
-    const result = { groups: [], unmapped: [], pendingOutfits: [] };
+    const result = { groups: [], unmapped: [] };
     if (!sceneAssets || !sceneAssets.enabled) return result;
     const characters = sceneAssets.characters || {};
     const directives = extractSceneDirectives(String(source || ''), { outfitResolver: createOutfitResolver(sceneAssets) }).directives;
     const useOf = spriteUseReader({ directives, sceneAssets, inheritedOutfits, inheritedScene, systemRole, readClues });
     const groups = new Map();
-    const noted = new Set();
-    const note = (list, id, entry) => {
-        if (noted.has(id)) return;
-        noted.add(id);
-        list.push(entry);
-    };
+    const unmapped = new Set();
     for (const directive of directives) {
         const use = useOf(directive);
         if (!use || !use.mood) continue;
         const character = resolveCharacterKey(characters, sceneAssets.characterAliases, use.name);
         if (!character) continue;
-        if (use.pendingOutfit) {
-            note(result.pendingOutfits, `outfit|${character}|${use.pendingOutfit}`, { character, outfit: use.pendingOutfit });
-            continue;
-        }
-        const outfit = use.outfit && use.outfit !== OUTFIT_RESET ? use.outfit : '';
-        const entry = outfit ? outfitsOfCharacter(sceneAssets.characterOutfits, sceneAssets.characterAliases, character).outfits[outfit] : null;
-        if (outfit && !entry) continue;
-        const slots = outfit ? entry.moods || {} : characters[character] || {};
+        const create = Boolean(use.pendingOutfit);
+        const outfit = create ? use.pendingOutfit : (use.outfit && use.outfit !== OUTFIT_RESET ? use.outfit : '');
+        const entry = outfit && !create ? outfitsOfCharacter(sceneAssets.characterOutfits, sceneAssets.characterAliases, character).outfits[outfit] : null;
+        if (outfit && !create && !entry) continue;
+        const slots = create ? {} : outfit ? entry.moods || {} : characters[character] || {};
         if (String(slots[use.mood] || '').trim()) continue;
         const label = resolveMoodGroup(use.mood, sceneAssets.moodGroups)
             || (sceneAssets.moodFuzzyMatch === true ? fuzzyResolveMoodGroup(use.mood, sceneAssets.moodGroups) : null);
         if (!label) {
-            note(result.unmapped, `mood|${use.mood}`, { character, mood: use.mood });
+            if (!unmapped.has(use.mood)) result.unmapped.push({ character, mood: use.mood });
+            unmapped.add(use.mood);
             continue;
         }
         // 「默认」是底图：原装那张本来就有，服装没有「默认」格（没对上的表情退回这一套的「平和」）。
         if (label === OUTFIT_RESET || String(slots[label] || '').trim()) continue;
         const id = `${character}\u0001${outfit}`;
-        if (!groups.has(id)) groups.set(id, { character, outfit, moods: [] });
+        if (!groups.has(id)) groups.set(id, { character, outfit, ...(create && { create: true }), moods: [] });
         const group = groups.get(id);
         if (!group.moods.includes(label)) group.moods.push(label);
     }
