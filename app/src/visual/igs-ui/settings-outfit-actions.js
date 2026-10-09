@@ -3,16 +3,15 @@ import { normalizeMoodGroups } from '../../scene/mood-groups.js';
 import { classifySceneKey } from '../../scene/scene-directives.js';
 import { clearOutfitReview, loadOutfitReview, removeOutfitReview } from '../../scene/outfit-review-store.js';
 import { migrateSpriteKeys } from './sprite-key-migration.js';
-import { draftAssetLibrary, draftEffectiveAssets, rememberAssetScope } from '../../scene/asset-scope.js';
+import { CHARACTER_FIELDS, draftAssetLibrary, draftEffectiveAssets, rememberAssetScope } from '../../scene/asset-scope.js';
 import { getSillyTavernContext } from '../../host/tavern-helper-adapter.js';
 import { createSettingsDialogs } from './settings-dialog.js';
 import { beginSettingsProgress, remountSettingsNotice, SETTINGS_NOTICE_MS } from './settings-notice.js';
-import { pickChatMentions, readSourceMaterial } from '../../host/character-sources.js';
-import { collectOutfitClues } from '../../data/shujuku/outfit-clues.js';
+import { readSourceMaterial } from '../../host/character-sources.js';
 import { prepareWorldContext } from './world-context.js';
+import { wardrobeClues } from './expression-fill.js';
 
 const BLOCKED_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
-const CHARACTER_FIELDS = ['characters', 'characterOutfits', 'characterDna', 'characterAliases', 'statusAvatars'];
 const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
 const plain = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : null);
 
@@ -343,20 +342,12 @@ function handleOutfitReview(command, segs, ctx) {
 const COMMAND_RE = /^(scene-(?:add|rename|remove)-outfit(?:-(?:mood|word|scene))?|scene-set-outfit-(?:mood|avatar|wardrobe)-url|scene-set-outfit-note|scene-clear-outfit-avatar|scene-outfit-(?:tab|copy-slots)|outfit-review-(?:assign|create|dismiss|clear)|wardrobe-(?:add|rename|remove|generate-prompt|reference|nsfw|for-outfit|prompt))(?::(.*))?$/;
 
 // 服装区 action：返回 null 表示不归本模块处理。位置 / 头部标定 key 随改名迁移、随删除清理。
-// 写服装提示词前的背景：世界观（还没有世界设定提要就先提炼）、正文里描写这套衣服的段落、
-// 数据库里这个角色提到这套衣服的穿着记录（数据库记的是当前穿着，只留提到这套衣服名的，免得写成别的衣服）。
-async function wardrobeWritingBackground(ctx, globalObj, { character = '', outfit = '' } = {}) {
+// 写服装提示词前的背景：世界观（还没有世界设定提要就先提炼），加上正文、数据库里写这套衣服的线索（见 wardrobeClues）。
+async function wardrobeWritingBackground(ctx, globalObj, subject = {}) {
     const { settingsState, options, persistSettingsDraft } = ctx;
     const material = await readSourceMaterial(globalObj);
     const prepared = await prepareWorldContext({ settingsState, service: options.generatedAssets, globalObj, material, persist: persistSettingsDraft });
-    const assets = draftEffectiveAssets(settingsState);
-    const aliases = character && assets.characterAliases && Array.isArray(assets.characterAliases[character]) ? assets.characterAliases[character] : [];
-    const clues = character ? collectOutfitClues(material.tables, [character, ...aliases]) : { profile: [], worn: [] };
-    return {
-        world: prepared.world,
-        context: pickChatMentions(material.chat, outfit),
-        clues: [...clues.profile, ...clues.worn].filter((line) => outfit && String(line).includes(outfit)).join('\n'),
-    };
+    return { world: prepared.world, ...wardrobeClues(material, draftEffectiveAssets(settingsState), subject) };
 }
 
 export function handleOutfitAction(normalizedAction, ctx) {

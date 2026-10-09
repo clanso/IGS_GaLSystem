@@ -66,12 +66,13 @@ test('gate:floor-assets:missing-expressions-only-the-moods-each-registered-outfi
         sceneAssets: assets,
     });
     // 冬月穿校服：开心 / 高兴归「喜悦」只补一张，平静归「平和」已有，严肃归「默认」不补；小林原装缺「愤怒」。
+    // 还没建的「睡袍-孕晚期」记成新服装（先建再画），不当原装或「睡袍」去画；没登记的路人交给素材补全。
     assert.deepEqual(missing.groups, [
         { character: '冬月', outfit: '校服', moods: ['喜悦', '委屈'] },
         { character: '小林', outfit: '', moods: ['愤怒'] },
+        { character: '小林', outfit: '睡袍-孕晚期', create: true, moods: ['害羞'] },
     ]);
-    // 还没登记的「睡袍-孕晚期」不能当原装或「睡袍」去画；归不进情绪组的词单独列出；没登记的路人交给素材补全。
-    assert.deepEqual(missing.pendingOutfits, [{ character: '小林', outfit: '睡袍-孕晚期' }]);
+    // 归不进情绪组的词单独列出。
     assert.deepEqual(missing.unmapped, [{ character: '冬月', mood: '咕咕' }]);
 });
 

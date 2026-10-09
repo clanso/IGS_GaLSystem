@@ -151,7 +151,8 @@ import {
 import { buildReaderSourceSignature, createReaderSourceCache } from './reader-source-cache.js';
 import { createImageResourceCache } from '../../media/resource-cache.js';
 import { collectFloorAssetUrls, collectMissingExpressions } from './floor-asset-prefetch.js';
-import { checkExpressionGroups, expressionFillQuestion, expressionFillSummary, expressionGroupLabel, expressionProgressText, fillFloorExpressions } from './expression-fill.js';
+import { checkExpressionGroups, expressionFillQuestion, expressionFillSummary, expressionGroupLabel, expressionProgressText, fillFloorExpressions, wardrobeClues } from './expression-fill.js';
+import { readSourceMaterial } from '../../host/character-sources.js';
 import { prepareWorld } from './world-context.js';
 import { createChatStreamObserver } from '../../host/chat-stream-observer.js';
 import { findAcuDice, formatCheckMessage, resolveDiceCommand } from '../../choices/dice-check.js';
@@ -2363,10 +2364,12 @@ export function createIgsReaderHost(options = {}) {
             return { ok: true, reason: 'busy' };
         }
         current.assetGenerationPending = true;
+        // 点下去先亮生成细线：查已登记角色缺哪些表情要读图库，问用户之前不能没动静。
+        feedback('info', `第 ${messageId} 楼补全素材：正在检查缺的人物、场景和表情…`, true);
         try {
             const expressions = await planFloorExpressions(current, service);
             const fill = expressions.ready.length > 0 && await pageModal.confirm(expressionFillQuestion(expressions.ready));
-            feedback('info', `第 ${messageId} 楼补全素材：正在检查未登记的人物和场景…`, true);
+            if (fill) feedback('info', `第 ${messageId} 楼补全素材：正在补未登记的人物和场景…`, true);
             let result;
             let asset;
             try {
@@ -2399,7 +2402,7 @@ export function createIgsReaderHost(options = {}) {
         if (result.reason === 'already-decided') return { level: 'warn', text: '补全素材已跳过：当前楼层已处理，请等待当前任务完成后重试' };
         if (skipped[result.reason]) {
             const allDrawn = result.reason === 'nothing-missing' && !expressions.ready.length && !expressions.skipped.length
-                && !expressions.unmapped.length && !expressions.pendingOutfits.length;
+                && !expressions.unmapped.length;
             return { level: 'warn', skipped: true, text: `补全素材已跳过：${skipped[result.reason]}${allDrawn ? '，已登记角色用到的表情也都有图' : ''}` };
         }
         return { level: 'success', text: `补全素材完成：已生成 ${result.count || 0} 项素材，待确认` };
@@ -2413,7 +2416,7 @@ export function createIgsReaderHost(options = {}) {
 
     // 已登记角色这一楼用到、还没有图的表情，按角色和服装分组；没有带提示词的生成立绘、照着写不了的组挪到 skipped。
     async function planFloorExpressions(current, service) {
-        const none = { ready: [], skipped: [], unmapped: [], pendingOutfits: [] };
+        const none = { ready: [], skipped: [], unmapped: [] };
         if (typeof service.generateExpressionSet !== 'function' || typeof service.getImagePrompt !== 'function') return none;
         const payload = current.payload || {};
         try {
@@ -2427,7 +2430,7 @@ export function createIgsReaderHost(options = {}) {
                 readClues: (names) => collectOutfitClues(readStatusHudTablesSafe(), names),
             });
             const checked = missing.groups.length ? await checkExpressionGroups({ groups: missing.groups, service, assets: sceneAssets }) : none;
-            return { ready: checked.ready, skipped: checked.skipped, unmapped: missing.unmapped, pendingOutfits: missing.pendingOutfits };
+            return { ready: checked.ready, skipped: checked.skipped, unmapped: missing.unmapped };
         } catch (error) {
             // 查不出来就只做原来的素材补全，原因记进生图日志。
             if (options.imageJobLog && typeof options.imageJobLog.add === 'function') options.imageJobLog.add('warn', `查已登记角色缺的表情时出错：${(error && error.message) || error}`);
@@ -2435,11 +2438,23 @@ export function createIgsReaderHost(options = {}) {
         }
     }
 
-    // 写词和设置里的「表情差分」同一条路；每组画完存进这个角色那一项所在的一边，阅读器马上换上。
+    // 写词和设置里的「表情差分」同一条路；新服装先建好、补上衣柜提示词（和「待确认 → 生成提示词」同一条路）。
+    // 每组画完存进那一项所在的一边，阅读器马上换上。
     function runFloorExpressionFill(current, service, groups) {
         const globalObj = options.global || globalThis;
         const bridge = resolveBridgeConfigSnapshot({ mode: current.mode }).bridge;
         let world = null;
+        // 世界设定提要和设置页一样记在当前角色卡上；这一次点击里只提炼一回。
+        const getWorld = (report) => world || (world = prepareWorld({
+            assets: readCurrentSceneAssets(current),
+            service,
+            globalObj,
+            onProgress: report,
+            save: (summary) => mutateSceneLibrary((assets) => {
+                assets.worldSummary = summary;
+                return { ok: true };
+            }),
+        }).then((prepared) => prepared.world));
         return fillFloorExpressions({
             groups,
             service,
@@ -2452,17 +2467,11 @@ export function createIgsReaderHost(options = {}) {
                 return ok;
             },
             moodNoteOf: characterMoodNote,
-            // 世界设定提要和设置页一样记在当前角色卡上；这一次点击里只提炼一回。
-            getWorld: (report) => world || (world = prepareWorld({
-                assets: readCurrentSceneAssets(current),
-                service,
-                globalObj,
-                onProgress: report,
-                save: (summary) => mutateSceneLibrary((assets) => {
-                    assets.worldSummary = summary;
-                    return { ok: true };
-                }),
-            }).then((prepared) => prepared.world)),
+            getWorld,
+            wardrobeBackground: async (character, outfit, report) => {
+                const material = await readSourceMaterial(globalObj);
+                return { world: await getWorld(report), ...wardrobeClues(material, readCurrentSceneAssets(current), { character, outfit }) };
+            },
             nsfw: Boolean(bridge.autoIllustration && bridge.autoIllustration.nsfwEnabled === true),
             onProgress: (group, event) => {
                 if (state.activeReader === current) generationStrip.manual(expressionProgressText(expressionGroupLabel(group), event));
