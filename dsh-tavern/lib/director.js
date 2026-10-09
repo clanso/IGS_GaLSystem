@@ -2,27 +2,32 @@
 import { DIRECTOR_SYSTEM, DIRECTOR_USER, STYLE_HINTS, fill } from './prompts.js'
 import { unitsForPrompt } from './segment.js'
 import { EMOTIONS, SYMBOLS, CAMERAS, WEATHER, TIMES, TRANSITIONS, CARDS, MOODS, POSITIONS, pick } from './vocab.js'
+import { DEFAULT_CONFIG } from './config.js'
 
-/** 收完一次流式模型调用。llm.stream 的事件形状见 DSH llm 服务。 */
-export async function callModel(llm, { provider, model, system, user, maxTokens = 6000, temperature = 0.7, signal }) {
+/**
+ * 收完一次流式模型调用。llm.stream 的事件形状见 DSH llm 服务。
+ * onDelta(kind, text) 在每段新文字到达时回调（kind 是 text 或 reasoning），导演日志的实时输出靠它。
+ */
+export async function callModel(llm, { provider, model, system, user, maxTokens = 6000, temperature = 0.7, signal, onDelta }) {
   if (!llm || typeof llm.stream !== 'function') throw new Error('DSH 没有可用的 llm 服务')
   if (!provider || !model) throw new Error('没有可用的后台模型：请在「设置 → 导演」里选一个，或先在 Tavern 里配置后台模型')
   signal?.throwIfAborted()
   const chunks = llm.stream({ provider, model, system, temperature, maxTokens, signal, messages: [{ role: 'user', content: [{ type: 'text', text: user }] }] })
-  let output = '', failure = null, usage = null
+  let output = '', reasoning = '', failure = null, usage = null
   for await (const chunk of chunks) {
     signal?.throwIfAborted()
     if (!chunk || typeof chunk !== 'object') continue
-    if (chunk.type === 'text-delta' && typeof chunk.text === 'string') output += chunk.text
+    if (chunk.type === 'text-delta' && typeof chunk.text === 'string') { output += chunk.text; onDelta?.('text', chunk.text) }
+    else if (chunk.type === 'reasoning-delta' && typeof chunk.text === 'string') { reasoning += chunk.text; onDelta?.('reasoning', chunk.text) }
     else if (chunk.type === 'usage') usage = chunk.usage ?? null
     else if (chunk.type === 'finish') {
       const reason = chunk.reason ?? {}
-      if (reason.kind === 'error' || reason.kind === 'aborted') failure = reason.failure?.message || (reason.kind === 'aborted' ? '已取消' : '模型调用失败')
+      if (reason.kind === 'error' || reason.kind === 'aborted') failure = { message: reason.failure?.message || (reason.kind === 'aborted' ? '已取消' : '模型调用失败'), code: reason.failure?.code || '' }
     }
   }
   signal?.throwIfAborted()
-  if (failure && !output.trim()) throw new Error(failure)
-  return { text: output, usage }
+  if (failure && !output.trim()) throw Object.assign(new Error(failure.message), { code: failure.code })
+  return { text: output, reasoning, usage }
 }
 
 /** 从模型输出里抠出 JSON 对象：容忍代码块、前后废话、思维链。 */
@@ -121,7 +126,7 @@ export function previousBrief(previous) {
   return `地点：${s.location || '未知'}；时段：${s.time}；天气：${s.weather}；在场：${who}${previous.summary ? '；剧情：' + previous.summary : ''}`
 }
 
-export function cardContextBrief(context, limit = 2400) {
+function cardContextText(context) {
   if (!context) return ''
   const parts = []
   if (context.description) parts.push('【人物卡】' + context.description)
@@ -131,36 +136,120 @@ export function cardContextBrief(context, limit = 2400) {
     if (!entry?.content) continue
     parts.push(`【设定·${entry.title || '条目'}】${entry.content}`)
   }
-  let text = parts.join('\n')
-  if (text.length > limit) text = text.slice(0, limit) + '…'
+  return parts.join('\n')
+}
+
+export function cardContextBrief(context, limit = DEFAULT_CONFIG.director.contextChars) {
+  let text = cardContextText(context)
+  if (text.length > limit) text = limit > 0 ? text.slice(0, limit) + '…' : ''
   return text ? '【资料（仅供判断人物与外貌，勿复述）】\n' + text : ''
 }
 
+const CJK = /[\u3000-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]/g
+/** 粗估 token：中日韩文字按 1 字 1 token，其余按 3 个字符 1 token（偏保守，宁可多留余量）。 */
+export function estimateTokens(text) {
+  const s = String(text || '')
+  const cjk = (s.match(CJK) || []).length
+  return cjk + Math.ceil((s.length - cjk) / 3)
+}
+
+/** 输出至少留这么多 token；窗口只用九成，给各家分词差异留余量。 */
+const MIN_OUTPUT = 4096
+const WINDOW_SHARE = 0.9
+
 /**
- * 跑一次导演。解析失败时带着错误再要一次（只重试一次，不额外收费请求图片）。
+ * 模型因为「最大输出」或「输入 + 输出超出上下文」拒绝时，算一个能过的最大输出；不是这类错误返回 0。
+ * 报错里写了上限（如 at most 16384 / valid range [1, 8192]）就用它，否则退到模型默认输出或 8192。
  */
-export async function direct({ llm, provider, model, units, previous, castList, context, config, backend, signal }) {
+export function retryMaxTokens(error, requested, info) {
+  const text = `${error?.code || ''} ${error?.message || ''}`
+  const context = /CONTEXT_WINDOW|context (?:length|window|limit)/i.test(text)
+  if (!context && !/max[_ ]?(?:completion[_ ]?)?tokens|output tokens/i.test(text)) return 0
+  const stated = context ? [] : (text.match(/\d{3,7}/g) || []).map(Number).filter(n => n >= 256 && n < requested)
+  const next = stated.length ? Math.max(...stated) : Math.min(Math.floor(requested / 2), Number(info?.defaultMaxTokens) || 8192)
+  return next >= 256 && next < requested ? next : 0
+}
+
+/**
+ * 跑一次导演。
+ * - 知道模型窗口时先按窗口收紧：输入太长就缩资料，输入 + 最大输出装不下就降最大输出；
+ * - 模型拒绝最大输出时按它给的上限重试一次；解析失败时带着错误再要一次；
+ * - trace 是调用方传进来的记录（导演日志）：填上实际发出去的提示词、参数和每次尝试的原始输出、思考、用量、错误；
+ *   onProgress 在流式输出、尝试开始 / 结束时回调。
+ */
+export async function direct({ llm, provider, model, units, previous, castList, context, config, backend, signal, trace = {}, onProgress }) {
   const maxImages = Math.max(0, Math.min(4, Number(config.images?.maxPerTurn ?? 1)))
   const system = fill(config.director?.systemPrompt || DIRECTOR_SYSTEM, {
     maxImages: String(maxImages),
     styleHint: STYLE_HINTS[backend] || STYLE_HINTS.novelai,
   }) + (maxImages === 0 ? '\n\n本次不需要插画：images 给空数组。' : '')
-  const user = fill(DIRECTOR_USER, {
-    context: cardContextBrief(context, Number(config.director?.contextChars ?? 2400)),
+  const promptFor = limit => fill(DIRECTOR_USER, {
+    context: cardContextBrief(context, limit),
     previous: previousBrief(previous),
     cast: castBrief(castList),
     units: unitsForPrompt(units),
   })
-  const call = extra => callModel(llm, {
-    provider, model, system, user: user + (extra || ''), signal,
-    maxTokens: Number(config.director?.maxTokens ?? 6000),
-    temperature: Number(config.director?.temperature ?? 0.7),
-  })
-  let result = await call()
+  const notes = []
+  const contextLength = cardContextText(context).length
+  const wantedChars = Math.min(contextLength, Number(config.director?.contextChars ?? DEFAULT_CONFIG.director.contextChars))
+  let contextChars = wantedChars
+  let maxTokens = Number(config.director?.maxTokens ?? DEFAULT_CONFIG.director.maxTokens)
+  let user = promptFor(contextChars)
+  const info = provider && model ? await Promise.resolve(llm?.resolveModelInfo?.(provider, model, signal)).catch(() => null) : null
+  const window = Number(info?.context?.contextWindow) || 0
+  if (window) {
+    const usable = Math.floor(window * WINDOW_SHARE)
+    for (let i = 0; i < 8 && contextChars > 0; i++) {
+      const over = estimateTokens(system) + estimateTokens(user) + MIN_OUTPUT - usable
+      if (over <= 0) break
+      contextChars = Math.max(0, contextChars - over - 500)
+      user = promptFor(contextChars)
+    }
+    if (contextChars < wantedChars) notes.push(`资料太长，按模型窗口（${window} token）从 ${wantedChars} 字收到 ${contextChars} 字`)
+    const input = estimateTokens(system) + estimateTokens(user)
+    const fit = Math.min(maxTokens, Math.max(MIN_OUTPUT, usable - input))
+    if (fit < maxTokens) {
+      maxTokens = fit
+      notes.push(`输入约 ${input} token，为装进模型窗口（${window}），最大输出收到 ${maxTokens}`)
+    }
+  }
+  Object.assign(trace, { provider, model, window, outputDefault: Number(info?.defaultMaxTokens) || 0, contextLength, contextChars, maxTokens, temperature: Number(config.director?.temperature ?? 0.7), notes, system, user, attempts: [] })
+  onProgress?.()
+
+  const attempt = async (note, extra = '') => {
+    const record = { at: Date.now(), ms: 0, maxTokens, note, output: '', reasoning: '', usage: null, error: '' }
+    trace.attempts.push(record)
+    onProgress?.()
+    try {
+      const result = await callModel(llm, {
+        provider, model, system, user: user + extra, signal, maxTokens, temperature: trace.temperature,
+        onDelta: (kind, text) => { record[kind === 'reasoning' ? 'reasoning' : 'output'] += text; onProgress?.() },
+      })
+      record.usage = result.usage
+      return result
+    } catch (error) {
+      record.error = String(error?.message || error).slice(0, 600)
+      throw error
+    } finally {
+      record.ms = Date.now() - record.at
+      onProgress?.()
+    }
+  }
+  const parse = result => {
+    try { return extractJson(result.text) } catch (error) { trace.attempts.at(-1).error = error.message; throw error }
+  }
+
+  let result
+  try { result = await attempt('') } catch (error) {
+    const next = signal?.aborted ? 0 : retryMaxTokens(error, maxTokens, info)
+    if (!next) throw error
+    maxTokens = trace.maxTokens = next
+    result = await attempt(`模型拒绝了这个最大输出，改用 ${next} 重试`)
+  }
   let raw
-  try { raw = extractJson(result.text) } catch (error) {
-    result = await call(`\n\n上一次输出无法解析（${error.message}）。只输出一个合法 JSON 对象。`)
-    raw = extractJson(result.text)
+  try { raw = parse(result) } catch (error) {
+    result = await attempt('上一次输出无法解析，带着错误再要一次', `\n\n上一次输出无法解析（${error.message}）。只输出一个合法 JSON 对象。`)
+    raw = parse(result)
   }
   return { script: normalizeScript(raw, units, { previous, maxImages }), usage: result.usage }
 }

@@ -17,6 +17,8 @@
 | ![生图渠道](docs/screenshots/16-settings-backend.webp) | ![画风](docs/screenshots/17-settings-style.webp) |
 | ![夜金皮肤](docs/screenshots/18-skin-noir.webp) | ![赛博皮肤](docs/screenshots/18-skin-cyber.webp) |
 | ![导演整理中（聊天）](docs/screenshots/19-chat-directing.webp) | ![导演整理中（剧场）](docs/screenshots/20-theater-directing.webp) |
+| ![导演日志：实时输出](docs/screenshots/22-director-live.webp) | ![导演日志：整理结果](docs/screenshots/23-director-result.webp) |
+| ![导演日志：提示词](docs/screenshots/24-director-prompt.webp) | ![NovelAI V5：透明底立绘、引导缩放、种子](docs/screenshots/26-settings-nai-v5.webp) |
 
 <p align="center"><img src="docs/screenshots/21-mobile.webp" width="300" alt="手机竖屏"></p>
 
@@ -49,6 +51,18 @@ npm test
 - **消息按钮**：每条回复上有「🎬 剧场」（从这一轮开始看）和「🖼 配一张」（让导演为这一轮补一张 CG）。
 - 想让剧场在每轮写完后自动弹出，打开设置里的「新一轮写完后自动打开剧场」。
 
+## 导演日志
+
+后台导演不是黑箱。剧场右上角的「导演整理中 ›」、快捷栏的 DIR、标题菜单、设置 → 导演，以及聊天里场景卡上的「看导演在写什么」都能打开导演日志：
+
+- **实时输出**：导演整理时，模型吐出的每个字（和它的思考过程，模型支持的话）实时滚动；觉得跑偏了可以直接「停止整理」，这一轮先按原文演。
+- **整理结果**：解析后的场景（地点、时段、天气、配乐、转场、背景提示词）、站位，以及**逐句**标注：每个正文单元被判成谁在说、什么表情、弹什么漫画符号、用什么镜头、是不是卡片；还有选项、插画分镜和外貌档案的改动。
+- **原始输出**：每次请求的原文、用时、最大输出、用量（输入 / 输出 / 思考 token），解析失败或被模型拒绝的报错，以及插件为什么重试。
+- **提示词**：实际发给模型的系统提示词和用户消息全文，可以一键复制去别处调试。
+- 每局保留最近 30 次记录，单独存在 `games/<局>.director.json`，删局时一起删。
+
+最大输出默认 128000、资料长度默认 1000000 字（Claude Opus / Sonnet 5.5 的输出上限和上下文量级）。插件会问 DSH 这个模型的上下文窗口：资料太长就自动缩短，输入加最大输出装不下就把最大输出往下收；模型仍然拒绝这个最大输出时，按它报错里给的上限重试一次。每次实际用了多少都写在导演日志里。
+
 ## 剧场
 
 - **舞台**：背景按「AI 生成的地点背景 → IGS 背景库（72 张）→ 程序绘制的天空与天际线」依次取，时段和天气会给画面调色；转场有溶解、电影黑边、横扫、圆形收缩、百叶、黑场、白闪几种。
@@ -72,12 +86,12 @@ npm test
 - **改词**：在鉴赏里打开任意一张图，可以直接改 tag、描述、负面词、横竖构图和种子，或者让 AI 按你的一句话改写提示词，再看最终发给模型的完整提示词。
 - **立绘与表情**：角色首次登场自动生成立绘；可选按表情生成差分（会多花钱，默认关）；人物志里能逐个表情生成或上传自己的图。
 - **生图渠道**：
-  - NovelAI：官方接口，也可以加多个中转地址来回切换；模型、采样器、步数、CFG 可调。
-  - ComfyUI：简单模式填 checkpoint 即可；高级模式导入 API 格式的工作流 JSON，用 `%prompt%`、`%negative%`、`%width%`、`%seed%` 这类占位符接参数。
+  - NovelAI：官方接口，也可以加多个中转地址来回切换。内置 V5 Full / Curated、V4.5、V4、V3 等模型，官方出了新模型直接手填 ID；采样器、步数、提示词引导、引导缩放（Prompt Guidance Rescale）、噪声调度、Variety+ 可调。V5 可以给立绘开**透明底**（默认开），立绘站在场景里不带白底。
+  - ComfyUI：简单模式选 checkpoint 即可；高级模式导入 API 格式的工作流 JSON，用 `%prompt%`、`%negative%`、`%width%`、`%seed%` 这类占位符接参数。
   - OpenAI 兼容的图片接口（gpt-image-1 等）。
-  - Stable Diffusion WebUI（A1111 / Forge）。
+  - Stable Diffusion WebUI（A1111 / Forge）：可以选底模、采样器和调度器，只对插件的请求生效。
 
-  每个渠道都有「测试连接」。
+  ComfyUI、WebUI 和 OpenAI 兼容接口的模型 / 采样器列表直接从服务器实时读取，跟着你那边的更新走；NovelAI 没有公开的模型列表接口，所以用内置列表加手填。每个渠道都有「测试连接」；种子可以固定（-1 为每张随机），鉴赏里改词时还能给单张指定种子。
 
 ## 隐私与密钥
 
@@ -99,7 +113,7 @@ npm run screenshots    # 需要 playwright；截图输出到 .tmp-screenshots/
 ## 实现说明
 
 - 宿主半边：`lib/`。`segment.js` 把正文切成旁白 / 台词 / 心声单元；`director.js` 和 `prompts.js` 负责导演提示词和结果校验；`engine.js` 管排队、出图、挂载到正文；`cast.js` 是外貌库；`image/` 是四个生图渠道。
-- 浏览器半边：`src/client/`，打包成 `client.js`。React 由 DSH 提供，不打进包里。
+- 浏览器半边：`src/client/`，打包成 `client.js`。React 由 DSH 提供，不打进包里。导演日志面板在 `src/client/theater/DirectorLog.jsx`，后端记录在 `engine.js` 的「导演日志」一节，接口是 `/director-log`（长轮询，和对局视图分开推送）。
 - 本插件与 [IGS_GaLSystem](https://github.com/Anyno001/IGS_GaLSystem) 同仓库：漫画符号 SVG 与样式、背景库、配乐目录直接复用 IGS 的代码和素材。
 - 功能参考了 [bigmalove/galgame](https://github.com/bigmalove/galgame) 和柏宝绘（ST-BaiBai-Image），代码全部重新编写，没有复制这两个项目和 DSH Tavern 本身的代码或样式。
 

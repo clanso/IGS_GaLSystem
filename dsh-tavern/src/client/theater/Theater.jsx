@@ -5,6 +5,7 @@ import { buildBeats, TIME_LABEL, WEATHER_LABEL, MOOD_LABEL, EMOTION_LABEL, pickB
 import { Backdrop, Cast, CgLayer, TitleCard, Flash, Particles, useCamera } from './Stage.jsx'
 import { DialogBox, SceneCard, Choices, useTypewriter } from './Dialog.jsx'
 import { Backlog, Gallery, CastPanel, Settings } from './Panels.jsx'
+import { DirectorLog } from './DirectorLog.jsx'
 import { playBgm, stopBgm, sfx } from './audio.js'
 import { loadSkinFonts } from './skins.js'
 
@@ -189,6 +190,7 @@ function Theater({ gameId, view, viewError, cfg, startTurn, panel: initialPanel,
       { id: 'auto', label: 'AUTO', title: '自动播放（A）', on: auto, run: () => { setAuto(v => !v); setSkip(false) } },
       { id: 'skip', label: 'SKIP', title: '快进（按住 Ctrl）', on: skip, run: () => { setSkip(v => !v); setAuto(false) } },
       { id: 'log', label: 'LOG', title: '回想（L）', run: () => setPanel('log') },
+      { id: 'director', label: 'DIR', title: '导演日志：每次后台整理的提示词、实时输出和结果', run: () => setPanel('director') },
       { id: 'cg', label: 'CG', title: '鉴赏', run: () => setPanel('gallery') },
       { id: 'cast', label: 'CAST', title: '人物志', run: () => setPanel('cast') },
       { id: 'hide', label: 'HIDE', title: '隐藏界面（H）', run: () => setHidden(true) },
@@ -208,6 +210,7 @@ function Theater({ gameId, view, viewError, cfg, startTurn, panel: initialPanel,
       try { await api.direct(gameId, 0).catch(() => api.direct(gameId, 1)); toast('开场已整理'); setTitle(false) } catch (e) { toast(String(e.message || e), 'error') }
     } } : null,
     beats.length ? { id: 'log', label: '回想', en: 'Backlog', run: () => setPanel('log') } : null,
+    gameId ? { id: 'director', label: '导演日志', en: 'Director', run: () => setPanel('director') } : null,
     { id: 'gallery', label: '鉴赏', en: 'Gallery', run: () => setPanel('gallery') },
     { id: 'cast', label: '人物志', en: 'Characters', run: () => setPanel('cast') },
     { id: 'settings', label: '设置', en: 'Config', run: () => setPanel('settings') },
@@ -244,7 +247,7 @@ function Theater({ gameId, view, viewError, cfg, startTurn, panel: initialPanel,
         )}
         {!title && (
           <div className="igsd-topright" onClick={e => e.stopPropagation()}>
-            {directing && <span className="igsd-pill is-busy">导演整理中</span>}
+            {directing && <button type="button" className="igsd-pill is-busy is-link" title="看导演正在写什么" onClick={() => setPanel('director')}>导演整理中 ›</button>}
             {drawing > 0 && <span className="igsd-pill is-busy">出图 {drawing}</span>}
             {track && <span className="igsd-pill" title={`${track.name} — ${track.credit}`}>♪ {track.name}</span>}
             {viewError && <span className="igsd-pill igsd-err" title={viewError}>连接中断，重连中</span>}
@@ -278,7 +281,8 @@ function Theater({ gameId, view, viewError, cfg, startTurn, panel: initialPanel,
         {panel === 'log' && <Backlog beats={beats} index={index} gameId={gameId} onClose={() => setPanel('')} onJump={i => { go(i); setPanel(''); setTitle(false) }} />}
         {panel === 'gallery' && <Gallery view={view} gameId={gameId} focusId={panelArg} onClose={() => setPanel('')} />}
         {panel === 'cast' && <CastPanel view={view} gameId={gameId} onClose={() => setPanel('')} />}
-        {panel === 'settings' && <Settings onClose={() => setPanel('')} />}
+        {panel === 'director' && <DirectorLog gameId={gameId} focusTurn={panelArg} onClose={() => setPanel('')} />}
+        {panel === 'settings' && <Settings onClose={() => setPanel('')} onDirectorLog={gameId ? () => setPanel('director') : null} />}
       </div>
     </div>
   )

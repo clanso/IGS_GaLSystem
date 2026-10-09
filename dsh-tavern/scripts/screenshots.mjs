@@ -122,6 +122,23 @@ try {
   await sleep(1800)
   await settle(800)
   await shot('20-theater-directing')
+  // 导演日志：点「导演整理中」看实时输出；整理完看结果和实际发出的提示词
+  await click('.igsd-pill.is-link', 2600)
+  await shot('22-director-live')
+  await page.locator('.igsd-dlog-row.is-on .igsd-dlog-status.is-ok').waitFor({ timeout: 30000 })
+  await sleep(1200)
+  await shot('23-director-result')
+  await click('.igsd-dlog-tabs .igsd-tab:has-text("提示词")', 700)
+  await shot('24-director-prompt')
+  await page.keyboard.press('Escape'); await sleep(300)
+  // NovelAI V5：透明底立绘、引导缩放、种子
+  await click('.igsd-quick button:has-text("CONFIG")', 800)
+  await click('.igsd-tab:has-text("导演")', 800); await shot('25-settings-director')
+  await click('.igsd-tab:has-text("生图渠道")', 800)
+  await page.locator('.igsd-field', { hasText: '模型' }).locator('select').first().selectOption('nai-diffusion-5-full')
+  await sleep(1200)
+  await shot('26-settings-nai-v5')
+  await page.keyboard.press('Escape'); await sleep(300)
   await page.keyboard.press('Escape')
   await sleep(500)
 

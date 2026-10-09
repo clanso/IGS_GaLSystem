@@ -1,9 +1,11 @@
-// 剧场里的四个面板：回想（Backlog）、鉴赏（CG / 背景 / 重画 / 改词）、人物志（外貌档案）、设置。
+// 剧场里的四个面板：回想（Backlog）、鉴赏（CG / 背景 / 重画 / 改词）、人物志（外貌档案）、设置。导演日志在 DirectorLog.jsx。
 import React from 'react'
 import { api, assetUrl, toast, useConfig, patchConfig, setConfig } from '../api.js'
 import { EMOTION_LABEL, TIME_LABEL, WEATHER_LABEL, MOOD_LABEL, cgSrc } from './playback.js'
 import { Silhouette } from './Stage.jsx'
 import { SKINS } from './skins.js'
+import { modelKey, qualityFor, negativeFor } from '../../../lib/image/style.js'
+import { naiModelInfo } from '../../../lib/image/nai-models.js'
 
 const STATUS_LABEL = { queued: '排队中', running: '绘制中', failed: '失败', cancelled: '已取消', ready: '' }
 
@@ -326,6 +328,34 @@ function Select({ value, options, onChange }) {
   return <select className="igsd-select" value={value} onChange={e => onChange(e.target.value)}>{options.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select>
 }
 
+/** 模型选择：有列表时下拉选（列表里没有的当前值也保留），随时可以切到手动填写。 */
+function ModelField({ value, options, onCommit, placeholder, emptyLabel }) {
+  const [manual, setManual] = React.useState(false)
+  if (manual || !options.length) {
+    return (
+      <div className="igsd-row">
+        <Text value={value} placeholder={placeholder} style={{ flex: 1, width: 'auto' }} onCommit={onCommit} />
+        {options.length > 0 && <button type="button" className="igsd-btn" onClick={() => setManual(false)}>从列表选</button>}
+      </div>
+    )
+  }
+  const known = !value || options.some(o => o.id === value)
+  const opts = [
+    ...(emptyLabel ? [['', emptyLabel]] : []),
+    ...(known ? [] : [[value, value + '（当前）']]),
+    ...options.map(o => [o.id, o.name]),
+    ['__manual', '手动填写…'],
+  ]
+  return <Select value={value} options={opts} onChange={v => (v === '__manual' ? setManual(true) : onCommit(v))} />
+}
+/** 列表里的字符串选项；当前值不在列表里时保留并标注。 */
+function listOptions(list, value, emptyLabel) {
+  const opts = (list || []).map(v => [v, v])
+  if (value && !(list || []).includes(value)) opts.unshift([value, value + '（当前）'])
+  if (emptyLabel) opts.unshift(['', emptyLabel])
+  return opts
+}
+
 function KeyInput({ backend, endpoint, has }) {
   const [value, setValue] = React.useState('')
   const [busy, run] = useBusy()
@@ -342,13 +372,23 @@ function KeyInput({ backend, endpoint, has }) {
 function BackendSection({ data }) {
   const cfg = data.config
   const backend = cfg.images.backend
-  const presets = data.presets || {}
   const [busy, run] = useBusy()
   const [test, setTest] = React.useState(null)
-  const [checkpoints, setCheckpoints] = React.useState([])
+  const [list, setList] = React.useState(null)
   const [relay, setRelay] = React.useState({ name: '', baseURL: '' })
   const p = (section, patch) => patchConfig({ [section]: patch }).catch(e => toast(e.message, 'error'))
-  const doTest = () => run('t', async () => { const r = await api.test(); setTest(r); if (r.checkpoints) setCheckpoints(r.checkpoints) })
+  // 模型列表跟着渠道、地址和 Key 走：换了任何一个就重新读。
+  const source = backend === 'novelai' ? '' : [cfg[backend].baseURL, cfg[backend].authType, data.keys[backend]].join('|')
+  const loadList = () => run('m', async () => setList(await api.models()))
+  React.useEffect(() => { setList(null); loadList() }, [backend, source])
+  const models = (list && list.backend === backend && list.models) || []
+  const samplers = (list && list.backend === backend && list.samplers) || []
+  const schedulers = (list && list.backend === backend && list.schedulers) || []
+  const modelHint = list ? list.note : '正在读取模型列表…'
+  const refresh = <button type="button" className="igsd-btn" disabled={busy === 'm'} onClick={loadList}>{busy === 'm' ? '读取中…' : '刷新列表'}</button>
+  const doTest = () => run('t', async () => { setTest(await api.test()); if (backend !== 'novelai') loadList() })
+  // V5 起固定 karras、没有 Variety+、支持透明底；没见过的模型按名字里的版本号判断（与宿主一致）。
+  const nai = naiModelInfo(cfg.novelai.model) || {}
   const auth = section => (
     <Field label="鉴权"><Select value={cfg[section].authType} onChange={v => p(section, { authType: v })} options={[['none', '无'], ['bearer', 'Bearer Token'], ['basic', 'Basic（用户名:密码）']]} /></Field>
   )
@@ -378,11 +418,22 @@ function BackendSection({ data }) {
             </div>
           </Field>
           <Field label="Key"><KeyInput backend="novelai" endpoint={cfg.novelai.endpoint} has={data.keys['novelai:' + cfg.novelai.endpoint]} /></Field>
-          <Field label="模型"><Select value={cfg.novelai.model} onChange={v => p('novelai', { model: v })} options={Object.entries(presets.naiModels || {}).map(([k, m]) => [k, m.label])} /></Field>
-          <Field label="采样器"><Select value={cfg.novelai.sampler} onChange={v => p('novelai', { sampler: v })} options={(presets.naiSamplers || []).map(s => [s, s])} /></Field>
-          <Field label="步数 / CFG">
+          <Field label="模型" hint={modelHint}><ModelField value={cfg.novelai.model} options={models} placeholder="nai-diffusion-…" onCommit={v => p('novelai', { model: v })} /></Field>
+          <Field label="采样器"><Select value={cfg.novelai.sampler} onChange={v => p('novelai', { sampler: v })} options={listOptions(samplers, cfg.novelai.sampler)} /></Field>
+          <Field label="步数 / 提示词引导">
             <div className="igsd-row"><Text type="number" style={{ width: '8cqw' }} value={cfg.novelai.steps} onCommit={v => p('novelai', { steps: v })} /><Text type="number" style={{ width: '8cqw' }} value={cfg.novelai.scale} onCommit={v => p('novelai', { scale: v })} /></div>
           </Field>
+          <Field label="引导缩放" hint="Prompt Guidance Rescale，0–1。提示词引导调高后画面发灰、过饱和时往上加一点。">
+            <input type="range" min="0" max="1" step="0.02" value={cfg.novelai.cfgRescale} onChange={e => p('novelai', { cfgRescale: Number(e.target.value) })} style={{ width: '24cqw' }} /><span className="igsd-note" style={{ marginLeft: '1cqw' }}>{Number(cfg.novelai.cfgRescale).toFixed(2)}</span>
+          </Field>
+          {nai.v5 ? (
+            <Field label="透明底立绘" hint="V5 才有：立绘按透明背景生成，站在场景里不会带一块白底。CG 和背景不受影响。"><Toggle value={cfg.images.transparentSprites} onChange={v => p('images', { transparentSprites: v })} /></Field>
+          ) : (
+            <>
+              <Field label="噪声调度"><Select value={cfg.novelai.noiseSchedule} onChange={v => p('novelai', { noiseSchedule: v })} options={listOptions(schedulers, cfg.novelai.noiseSchedule)} /></Field>
+              {nai.v4 && <Field label="Variety+" hint="前几步不跟提示词，构图更多样；代价是没那么听话。"><Toggle value={cfg.novelai.variety} onChange={v => p('novelai', { variety: v })} /></Field>}
+            </>
+          )}
         </>
       )}
       {backend === 'comfyui' && (
@@ -393,9 +444,10 @@ function BackendSection({ data }) {
           <Field label="模式"><Select value={cfg.comfyui.mode} onChange={v => p('comfyui', { mode: v })} options={[['simple', '简单（只选底模）'], ['workflow', '导入工作流（API 格式 JSON）']]} /></Field>
           {cfg.comfyui.mode === 'simple' ? (
             <>
-              <Field label="底模" hint="点「测试连接」读取服务器上的模型列表。">
-                {checkpoints.length ? <Select value={cfg.comfyui.checkpoint} onChange={v => p('comfyui', { checkpoint: v })} options={[['', '（请选择）'], ...checkpoints.map(c => [c, c])]} /> : <Text value={cfg.comfyui.checkpoint} placeholder="xxx.safetensors" onCommit={v => p('comfyui', { checkpoint: v })} />}
+              <Field label="底模" hint={modelHint}>
+                <div className="igsd-row"><div style={{ flex: 1 }}><ModelField value={cfg.comfyui.checkpoint} options={models} emptyLabel="（请选择）" placeholder="xxx.safetensors" onCommit={v => p('comfyui', { checkpoint: v })} /></div>{refresh}</div>
               </Field>
+              {samplers.length > 0 && <Field label="采样器 / 调度器"><div className="igsd-row"><Select value={cfg.comfyui.sampler} onChange={v => p('comfyui', { sampler: v })} options={listOptions(samplers, cfg.comfyui.sampler)} /><Select value={cfg.comfyui.scheduler} onChange={v => p('comfyui', { scheduler: v })} options={listOptions(schedulers, cfg.comfyui.scheduler)} /></div></Field>}
               <Field label="步数 / CFG"><div className="igsd-row"><Text type="number" style={{ width: '8cqw' }} value={cfg.comfyui.steps} onCommit={v => p('comfyui', { steps: v })} /><Text type="number" style={{ width: '8cqw' }} value={cfg.comfyui.cfg} onCommit={v => p('comfyui', { cfg: v })} /></div></Field>
             </>
           ) : (
@@ -425,7 +477,9 @@ function BackendSection({ data }) {
           <Field label="API 地址"><Text value={cfg.openai.baseURL} onCommit={v => p('openai', { baseURL: v })} /></Field>
           <Field label="Key"><KeyInput backend="openai" has={data.keys.openai} /></Field>
           <Field label="接口"><Select value={cfg.openai.mode} onChange={v => p('openai', { mode: v })} options={[['images', '/images/generations'], ['chat', '/chat/completions（回复里带图的模型）']]} /></Field>
-          <Field label="模型"><Text value={cfg.openai.model} onCommit={v => p('openai', { model: v })} /></Field>
+          <Field label="模型" hint={modelHint}>
+            <div className="igsd-row"><div style={{ flex: 1 }}><ModelField value={cfg.openai.model} options={models} emptyLabel="（请选择）" placeholder="gpt-image-1" onCommit={v => p('openai', { model: v })} /></div>{refresh}</div>
+          </Field>
           <Field label="横 / 竖 / 方尺寸"><div className="igsd-row"><Text style={{ width: '10cqw' }} value={cfg.openai.landscapeSize} onCommit={v => p('openai', { landscapeSize: v })} /><Text style={{ width: '10cqw' }} value={cfg.openai.portraitSize} onCommit={v => p('openai', { portraitSize: v })} /><Text style={{ width: '10cqw' }} value={cfg.openai.squareSize} onCommit={v => p('openai', { squareSize: v })} /></div></Field>
         </>
       )}
@@ -434,9 +488,16 @@ function BackendSection({ data }) {
           <Field label="地址"><Text value={cfg.webui.baseURL} onCommit={v => p('webui', { baseURL: v })} /></Field>
           {auth('webui')}
           {cfg.webui.authType !== 'none' && <Field label="凭据"><KeyInput backend="webui" has={data.keys.webui} /></Field>}
+          <Field label="底模" hint={modelHint}>
+            <div className="igsd-row"><div style={{ flex: 1 }}><ModelField value={cfg.webui.model} options={models} emptyLabel="跟随服务器当前底模" placeholder="模型标题" onCommit={v => p('webui', { model: v })} /></div>{refresh}</div>
+          </Field>
+          {samplers.length > 0 && <Field label="采样器 / 调度器"><div className="igsd-row"><Select value={cfg.webui.sampler} onChange={v => p('webui', { sampler: v })} options={listOptions(samplers, cfg.webui.sampler)} /><Select value={cfg.webui.scheduler} onChange={v => p('webui', { scheduler: v })} options={listOptions(schedulers, cfg.webui.scheduler, '自动')} /></div></Field>}
           <Field label="步数 / CFG"><div className="igsd-row"><Text type="number" style={{ width: '8cqw' }} value={cfg.webui.steps} onCommit={v => p('webui', { steps: v })} /><Text type="number" style={{ width: '8cqw' }} value={cfg.webui.cfg} onCommit={v => p('webui', { cfg: v })} /></div></Field>
         </>
       )}
+      <Field label="种子" hint="-1 表示每张随机；填一个数字后所有图都用它，方便复现同一种构图。单张图可以在鉴赏的「改词」里另外指定。">
+        <Text type="number" style={{ width: '16cqw' }} value={cfg.images.seed} onCommit={v => p('images', { seed: v === '' ? -1 : v })} />
+      </Field>
       <Field label="连接">
         <div className="igsd-row">
           <button type="button" className="igsd-btn" disabled={busy === 't'} onClick={doTest}>{busy === 't' ? '测试中…' : '测试连接'}</button>
@@ -454,10 +515,10 @@ function StyleSection({ data }) {
   const artists = [...(presets.artists || []), ...(cfg.style.artists || [])]
   const current = artists.find(a => a.id === cfg.style.artist)
   const [draft, setDraft] = React.useState({ name: '', text: '' })
-  const modelKey = cfg.images.backend === 'novelai' ? cfg.novelai.model : cfg.images.backend === 'openai' ? 'openai' : 'sd'
+  const key = modelKey(cfg.images.backend, cfg)
   const p = patch => patchConfig({ style: patch }).catch(e => toast(e.message, 'error'))
-  const quality = cfg.style.quality && typeof cfg.style.quality[modelKey] === 'string' ? cfg.style.quality[modelKey] : (presets.quality || {})[modelKey] || ''
-  const negative = cfg.style.negative && typeof cfg.style.negative[modelKey] === 'string' ? cfg.style.negative[modelKey] : (presets.negative || {})[modelKey] || ''
+  const quality = qualityFor(cfg.style, key)
+  const negative = negativeFor(cfg.style, key)
   return (
     <>
       <div className="igsd-section">画风</div>
@@ -474,24 +535,24 @@ function StyleSection({ data }) {
           <button type="button" className="igsd-btn" disabled={!draft.text.trim()} onClick={() => { const id = 'a' + Date.now().toString(36); p({ artists: [...(cfg.style.artists || []), { id, name: draft.name || '我的画风', text: draft.text.trim() }], artist: id }); setDraft({ name: '', text: '' }) }}>保存并使用</button>
         </div>
       </Field>
-      <Field label="质量词"><div className="igsd-row"><Toggle value={cfg.style.useQuality} onChange={v => p({ useQuality: v })} /><span className="igsd-note">当前模型：{modelKey}</span></div></Field>
-      {cfg.style.useQuality && <Field label="质量词内容"><Text value={quality} onCommit={v => p({ quality: { ...(cfg.style.quality || {}), [modelKey]: v } })} /></Field>}
-      <Field label="负面词"><Text value={negative} onCommit={v => p({ negative: { ...(cfg.style.negative || {}), [modelKey]: v } })} /></Field>
+      <Field label="质量词"><div className="igsd-row"><Toggle value={cfg.style.useQuality} onChange={v => p({ useQuality: v })} /><span className="igsd-note">当前模型：{key}</span></div></Field>
+      {cfg.style.useQuality && <Field label="质量词内容"><Text value={quality} onCommit={v => p({ quality: { ...(cfg.style.quality || {}), [key]: v } })} /></Field>}
+      <Field label="负面词"><Text value={negative} onCommit={v => p({ negative: { ...(cfg.style.negative || {}), [key]: v } })} /></Field>
       <Field label="">
-        <button type="button" className="igsd-btn" onClick={() => { const q = { ...(cfg.style.quality || {}) }; const n = { ...(cfg.style.negative || {}) }; delete q[modelKey]; delete n[modelKey]; patchConfig({ style: { quality: q, negative: n } }) }}>恢复这个模型的默认质量词与负面词</button>
+        <button type="button" className="igsd-btn" onClick={() => { const q = { ...(cfg.style.quality || {}) }; const n = { ...(cfg.style.negative || {}) }; delete q[key]; delete n[key]; patchConfig({ style: { quality: q, negative: n } }) }}>恢复这个模型的默认质量词与负面词</button>
       </Field>
     </>
   )
 }
 
-function DirectorSection({ data }) {
+function DirectorSection({ data, onDirectorLog }) {
   const cfg = data.config
   const [llm, setLlm] = React.useState({ providers: [], models: [] })
   React.useEffect(() => { api.llm(cfg.director.provider).then(setLlm).catch(() => {}) }, [cfg.director.provider])
   const p = patch => patchConfig({ director: patch }).catch(e => toast(e.message, 'error'))
   return (
     <>
-      <div className="igsd-section">导演（后台整理）</div>
+      <div className="igsd-section">导演（后台整理）{onDirectorLog && <button type="button" className="igsd-btn" onClick={onDirectorLog}>查看导演日志</button>}</div>
       <Field label="自动整理" hint="每轮正文写完后，后台模型把它整理成场景：说话人、表情、站位、镜头、天气、选项、插画分镜。正文一字不改。"><Toggle value={cfg.director.auto} onChange={v => p({ auto: v })} /></Field>
       <Field label="模型" hint="留空跟随 Tavern 的后台模型。整理用的是便宜的小模型就够。">
         <div className="igsd-row">
@@ -501,8 +562,8 @@ function DirectorSection({ data }) {
             : <Text value={cfg.director.model} placeholder="模型 ID" onCommit={v => p({ model: v })} />)}
         </div>
       </Field>
-      <Field label="最大输出 / 温度"><div className="igsd-row"><Text type="number" style={{ width: '9cqw' }} value={cfg.director.maxTokens} onCommit={v => p({ maxTokens: v })} /><Text type="number" style={{ width: '7cqw' }} value={cfg.director.temperature} onCommit={v => p({ temperature: v })} /></div></Field>
-      <Field label="资料长度" hint="给导演看多少人物卡 / 世界书（字）；用来判断人物外貌。"><Text type="number" value={cfg.director.contextChars} onCommit={v => p({ contextChars: v })} /></Field>
+      <Field label="最大输出 / 温度" hint="默认 128000（Claude Opus / Sonnet 5.5 的输出上限）。模型窗口装不下时自动往下收；模型拒绝这个值时按它报的上限重试一次。导演日志里能看到实际用了多少。"><div className="igsd-row"><Text type="number" style={{ width: '9cqw' }} value={cfg.director.maxTokens} onCommit={v => p({ maxTokens: v })} /><Text type="number" style={{ width: '7cqw' }} value={cfg.director.temperature} onCommit={v => p({ temperature: v })} /></div></Field>
+      <Field label="资料长度" hint="给导演看多少人物卡 / 世界书（字），用来判断人物外貌。默认 1000000，等于不截断；超出模型窗口时自动缩短。"><Text type="number" value={cfg.director.contextChars} onCommit={v => p({ contextChars: v })} /></Field>
       <Field label="自定义提示词" hint="留空用内置导演提示词。可用 {{maxImages}} {{styleHint}}。">
         <textarea className="igsd-textarea" defaultValue={cfg.director.systemPrompt} onKeyDown={e => e.stopPropagation()} onBlur={e => { if (e.target.value !== cfg.director.systemPrompt) p({ systemPrompt: e.target.value }) }} />
       </Field>
@@ -552,7 +613,7 @@ export function LookSection({ data }) {
   )
 }
 
-export function Settings({ onClose, initialTab = 'look' }) {
+export function Settings({ onClose, onDirectorLog = null, initialTab = 'look' }) {
   const data = useConfig()
   const [tab, setTab] = React.useState(initialTab)
   return (
@@ -560,7 +621,7 @@ export function Settings({ onClose, initialTab = 'look' }) {
       actions={data && <span className={`igsd-pill${data.ready ? '' : ' igsd-err'}`}>{data.ready ? '生图已就绪' : data.readyReason}</span>}>
       {!data && <div className="igsd-note">读取设置中…</div>}
       {data && tab === 'look' && <LookSection data={data} />}
-      {data && tab === 'director' && <DirectorSection data={data} />}
+      {data && tab === 'director' && <DirectorSection data={data} onDirectorLog={onDirectorLog} />}
       {data && tab === 'images' && <BackendSection data={data} />}
       {data && tab === 'style' && <><StyleSection data={data} /><ImagesSection data={data} /></>}
       {data && <div className="igsd-note" style={{ marginTop: '2cqw' }}>Key 只存在 DSH 宿主（优先存进 DSH 凭据库：{data.secretStorage}），浏览器只看得到「有没有填」。</div>}

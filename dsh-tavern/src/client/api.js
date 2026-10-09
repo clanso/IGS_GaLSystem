@@ -32,12 +32,15 @@ export const api = {
   deleteImage: (gameId, imageId) => call('/image/delete', { gameId, imageId }),
   addImage: (gameId, turn, after, plan) => call('/image/add', { gameId, turn, after, plan }),
   cancel: (gameId, kind, id) => call('/cancel', { gameId, kind, id }),
+  directorLog: (gameId, since, signal) => call(`/director-log?gameId=${encodeURIComponent(gameId)}${since ? `&since=${since}` : ''}`, null, { signal }),
+  directorEntry: (gameId, id) => call(`/director-log?gameId=${encodeURIComponent(gameId)}&id=${encodeURIComponent(id)}`),
   place: (gameId, key) => call('/place/render', { gameId, key }),
   cast: (gameId, action, input) => call('/cast', { gameId, action, ...input }),
   config: () => call('/config'),
   patchConfig: patch => call('/config', { patch }),
   secret: (backend, endpoint, value) => call('/secret', { backend, endpoint, value }),
   test: () => call('/test', {}),
+  models: () => call('/models'),
   llm: provider => call(`/llm?provider=${encodeURIComponent(provider || '')}`),
 }
 
@@ -93,12 +96,12 @@ export async function patchConfig(patch) {
   return data
 }
 
-/** 长轮询订阅一局的视图。active=false 时不连。 */
-export function useGameView(gameId, active = true) {
-  const [view, setView] = React.useState(null)
+/** 长轮询：fetchOnce(since, signal) 返回 { rev, ... }；修订号变了才更新。active=false 时不连。 */
+function useLongPoll(key, active, fetchOnce) {
+  const [data, setData] = React.useState(null)
   const [error, setError] = React.useState('')
   React.useEffect(() => {
-    if (!gameId || !active) return undefined
+    if (!key || !active) return undefined
     let stopped = false
     const controller = new AbortController()
     let rev = 0
@@ -106,11 +109,11 @@ export function useGameView(gameId, active = true) {
     ;(async () => {
       while (!stopped) {
         try {
-          const data = await api.game(gameId, rev, controller.signal)
+          const next = await fetchOnce(rev, controller.signal)
           if (stopped) return
           failures = 0
           setError('')
-          if (data.rev !== rev || !rev) { rev = data.rev; setView(data.view) }
+          if (next.rev !== rev || !rev) { rev = next.rev; setData(next) }
         } catch (e) {
           if (stopped) return
           failures += 1
@@ -120,6 +123,18 @@ export function useGameView(gameId, active = true) {
       }
     })()
     return () => { stopped = true; controller.abort() }
-  }, [gameId, active])
-  return { view, error }
+  }, [key, active])
+  return { data, error }
+}
+
+/** 订阅一局的视图。 */
+export function useGameView(gameId, active = true) {
+  const { data, error } = useLongPoll(gameId, active, (since, signal) => api.game(gameId, since, signal))
+  return { view: data ? data.view : null, error }
+}
+
+/** 订阅一局的导演日志（列表 + 正在跑的实时输出）。 */
+export function useDirectorLog(gameId, active = true) {
+  const { data, error } = useLongPoll(gameId, active, (since, signal) => api.directorLog(gameId, since, signal))
+  return { log: data, error }
 }

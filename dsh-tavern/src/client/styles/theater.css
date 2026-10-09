@@ -266,6 +266,52 @@
 .igsd-log-name { font-family: var(--font-display); font-weight: 700; text-align: right; letter-spacing: .1em; }
 .igsd-log-turn { grid-column: 1 / -1; font-family: var(--font-latin); font-size: .95cqw; letter-spacing: .5em; color: var(--accent); padding-top: 1.4cqw; }
 
+/* 导演日志：左边历次记录，右边详情（实时输出 / 整理结果 / 原始输出 / 提示词）。两栏各自滚动。 */
+.igsd-dlog { display: grid; grid-template-columns: 22cqw minmax(0, 1fr); gap: 2cqw; height: 100%; }
+.igsd-dlog-side, .igsd-dlog-detail { min-height: 0; overflow: auto; scrollbar-width: thin; scrollbar-color: var(--accent2) transparent; }
+.igsd-dlog-side { display: flex; flex-direction: column; gap: .6cqw; padding-right: .4cqw; }
+.igsd-dlog-detail { padding-right: .6cqw; }
+.igsd-dlog-row { display: block; width: 100%; flex: none; text-align: left; padding: 1cqw 1.2cqw; border-radius: .8cqw; border: 1px solid var(--box-border); background: rgba(255, 255, 255, .03); transition: background .2s, border-color .2s; }
+.igsd-dlog-row:hover { background: rgba(255, 255, 255, .07); }
+.igsd-dlog-row.is-on { border-color: var(--accent); background: linear-gradient(100deg, color-mix(in oklab, var(--accent) 18%, transparent), color-mix(in oklab, var(--accent2) 8%, transparent)); }
+.igsd-dlog-row-head { display: flex; align-items: center; justify-content: space-between; gap: .6cqw; font-size: 1.15cqw; letter-spacing: .08em; }
+.igsd-dlog-row-meta { margin-top: .3cqw; font-size: .85cqw; color: var(--ink-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.igsd-dlog-row-sum { margin-top: .4cqw; font-size: .95cqw; line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.igsd-dlog-status { padding: .1cqw .7cqw; border-radius: 99px; border: 1px solid currentColor; font-size: .8cqw; letter-spacing: .1em; white-space: nowrap; }
+.igsd-dlog-status.is-running { color: var(--accent); animation: igsd-pulse 1.4s ease-in-out infinite; }
+.igsd-dlog-status.is-ok { color: #6ef0a8; }
+.igsd-dlog-status.is-failed { color: #ff8a8a; }
+.igsd-dlog-status.is-cancelled { color: var(--ink-dim); }
+.igsd-dlog-head { padding: 1.2cqw 1.4cqw; border-radius: 1cqw; background: rgba(255, 255, 255, .035); border: 1px solid var(--box-border); }
+.igsd-dlog-title { display: flex; align-items: center; gap: 1cqw; margin-bottom: .8cqw; font-family: var(--font-display); font-size: 1.7cqw; letter-spacing: .16em; }
+.igsd-dlog-title .igsd-spacer, .igsd-dlog-label .igsd-spacer { flex: 1; }
+.igsd-dlog-facts { display: grid; grid-template-columns: repeat(auto-fill, minmax(30cqw, 1fr)); gap: .3cqw 2cqw; font-size: 1cqw; line-height: 1.6; }
+.igsd-dlog-facts i { margin-right: .8cqw; font-style: normal; color: var(--ink-dim); letter-spacing: .08em; }
+.igsd-dlog-notice { margin-top: .6cqw; font-size: .95cqw; color: #ffd27a; }
+.igsd-dlog-error { margin: .6cqw 0; font-size: 1cqw; white-space: pre-wrap; word-break: break-word; }
+.igsd-dlog-tabs { padding: 1.2cqw 0 .4cqw; }
+.igsd-dlog-block { margin: 1cqw 0; }
+.igsd-dlog-label { display: flex; align-items: center; gap: .8cqw; margin-bottom: .5cqw; font-size: .95cqw; letter-spacing: .12em; color: var(--accent); }
+.igsd-btn.is-mini { padding: .2cqw .9cqw; font-size: .85cqw; white-space: nowrap; }
+.igsd-dlog-pre { margin: 0; max-height: 34cqw; overflow: auto; padding: 1cqw 1.2cqw; border-radius: .8cqw; background: rgba(0, 0, 0, .42); border: 1px solid var(--box-border); font-family: "JetBrains Mono", Consolas, monospace; font-size: .95cqw; line-height: 1.6; white-space: pre-wrap; word-break: break-word; color: var(--ink); scrollbar-width: thin; }
+.igsd-dlog-pre.has-cursor::after { content: "▍"; color: var(--accent); animation: igsd-pulse 1s steps(2) infinite; }
+.igsd-dlog-meter { display: flex; align-items: center; gap: .8cqw; margin: .4cqw 0; font-size: 1cqw; color: var(--ink-dim); }
+.igsd-dlog-dot { width: .8cqw; height: .8cqw; border-radius: 50%; background: var(--accent); box-shadow: 0 0 1cqw var(--accent); animation: igsd-pulse 1s ease-in-out infinite; }
+.igsd-dlog-think summary { margin: .4cqw 0; cursor: pointer; font-size: .95cqw; color: var(--ink-dim); }
+.igsd-dlog-chips { display: flex; flex-wrap: wrap; gap: .5cqw; }
+.igsd-dlog-chip { display: inline-flex; align-items: center; gap: .5cqw; padding: .2cqw .8cqw; border-radius: 99px; font-size: .9cqw; background: rgba(255, 255, 255, .06); border: 1px solid var(--box-border); }
+.igsd-dlog-chip i { font-style: normal; font-size: .8cqw; color: var(--ink-dim); }
+.igsd-dlog-lines { border-radius: .8cqw; border: 1px solid var(--box-border); overflow: hidden; }
+.igsd-dlog-line { display: grid; grid-template-columns: 4cqw minmax(0, 1fr) minmax(0, 24cqw); gap: 1.2cqw; align-items: start; padding: .7cqw 1cqw; border-bottom: 1px solid rgba(255, 255, 255, .06); font-size: 1cqw; line-height: 1.6; }
+.igsd-dlog-line:last-child { border-bottom: 0; }
+.igsd-dlog-line.is-plain { opacity: .6; }
+.igsd-dlog-uid { padding-top: .15cqw; font-family: var(--font-latin); font-size: .85cqw; letter-spacing: .1em; color: var(--accent); }
+.igsd-dlog-card { margin-bottom: .6cqw; padding: .8cqw 1cqw; border-radius: .8cqw; background: rgba(255, 255, 255, .035); border: 1px solid var(--box-border); font-size: 1cqw; line-height: 1.6; }
+.igsd-dlog-mono { margin-top: .4cqw; font-family: "JetBrains Mono", Consolas, monospace; font-size: .9cqw; word-break: break-word; }
+.igsd-dlog-list-plain { margin: 0; padding-left: 2cqw; font-size: 1.05cqw; line-height: 1.8; }
+.igsd-pill.is-link { cursor: pointer; transition: border-color .2s; }
+.igsd-pill.is-link:hover { border-color: var(--accent); }
+
 .igsd-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(20cqw, 1fr)); gap: 1.4cqw; }
 .igsd-thumb { position: relative; aspect-ratio: 16 / 10; border-radius: 1cqw; overflow: hidden; background: rgba(255, 255, 255, .04); border: 1px solid var(--box-border); cursor: zoom-in; transition: transform .25s, box-shadow .25s; }
 .igsd-thumb:hover { transform: translateY(-.4cqw); box-shadow: 0 1cqw 3cqw rgba(0, 0, 0, .5), 0 0 0 1px var(--accent); }
@@ -339,4 +385,19 @@
   .igsd-hud-place { font-size: 4cqw; } .igsd-hud-meta { font-size: 2.6cqw; }
   .igsd-choice, .igsd-free { width: 88cqw; font-size: 4cqw; }
   .igsd-title-logo { font-size: 11cqw; max-width: 90cqw; } .igsd-title-menu button { font-size: 4.4cqw; }
+  .igsd-dlog { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
+  .igsd-dlog-side { flex-direction: row; overflow-x: auto; padding: 0 0 1cqw; }
+  .igsd-dlog-row { width: 46cqw; }
+  .igsd-dlog-row-head, .igsd-dlog-title { font-size: 3.6cqw; }
+  .igsd-dlog-row-meta, .igsd-dlog-row-sum, .igsd-dlog-status, .igsd-dlog-label, .igsd-dlog-meter, .igsd-dlog-think summary, .igsd-dlog-chip, .igsd-dlog-chip i, .igsd-btn.is-mini { font-size: 2.8cqw; }
+  .igsd-dlog-facts, .igsd-dlog-notice, .igsd-dlog-error, .igsd-dlog-pre, .igsd-dlog-line, .igsd-dlog-card, .igsd-dlog-mono, .igsd-dlog-list-plain { font-size: 3cqw; }
+  .igsd-dlog-facts { grid-template-columns: 1fr; }
+  .igsd-dlog-pre { max-height: 90cqw; }
+  .igsd-dlog-line { grid-template-columns: 9cqw minmax(0, 1fr); }
+  .igsd-dlog-line > .igsd-dlog-chips { grid-column: 2; }
+  .igsd-dlog .igsd-note, .igsd-dlog-uid { font-size: 2.6cqw; }
+  .igsd-dlog-list-plain { padding-left: 6cqw; }
+  .igsd-panel-title { font-size: 6cqw; } .igsd-panel-en { font-size: 2.2cqw; }
+  .igsd-tab { padding: 1.2cqw 3cqw; font-size: 3.2cqw; }
+  .igsd-pill { padding: .8cqw 2.2cqw; font-size: 2.6cqw; }
 }

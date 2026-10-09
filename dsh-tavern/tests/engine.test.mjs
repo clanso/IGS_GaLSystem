@@ -133,3 +133,100 @@ test('gate: 导演输出坏 JSON 时重试一次，再失败则场景标记失�
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+async function until(check, ms = 3000) {
+  const end = Date.now() + ms
+  for (;;) {
+    const value = await check()
+    if (value) return value
+    if (Date.now() > end) throw new Error('等待超时')
+    await new Promise(r => setTimeout(r, 5))
+  }
+}
+
+/** 流式假模型：先思考、吐一半，等放行（或被停止）后吐完。 */
+function gatedLlm(reply) {
+  const gates = []
+  return {
+    gates,
+    resolveModelInfo: async () => ({ context: { contextWindow: 1000000 }, defaultMaxTokens: 128000 }),
+    stream(request) {
+      return (async function* () {
+        yield { type: 'reasoning-delta', text: '先认说话人。' }
+        yield { type: 'text-delta', text: reply.slice(0, 20) }
+        await new Promise((resolve, reject) => {
+          gates.push(resolve)
+          request.signal?.addEventListener('abort', () => reject(request.signal.reason), { once: true })
+        })
+        yield { type: 'text-delta', text: reply.slice(20) }
+        yield { type: 'usage', usage: { inputTokens: 900, outputTokens: 300 } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      })()
+    },
+  }
+}
+
+test('gate: 导演日志：整理中能看到实时输出和思考，整理完留下提示词、原始输出、用量和逐句结果', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'igs-'))
+  try {
+    const store = createStore(dir)
+    const tavern = fakeTavern()
+    const llm = gatedLlm(DIRECTOR_REPLY)
+    const engine = createEngine({ store, services: { tavern, llm }, logger: { warn() {}, info() {} } })
+    await engine.patchConfig({ images: { auto: false, backgrounds: false, portraits: false } })
+    const settled = engine.onTurnSettled({ gameId: 'g', turn: 1, textVersion: 'v1', text: '夕阳下的天台。\n“你终于来了。”林岚回过头。' })
+    const live = await until(async () => (await engine.directorLog('g')).running[0])
+    assert.equal(live.status, 'running')
+    assert.equal(live.model, 'fake-1')
+    assert.equal(live.source, 'tavern')
+    assert.equal(live.window, 1000000)
+    await until(async () => (await engine.directorLog('g')).running[0]?.live.output)
+    const midway = (await engine.directorLog('g')).running[0]
+    assert.equal(midway.live.output, DIRECTOR_REPLY.slice(0, 20))
+    assert.equal(midway.live.reasoning, '先认说话人。')
+    llm.gates[0]()
+    await settled
+
+    const log = await engine.directorLog('g')
+    assert.equal(log.running.length, 0)
+    assert.equal(log.entries[0].status, 'ok')
+    assert.deepEqual(log.entries[0].usage, { inputTokens: 900, outputTokens: 300 })
+    assert.equal(log.entries[0].summary, '林岚在天台等我。')
+    const { entry } = await engine.directorEntry('g', log.entries[0].id)
+    assert.match(entry.system, /后台导演/)
+    assert.match(entry.user, /你终于来了/)
+    assert.equal(entry.maxTokens, 128000)
+    assert.equal(entry.attempts[0].output, DIRECTOR_REPLY)
+    assert.equal(entry.attempts[0].reasoning, '先认说话人。')
+    assert.equal(entry.script.lines.U2.emo, 'smile')
+    assert.equal(entry.units[1].text, '你终于来了。')
+    engine.dispose()
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('gate: 导演整理到一半可以停止，场景按原文演，日志记为已停止', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'igs-'))
+  try {
+    const store = createStore(dir)
+    const tavern = fakeTavern()
+    const llm = gatedLlm(DIRECTOR_REPLY)
+    const engine = createEngine({ store, services: { tavern, llm }, logger: { warn() {}, info() {} } })
+    const settled = engine.onTurnSettled({ gameId: 'g', turn: 2, textVersion: 'v2', text: '“等一下。”' })
+    const live = await until(async () => (await engine.directorLog('g')).running[0])
+    await until(() => llm.gates.length)
+    assert.equal(engine.cancel('g', 'director', live.id), true)
+    await settled
+    const view = await engine.gameView('g')
+    assert.equal(view.turns[0].status, 'failed')
+    assert.equal(view.turns[0].error, '已手动停止整理')
+    assert.equal(view.turns[0].units[0].text, '等一下。')
+    const log = await engine.directorLog('g')
+    assert.equal(log.entries[0].status, 'cancelled')
+    assert.equal(engine.cancel('g', 'director', live.id), false)
+    engine.dispose()
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})

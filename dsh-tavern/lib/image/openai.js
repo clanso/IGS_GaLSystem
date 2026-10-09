@@ -33,6 +33,18 @@ export async function imageFromChat(json, signal, fetchImpl) {
   throw new ImageError('回复里没有图片' + (content ? '：' + content.slice(0, 160) : ''))
 }
 
+const IMAGE_MODEL = /image|dall-?e|flux|seedream|seededit|imagen|banana|kolors|cogview|recraft|ideogram|midjourney|stable-?diffusion|sdxl|sd3|hidream|wanx|jimeng|hunyuan/i
+
+/** /models 列表：能出图的排前面。中转站常把几百个模型混在一起，全部列出，由用户挑。 */
+export async function openaiModels(config, key, fetchImpl) {
+  const base = trimBase(config.baseURL)
+  const json = await requestJson(base + '/models', { headers: key ? { authorization: 'Bearer ' + key } : {}, fetchImpl, timeout: 8000 })
+  const ids = [...new Set((Array.isArray(json?.data) ? json.data : []).map(m => String(m?.id || '')).filter(Boolean))]
+  const image = ids.filter(id => IMAGE_MODEL.test(id)).sort()
+  const rest = ids.filter(id => !IMAGE_MODEL.test(id)).sort()
+  return { models: [...image.map(id => ({ id, name: '🖼 ' + id })), ...rest.map(id => ({ id, name: id }))] }
+}
+
 export async function generateOpenAI({ prompt, negative, width, height, config, key, signal, fetchImpl }) {
   const base = trimBase(config.baseURL)
   if (!base) throw new ImageError('没有填写 API 地址')

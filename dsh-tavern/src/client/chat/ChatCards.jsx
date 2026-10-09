@@ -29,7 +29,10 @@ export function SceneCardInline({ item, gameId, turn }) {
             <>
               <div className="igsd-scene-loc"><span className="igsd-dots">导演正在整理这一幕</span></div>
               <div className="igsd-scene-sum">正文已经可以读了。说话人、表情、站位、镜头和插画在后台排，整理好后剧场里会自动更新。</div>
-              <div className="igsd-scene-actions"><button type="button" className="igsd-play" onClick={() => openTheater(gameId, { turn: t })}>先看起来</button></div>
+              <div className="igsd-scene-actions">
+                <button type="button" className="igsd-play" onClick={() => openTheater(gameId, { turn: t })}>先看起来</button>
+                <button type="button" className="igsd-ghost" onClick={() => openTheater(gameId, { panel: 'director', panelArg: t })}>看导演在写什么</button>
+              </div>
             </>
           ) : data.error ? (
             <>
@@ -38,6 +41,7 @@ export function SceneCardInline({ item, gameId, turn }) {
               <div className="igsd-scene-actions">
                 <button type="button" className="igsd-play" onClick={() => openTheater(gameId, { turn: t })}>照原文演</button>
                 <button type="button" className="igsd-ghost" disabled={busy} onClick={retry}>{busy ? '整理中…' : '重试'}</button>
+                <button type="button" className="igsd-ghost" onClick={() => openTheater(gameId, { panel: 'director', panelArg: t })}>导演日志</button>
               </div>
             </>
           ) : (

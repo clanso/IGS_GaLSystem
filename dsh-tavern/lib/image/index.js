@@ -24,10 +24,16 @@ export function backendNeedsKey(backend, config) {
   return ['bearer', 'basic'].includes(config?.[backend]?.authType)
 }
 
-export async function generateImage({ backend, config, key, signal, fetchImpl, ...input }) {
+/**
+ * 出一张图。种子：这一张指定了就用指定的；否则用设置里的固定种子；都没有（-1）则每张随机。
+ * transparent 只有支持透明底的渠道 / 模型才会用（目前是 NovelAI V5）。
+ */
+export async function generateImage({ backend, config, key, signal, fetchImpl, seed, ...input }) {
   const entry = BACKENDS[backend]
   if (!entry) throw new ImageError('未知的生图渠道：' + backend)
-  return entry.run({ ...input, config: config[backend] || {}, key, signal, fetchImpl })
+  const fixed = Number(config.images?.seed)
+  const finalSeed = Number.isInteger(seed) && seed >= 0 ? seed : Number.isInteger(fixed) && fixed >= 0 ? fixed : undefined
+  return entry.run({ ...input, seed: finalSeed, config: config[backend] || {}, key, signal, fetchImpl })
 }
 
 /**

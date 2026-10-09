@@ -6,7 +6,7 @@
 //   assets/<id>.<ext>  生成的图片（CG、背景、立绘）
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { mkdir, readFile, writeFile, rename, rm, chmod, readdir, stat } from 'node:fs/promises'
+import { mkdir, readFile, writeFile, rename, rm, chmod, stat } from 'node:fs/promises'
 import { randomUUID, createHash } from 'node:crypto'
 
 export function dataRoot(env = process.env) {
@@ -67,6 +67,8 @@ export function createStore(root = dataRoot()) {
   }
 
   const gameFile = gameId => join(root, 'games', safeId(gameId) + '.json')
+  // 导演日志单独一个文件：提示词和原始输出比较大，不拖慢每次读写场景。
+  const directorLogFile = gameId => join(root, 'games', safeId(gameId) + '.director.json')
   const EMPTY_GAME = { version: 1, scenes: {}, images: {}, cast: {}, castLog: [], places: {}, style: null }
 
   const MIME_EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' }
@@ -81,6 +83,8 @@ export function createStore(root = dataRoot()) {
     updateGlobalCast: mutate => update(join(root, 'global-cast.json'), { cast: {} }, mutate),
     readGame: gameId => readJson(gameFile(gameId), EMPTY_GAME),
     updateGame: (gameId, mutate) => update(gameFile(gameId), EMPTY_GAME, mutate),
+    readDirectorLog: gameId => readJson(directorLogFile(gameId), { entries: [] }),
+    updateDirectorLog: (gameId, mutate) => update(directorLogFile(gameId), { entries: [] }, mutate),
     async removeGame(gameId) {
       const game = await readJson(gameFile(gameId), EMPTY_GAME)
       const assets = new Set()
@@ -89,6 +93,7 @@ export function createStore(root = dataRoot()) {
       for (const person of Object.values(game.cast || {})) for (const a of Object.values(person.sprites || {})) if (a) assets.add(a)
       await Promise.all([...assets].map(id => this.removeAsset(id)))
       await rm(gameFile(gameId), { force: true })
+      await rm(directorLogFile(gameId), { force: true })
     },
     async saveAsset(bytes, mediaType) {
       await ready
@@ -111,10 +116,6 @@ export function createStore(root = dataRoot()) {
     async removeAsset(id) {
       if (!/^[a-f0-9]{32}\.(png|jpg|webp|gif)$/.test(String(id))) return
       await rm(join(root, 'assets', id), { force: true })
-    },
-    async listGames() {
-      await ready
-      return (await readdir(join(root, 'games'))).filter(f => f.endsWith('.json')).map(f => f.slice(0, -5))
     },
   }
 }

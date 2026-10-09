@@ -1,8 +1,8 @@
 // 对话框（逐字显现 + 打字音）、情境卡片（短信 / 信件 / 便签……）、选项。
 import React from 'react'
 import { blip, sfx } from './audio.js'
+import { CARD_LABEL } from './playback.js'
 
-const CARD_LABEL = { sms: '短信', letter: '信', note: '便条', news: '报纸', terminal: '终端', notice: '告示', diary: '日记', scroll: '卷轴' }
 const CARD_HEAD = { sms: '新消息', letter: '', note: '', news: '号外', terminal: '> SYSTEM', notice: '告示', diary: '', scroll: '' }
 
 /** 逐字显现：返回 [是否打完, 立即打完]。 */

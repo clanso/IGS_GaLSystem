@@ -6,9 +6,9 @@ export const DEFAULT_CONFIG = {
   director: {
     auto: true,              // 每轮正文写完后自动整理成场景
     provider: '', model: '', // 留空跟随 Tavern 后台模型
-    maxTokens: 6000,
+    maxTokens: 128000,       // 最大输出（Claude Opus / Sonnet 5.5 的上限）；模型窗口装不下或模型拒绝时自动降
     temperature: 0.7,
-    contextChars: 2400,      // 给导演看多少人物卡 / 世界书资料
+    contextChars: 1000000,   // 给导演看多少人物卡 / 世界书资料（字）；超出模型窗口时自动缩
     systemPrompt: '',        // 留空用内置导演提示词
   },
   images: {
@@ -20,6 +20,8 @@ export const DEFAULT_CONFIG = {
     expressions: false,      // 表情差分（每种表情一张，费用较高）
     expressionsPerTurn: 2,
     concurrency: 1,
+    seed: -1,                // 固定种子；-1 每张随机（鉴赏里改词时仍可给单张指定种子）
+    transparentSprites: true, // 立绘用透明底（目前只有 NovelAI V5 支持，其他模型忽略）
     sizes: { landscape: [1216, 832], portrait: [832, 1216], square: [1024, 1024] },
   },
   style: {
@@ -35,7 +37,7 @@ export const DEFAULT_CONFIG = {
     model: 'nai-diffusion-4-5-full',
     sampler: 'k_euler_ancestral',
     noiseSchedule: 'karras',
-    steps: 23, scale: 5, cfgRescale: 0,
+    steps: 23, scale: 5, cfgRescale: 0, variety: false,
   },
   comfyui: {
     baseURL: 'http://127.0.0.1:8188', authType: 'none',
@@ -46,7 +48,7 @@ export const DEFAULT_CONFIG = {
     baseURL: 'https://api.openai.com/v1', authType: 'bearer', mode: 'images', model: 'gpt-image-1',
     quality: '', landscapeSize: '1536x1024', portraitSize: '1024x1536', squareSize: '1024x1024', sizeMode: 'preset',
   },
-  webui: { baseURL: 'http://127.0.0.1:7860', authType: 'none', steps: 24, cfg: 6, sampler: 'Euler a', hires: false },
+  webui: { baseURL: 'http://127.0.0.1:7860', authType: 'none', model: '', steps: 24, cfg: 6, sampler: 'Euler a', scheduler: '', hires: false },
   ui: {
     skin: 'stellar',
     textSpeed: 30,           // 每字毫秒
@@ -85,9 +87,11 @@ export function resolveConfig(saved) {
   config.images.maxPerTurn = clamp(config.images.maxPerTurn, 0, 4, 1)
   config.images.concurrency = clamp(config.images.concurrency, 1, 4, 1)
   config.images.expressionsPerTurn = clamp(config.images.expressionsPerTurn, 0, 6, 2)
-  config.director.maxTokens = clamp(config.director.maxTokens, 1000, 32000, 6000)
+  config.images.seed = Math.trunc(clamp(config.images.seed, -1, 2 ** 32 - 1, -1))
+  config.novelai.cfgRescale = clamp(config.novelai.cfgRescale, 0, 1, 0)
+  config.director.maxTokens = Math.trunc(clamp(config.director.maxTokens, 1000, 128000, DEFAULT_CONFIG.director.maxTokens))
   config.director.temperature = clamp(config.director.temperature, 0, 2, 0.7)
-  config.director.contextChars = clamp(config.director.contextChars, 0, 12000, 2400)
+  config.director.contextChars = Math.trunc(clamp(config.director.contextChars, 0, 1000000, DEFAULT_CONFIG.director.contextChars))
   config.ui.textSpeed = clamp(config.ui.textSpeed, 0, 200, 30)
   for (const [section, field] of URL_FIELDS) {
     const v = String(config[section][field] || '')

@@ -35,17 +35,23 @@ const tavern = {
   async backgroundModel() { return { provider: 'preview', model: 'scripted-director' } },
 }
 
-// ───────── 假模型：按单元编号回放写好的导演输出；第 4 轮故意慢，演示「先文本后整理」 ─────────
+// ───────── 假模型：按单元编号回放写好的导演输出，像真模型一样先「思考」再分段流式吐字；
+// 第 4 轮故意慢，演示「先文本后整理」和导演日志里的实时输出 ─────────
+const THINKING = '先看这一轮的地点和时段，沿用上一幕的站位；说话人按引号前后的名字认，旁白里写到谁的动作就给谁换表情。值得画的只有一处，放在情绪最满的那句后面。'
 const llm = {
+  resolveModelInfo: async () => ({ context: { contextWindow: 1000000 }, defaultMaxTokens: 128000 }),
   stream(request) {
     const prompt = request.messages[0].content[0].text
     const isDirector = String(request.system || '').includes('后台导演')
     const turnInfo = isDirector ? [...TURNS, LATE_TURN].find(t => prompt.includes(t.text.split('\n')[0].slice(0, 12))) : null
     return (async function* () {
       if (!turnInfo) { yield { type: 'text-delta', text: JSON.stringify({ tags: '@林岚, 1girl, smile, upper body', desc: 'a smiling girl' }) }; yield { type: 'finish', reason: { kind: 'stop' } }; return }
-      await sleep(turnInfo.turn === 4 ? 9000 : 250)
-      const units = segmentTurn(turnInfo.text)
-      yield { type: 'text-delta', text: JSON.stringify(directorReply(turnInfo.turn, units)) }
+      const slow = turnInfo.turn === 4
+      const reply = JSON.stringify(directorReply(turnInfo.turn, segmentTurn(turnInfo.text)), null, 1)
+      for (let i = 0; i < THINKING.length; i += 12) { yield { type: 'reasoning-delta', text: THINKING.slice(i, i + 12) }; await sleep(slow ? 90 : 4) }
+      const step = 12
+      for (let i = 0; i < reply.length; i += step) { yield { type: 'text-delta', text: reply.slice(i, i + step) }; await sleep(slow ? Math.max(20, 12000 / (reply.length / step)) : 1) }
+      yield { type: 'usage', usage: { inputTokens: Math.ceil(prompt.length * 0.9), outputTokens: Math.ceil(reply.length / 3), reasoningTokens: THINKING.length } }
       yield { type: 'finish', reason: { kind: 'stop' } }
     })()
   },

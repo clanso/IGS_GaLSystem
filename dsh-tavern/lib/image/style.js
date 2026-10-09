@@ -39,13 +39,18 @@ export function modelKey(backend, config) {
   return 'sd'
 }
 
+/** 默认质量词 / 负面词查哪一套：没有预设的新 NovelAI 模型沿用 V4.5 Full 的，其余沿用 SD 的。 */
+export function presetKey(key) {
+  if (key in DEFAULT_QUALITY) return key
+  return key !== 'sd' && key !== 'openai' ? 'nai-diffusion-4-5-full' : 'sd'
+}
 export function qualityFor(style, key) {
   const custom = style?.quality?.[key]
-  return typeof custom === 'string' ? custom : DEFAULT_QUALITY[key] ?? DEFAULT_QUALITY.sd
+  return typeof custom === 'string' ? custom : DEFAULT_QUALITY[presetKey(key)]
 }
 export function negativeFor(style, key) {
   const custom = style?.negative?.[key]
-  return typeof custom === 'string' ? custom : DEFAULT_NEGATIVE[key] ?? DEFAULT_NEGATIVE.sd
+  return typeof custom === 'string' ? custom : DEFAULT_NEGATIVE[presetKey(key)]
 }
 
 export function artistText(style) {

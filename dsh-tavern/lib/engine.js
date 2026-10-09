@@ -6,10 +6,12 @@ import { segmentTurn, anchorFor } from './segment.js'
 import { direct, callModel, extractJson } from './director.js'
 import { REWRITE_SYSTEM, REWRITE_USER, fill } from './prompts.js'
 import { applyPeople, castListAt, effectivePerson, allNames, expandMentions, editPerson, rollback, nameColor } from './cast.js'
-import { composePrompt, sizeFor, BUILTIN_ARTISTS, DEFAULT_QUALITY, DEFAULT_NEGATIVE } from './image/style.js'
-import { NAI_MODELS, NAI_SAMPLERS } from './image/novelai.js'
+import { composePrompt, sizeFor, BUILTIN_ARTISTS } from './image/style.js'
+import { NAI_MODELS, NAI_SAMPLERS, NAI_NOISE_SCHEDULES } from './image/nai-models.js'
 import { generateImage, createQueue, secretRef, backendNeedsKey } from './image/index.js'
-import { comfyCheckpoints, comfyStats } from './image/comfyui.js'
+import { comfyModels, comfyStats } from './image/comfyui.js'
+import { openaiModels } from './image/openai.js'
+import { webuiModels } from './image/webui.js'
 import { resolveConfig, applyPatch } from './config.js'
 import { createSecrets } from './secrets.js'
 import { EMOTIONS, placeKey } from './vocab.js'
@@ -20,11 +22,28 @@ export const KIND_CG = PLUGIN + '/cg'
 
 const shortError = error => String(error?.message || error || '未知错误').slice(0, 300)
 
+// 导演日志：每局保留最近这么多次；每段提示词 / 输出最多存这么多字。
+const DIRECTOR_LOG_KEEP = 30
+const DIRECTOR_LOG_TEXT = 200000
+const capText = text => {
+  const s = String(text || '')
+  return s.length > DIRECTOR_LOG_TEXT ? s.slice(0, DIRECTOR_LOG_TEXT) + `\n…（日志只保留前 ${DIRECTOR_LOG_TEXT} 字，原文共 ${s.length} 字）` : s
+}
+/** 各次尝试的用量加总（只加数字字段，字段名照 DSH 给的）。 */
+function sumUsage(attempts) {
+  const total = {}
+  for (const a of attempts) for (const [k, v] of Object.entries(a.usage || {})) if (Number.isFinite(v)) total[k] = (total[k] || 0) + v
+  return Object.keys(total).length ? total : null
+}
+/** 导演日志的长轮询频道与对局视图分开：流式输出刷得勤，不该让整局视图跟着重读。 */
+export const directorChannel = gameId => 'director:' + gameId
+
 export function createEngine({ store, services, logger = console, fetchImpl = fetch }) {
   const log = (level, msg) => { try { logger[level]?.(`[${PLUGIN}] ${msg}`) } catch {} }
   const secrets = createSecrets({ store, getCredentials: () => services.credentials })
   let configCache = null
   const directing = new Map() // textVersion → Promise
+  const directorRuns = new Map() // textVersion → 正在跑的导演（日志实时输出、可停止）
   const listeners = new Set()
   const queue = createQueue({ concurrency: () => configCache?.images?.concurrency || 1, onChange: () => notify('queue') })
 
@@ -42,9 +61,9 @@ export function createEngine({ store, services, logger = console, fetchImpl = fe
   }
 
   async function pickModel(gameId, cfg) {
-    if (cfg.director.provider && cfg.director.model) return { provider: cfg.director.provider, model: cfg.director.model }
+    if (cfg.director.provider && cfg.director.model) return { provider: cfg.director.provider, model: cfg.director.model, source: 'plugin' }
     const bg = await services.tavern?.backgroundModel?.({ gameId }).catch?.(() => null)
-    return bg || {}
+    return bg ? { ...bg, source: 'tavern' } : {}
   }
 
   // ───────────────────────── 场景 ─────────────────────────
@@ -87,16 +106,31 @@ export function createEngine({ store, services, logger = console, fetchImpl = fe
       let game = await store.readGame(gameId)
       if (game.scenes[textVersion]?.script && !force) return game.scenes[textVersion]
       const globalCast = await store.readGlobalCast()
-      const { provider, model } = await pickModel(gameId, cfg)
+      const { provider, model, source } = await pickModel(gameId, cfg)
       let context = null
       try { context = await services.tavern?.getCardContext?.({ gameId, turn }) } catch {}
+      const run = { id: randomUUID().replace(/-/g, '').slice(0, 12), gameId, turn, textVersion, at: Date.now(), reason: force ? 'force' : 'auto', source: source || '', trace: { provider, model }, controller: new AbortController() }
+      directorRuns.set(textVersion, run)
+      // 流式输出时最多每 250ms 推一次日志面板，最后一段不会漏。
+      let pushTimer = null
+      const progress = () => { if (!pushTimer) pushTimer = setTimeout(() => { pushTimer = null; notify(directorChannel(gameId)) }, 250) }
+      notify(directorChannel(gameId))
+      let script = null, failure = null
       try {
-        const { script } = await direct({
+        ;({ script } = await direct({
           llm: services.llm, provider, model, units,
           previous: await previousScript(game, turn),
           castList: castListAt(game, globalCast, turn),
           context, config: cfg, backend: cfg.images.backend,
-        })
+          signal: run.controller.signal, trace: run.trace, onProgress: progress,
+        }))
+      } catch (error) { failure = run.controller.signal.aborted ? new Error('已手动停止整理') : error }
+      clearTimeout(pushTimer)
+      directorRuns.delete(textVersion)
+      await saveDirectorLog(run, { script, error: failure }).catch(error => log('warn', '写导演日志失败：' + shortError(error)))
+      notify(directorChannel(gameId))
+      try {
+        if (failure) throw failure
         await store.updateGame(gameId, g => {
           applyPeople(g, globalCast, script.people, turn)
           const scene = g.scenes[textVersion]
@@ -120,6 +154,62 @@ export function createEngine({ store, services, logger = console, fetchImpl = fe
     })()
     directing.set(textVersion, job)
     try { return await job } finally { directing.delete(textVersion) }
+  }
+
+  // ───────────────────────── 导演日志 ─────────────────────────
+
+  async function saveDirectorLog(run, { script, error }) {
+    const t = run.trace
+    const entry = {
+      id: run.id, turn: run.turn, textVersion: run.textVersion, at: run.at, ms: Date.now() - run.at, reason: run.reason, source: run.source,
+      status: error ? (run.controller.signal.aborted ? 'cancelled' : 'failed') : 'ok', error: error ? shortError(error) : '',
+      provider: t.provider || '', model: t.model || '', window: t.window || 0, outputDefault: t.outputDefault || 0,
+      maxTokens: t.maxTokens || 0, temperature: t.temperature ?? null, contextLength: t.contextLength || 0, contextChars: t.contextChars || 0, notes: t.notes || [],
+      system: capText(t.system), user: capText(t.user),
+      attempts: (t.attempts || []).map(a => ({ ...a, output: capText(a.output), reasoning: capText(a.reasoning) })),
+      script,
+    }
+    await store.updateDirectorLog(run.gameId, log => {
+      log.entries = [...(log.entries || []), entry].slice(-DIRECTOR_LOG_KEEP)
+    })
+  }
+
+  /** 列表用的摘要：不带提示词和完整输出（点开再取）。跑着的那次带上当前输出的末尾，面板里实时滚动。 */
+  function logSummary(e, running) {
+    const attempts = e.attempts || e.trace?.attempts || []
+    const t = e.trace || e
+    const last = attempts.at(-1)
+    return {
+      id: e.id, turn: e.turn, at: e.at, ms: running ? Date.now() - e.at : e.ms, reason: e.reason, source: e.source,
+      status: running ? 'running' : e.status, error: e.error || '',
+      provider: t.provider || '', model: t.model || '', maxTokens: t.maxTokens || 0, window: t.window || 0, notes: t.notes || [],
+      attempts: attempts.length, usage: sumUsage(attempts), summary: e.script?.summary || '',
+      ...(running ? { live: { output: (last?.output || '').slice(-20000), reasoning: (last?.reasoning || '').slice(-8000), chars: last?.output.length || 0, note: last?.note || '' } } : {}),
+    }
+  }
+
+  async function directorLog(gameId) {
+    const running = [...directorRuns.values()].filter(r => r.gameId === gameId).map(r => logSummary(r, true))
+    const { entries = [] } = await store.readDirectorLog(gameId)
+    return { running, entries: entries.slice().reverse().map(e => logSummary(e, false)), keep: DIRECTOR_LOG_KEEP }
+  }
+
+  /** 一次导演的完整记录：发出去的提示词、每次尝试的原始输出 / 思考 / 用量 / 错误、解析后的脚本，以及这一轮的正文单元。 */
+  async function directorEntry(gameId, id) {
+    const run = [...directorRuns.values()].find(r => r.gameId === gameId && r.id === id)
+    const entry = run
+      ? { ...logSummary(run, true), ...run.trace, attempts: run.trace.attempts || [], script: null }
+      : ((await store.readDirectorLog(gameId)).entries || []).find(e => e.id === id)
+    if (!entry) throw new Error('这条导演日志已经不在了')
+    const scene = (await store.readGame(gameId)).scenes?.[entry.textVersion || run?.textVersion]
+    return { entry: { ...entry, units: scene?.units || [] } }
+  }
+
+  function stopDirector(gameId, id) {
+    const run = [...directorRuns.values()].find(r => r.gameId === gameId && r.id === id)
+    if (!run) return false
+    run.controller.abort()
+    return true
   }
 
   async function onTurnSettled(turnInfo) {
@@ -311,7 +401,7 @@ export function createEngine({ store, services, logger = console, fetchImpl = fe
         if (!person?.appearance) throw new Error(`${name} 还没有外貌档案`)
         const prompt = composePrompt({ kind: 'sprite', person, emotion: emo, backend: cfg.images.backend, config: cfg })
         const { width, height } = sizeFor(cfg, 'portrait')
-        const res = await generateImage({ backend: cfg.images.backend, config: cfg, key: ready.key, signal, fetchImpl, prompt: prompt.positive, negative: prompt.negative, width, height })
+        const res = await generateImage({ backend: cfg.images.backend, config: cfg, key: ready.key, signal, fetchImpl, prompt: prompt.positive, negative: prompt.negative, width, height, transparent: cfg.images.transparentSprites })
         return store.saveAsset(res.bytes, res.mediaType)
       })
       await store.updateGame(gameId, g => {
@@ -523,7 +613,7 @@ export function createEngine({ store, services, logger = console, fetchImpl = fe
       } else keys[backend] = await secrets.has(secretRef(backend, cfg))
     }
     const ready = await backendReady(cfg)
-    const presets = { artists: BUILTIN_ARTISTS, quality: DEFAULT_QUALITY, negative: DEFAULT_NEGATIVE, naiModels: NAI_MODELS, naiSamplers: NAI_SAMPLERS }
+    const presets = { artists: BUILTIN_ARTISTS }
     return { config: cfg, keys, ready: ready.ok, readyReason: ready.reason || '', secretStorage: secrets.storage(), presets }
   }
 
@@ -550,8 +640,8 @@ export function createEngine({ store, services, logger = console, fetchImpl = fe
     const backend = cfg.images.backend
     const key = await secrets.get(secretRef(backend, cfg))
     if (backend === 'comfyui') {
-      const [stats, checkpoints] = await Promise.all([comfyStats(cfg.comfyui, key, fetchImpl), comfyCheckpoints(cfg.comfyui, key, fetchImpl).catch(() => [])])
-      return { ok: true, message: `在线 ${stats.version} ${stats.device} ${stats.vram}`.trim(), checkpoints }
+      const stats = await comfyStats(cfg.comfyui, key, fetchImpl)
+      return { ok: true, message: `在线 ${stats.version} ${stats.device} ${stats.vram}`.trim() }
     }
     if (backend === 'webui') {
       const res = await fetchImpl(cfg.webui.baseURL.replace(/\/+$/, '') + '/sdapi/v1/options', { signal: AbortSignal.timeout(5000) })
@@ -570,6 +660,24 @@ export function createEngine({ store, services, logger = console, fetchImpl = fe
     return { ok: res.ok, message: res.ok ? '地址可用，Key 被接受' : 'HTTP ' + res.status }
   }
 
+  /**
+   * 当前渠道可选的模型 / 采样器 / 调度器。ComfyUI、WebUI、OpenAI 兼容接口从服务器实时读取；
+   * NovelAI 没有公开的模型列表接口，给内置预设（新模型可以手填 ID）。读取失败时 live=false，附原因。
+   */
+  async function listModels() {
+    const cfg = await config()
+    const backend = cfg.images.backend
+    if (backend === 'novelai') return { backend, live: false, models: Object.entries(NAI_MODELS).map(([id, m]) => ({ id, name: m.label })), samplers: NAI_SAMPLERS, schedulers: NAI_NOISE_SCHEDULES, note: 'NovelAI 没有公开的模型列表接口，这里是内置的已知模型；官方出了新模型，选「手动填写」填它的模型 ID 即可。' }
+    const key = await secrets.get(secretRef(backend, cfg))
+    const read = { comfyui: () => comfyModels(cfg.comfyui, key, fetchImpl), webui: () => webuiModels(cfg.webui, key, fetchImpl), openai: () => openaiModels(cfg.openai, key, fetchImpl) }[backend]
+    try {
+      const list = await read()
+      return { backend, live: true, samplers: [], schedulers: [], ...list, note: list.models.length ? `已从服务器读取 ${list.models.length} 个模型` : '服务器没有返回任何模型' }
+    } catch (error) {
+      return { backend, live: false, models: [], samplers: [], schedulers: [], note: '读取模型列表失败：' + shortError(error) + '。可以先手动填写。' }
+    }
+  }
+
   async function llmModels(provider) {
     const llm = services.llm
     if (!llm?.listProviders) return { providers: [], models: [] }
@@ -580,6 +688,7 @@ export function createEngine({ store, services, logger = console, fetchImpl = fe
   }
 
   async function removeGame(gameId) {
+    for (const run of directorRuns.values()) if (run.gameId === gameId) run.controller.abort()
     for (const id of [...queue.state().running, ...queue.state().waiting]) if (id.includes(':' + gameId + ':')) queue.cancel(id)
     await store.removeGame(gameId)
   }
@@ -592,10 +701,11 @@ export function createEngine({ store, services, logger = console, fetchImpl = fe
       if (!place) throw new Error('没有这个地点')
       ensurePlace(gameId, key, place, { force: true }).catch(() => {})
     },
-    cancel: (gameId, kind, id) => queue.cancel(`${kind}:${gameId}:${id}`),
-    castAction, publicConfig, patchConfig, setSecret, testBackend, llmModels, removeGame,
+    cancel: (gameId, kind, id) => (kind === 'director' ? stopDirector(gameId, id) : queue.cancel(`${kind}:${gameId}:${id}`)),
+    directorLog, directorEntry,
+    castAction, publicConfig, patchConfig, setSecret, testBackend, listModels, llmModels, removeGame,
     readAsset: id => store.readAsset(id),
     subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn) },
-    dispose() { queue.dispose(); listeners.clear() },
+    dispose() { queue.dispose(); for (const run of directorRuns.values()) run.controller.abort(); listeners.clear() },
   }
 }

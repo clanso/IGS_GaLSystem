@@ -143,11 +143,18 @@ export async function generateComfy({ prompt, negative, width, height, seed, con
   }
 }
 
-export async function comfyCheckpoints(config, key, fetchImpl) {
+/** 服务器上的底模、采样器、调度器（/object_info），装了新模型或升级 ComfyUI 后点刷新就能看到。 */
+export async function comfyModels(config, key, fetchImpl) {
   const base = trimBase(config.baseURL)
-  const info = await requestJson(base + '/object_info/CheckpointLoaderSimple', { headers: authHeaders(config, key), fetchImpl, timeout: 8000 })
-  const list = info?.CheckpointLoaderSimple?.input?.required?.ckpt_name?.[0]
-  return Array.isArray(list) ? list : []
+  const get = node => requestJson(base + '/object_info/' + node, { headers: authHeaders(config, key), fetchImpl, timeout: 8000 })
+  const [ckpt, sampler] = await Promise.all([get('CheckpointLoaderSimple'), get('KSampler').catch(() => null)])
+  const list = value => (Array.isArray(value?.[0]) ? value[0].map(String) : [])
+  const required = sampler?.KSampler?.input?.required || {}
+  return {
+    models: list(ckpt?.CheckpointLoaderSimple?.input?.required?.ckpt_name).map(id => ({ id, name: id })),
+    samplers: list(required.sampler_name),
+    schedulers: list(required.scheduler),
+  }
 }
 
 export async function comfyStats(config, key, fetchImpl) {
