@@ -191,6 +191,7 @@
 .igsd-text.is-thought::before { content: "（"; } .igsd-text.is-thought::after { content: "）"; }
 .igsd-char { opacity: 0; animation: igsd-char-in .22s ease forwards; animation-delay: var(--d); display: inline; }
 .igsd-text.is-done .igsd-char { animation: none; opacity: 1; }
+.igsd-text.is-wait .igsd-char { animation: none; }
 @keyframes igsd-char-in { from { opacity: 0; filter: blur(3px); } to { opacity: 1; filter: none; } }
 .igsd-wait { position: absolute; right: 2.6%; bottom: 20%; font-size: 1.2cqw; color: var(--accent); text-shadow: 0 0 .8cqw var(--accent); animation: igsd-wait 1.1s ease-in-out infinite; }
 .igsd-wait::before { content: var(--wait-glyph); }

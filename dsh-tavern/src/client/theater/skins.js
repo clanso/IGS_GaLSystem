@@ -7,25 +7,45 @@ export const SKINS = [
   { id: 'cyber', name: '赛博', desc: '扫描线 · 终端', swatch: 'linear-gradient(120deg, #031014, #00f0ff 50%, #ff2bd6)', fonts: ['LXGWNeoXiHei'] },
 ]
 
-const loaded = new Set()
-/** 把皮肤要用的 IGS 字体挂到 <head>（unicode-range 分片，只下载用到的字）。 */
+const sheets = new Map() // font.css 地址 → 加载完成的 Promise
+const latinLoaded = new Set()
+/** 把皮肤要用的 IGS 字体挂到 <head>（unicode-range 分片，只下载用到的字）。返回字体表都加载完（或失败）的 Promise。 */
 export function loadSkinFonts(skinId, base) {
   const skin = SKINS.find(s => s.id === skinId) || SKINS[0]
-  if (!base) return
+  if (!base) return Promise.resolve()
   const root = base.replace(/\/?$/, '/')
-  for (const font of skin.fonts) {
+  const pending = skin.fonts.map(font => {
     const href = `${root}fonts/${font}/font.css`
-    if (loaded.has(href)) continue
-    loaded.add(href)
-    const link = document.createElement('link')
-    link.rel = 'stylesheet'
-    link.href = href
-    link.dataset.igsd = 'font'
-    document.head.appendChild(link)
-  }
+    if (!sheets.has(href)) {
+      const link = document.createElement('link')
+      link.rel = 'stylesheet'
+      link.href = href
+      link.dataset.igsd = 'font'
+      sheets.set(href, new Promise(resolve => { link.onload = resolve; link.onerror = resolve }))
+      document.head.appendChild(link)
+    }
+    return sheets.get(href)
+  })
   const latin = `${root}fonts/CormorantGaramond-Regular.woff2`
-  if (!loaded.has(latin) && typeof FontFace === 'function') {
-    loaded.add(latin)
+  if (!latinLoaded.has(latin) && typeof FontFace === 'function') {
+    latinLoaded.add(latin)
     try { const face = new FontFace('IGS Cormorant', `url("${latin}")`); face.load().then(f => document.fonts.add(f)).catch(() => {}) } catch {}
   }
+  return Promise.all(pending)
+}
+
+/**
+ * 提前下载这些字所在的字体分片。分片没到时浏览器先用系统字体画、到了再换（font-display: swap），
+ * 翻页时就会看到整句「闪一下」。el 是剧场根节点，从它身上读当前皮肤的正文 / 标题字体。
+ * limit > 0 时最多等这么久（网络太慢就先用系统字体显示）。
+ */
+export function loadGlyphs(el, { body = '', display = '' }, limit = 0) {
+  if (!el || typeof document === 'undefined' || !document.fonts) return Promise.resolve()
+  const style = getComputedStyle(el)
+  const jobs = [['--font-body', body], ['--font-display', display]].map(([name, text]) => {
+    const family = style.getPropertyValue(name).trim()
+    return family && text ? document.fonts.load(`16px ${family}`, text).catch(() => {}) : null
+  }).filter(Boolean)
+  const all = Promise.all(jobs)
+  return limit > 0 ? Promise.race([all, new Promise(resolve => setTimeout(resolve, limit))]) : all
 }

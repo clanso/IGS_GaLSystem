@@ -5,15 +5,19 @@ import { CARD_LABEL } from './playback.js'
 
 const CARD_HEAD = { sms: '新消息', letter: '', note: '', news: '号外', terminal: '> SYSTEM', notice: '告示', diary: '', scroll: '' }
 
-/** 逐字显现：返回 [是否打完, 立即打完]。 */
-export function useTypewriter(beat, speed, { sound = true } = {}) {
-  const [done, setDone] = React.useState(false)
-  const chars = React.useMemo(() => Array.from((beat && beat.text) || ''), [beat && beat.key, beat && beat.text])
+/**
+ * 逐字显现：返回 [是否打完, 字, 立即打完]。hold 为真时先不开始（等字体分片下载完）。
+ * 「打完」跟着这一拍的 key 走、在渲染时就复位：要是等 effect 再复位，新一句第一帧会带着上一句的「打完」整句露出来再消失。
+ */
+export function useTypewriter(beat, speed, { sound = true, hold = false } = {}) {
+  const key = beat ? beat.key : ''
+  const chars = React.useMemo(() => Array.from((beat && beat.text) || ''), [key, beat && beat.text])
+  const [shown, setShown] = React.useState({ key, done: false })
+  if (shown.key !== key) setShown({ key, done: false })
+  const done = !speed || !chars.length || (shown.key === key && shown.done)
   React.useEffect(() => {
-    setDone(!speed || !chars.length)
-    if (!speed || !chars.length) return undefined
-    const total = chars.length * speed + 220
-    const finish = setTimeout(() => setDone(true), total)
+    if (!speed || !chars.length || hold) return undefined
+    const finish = setTimeout(() => setShown({ key, done: true }), chars.length * speed + 220)
     let i = 0
     const tick = sound ? setInterval(() => {
       i += 2
@@ -21,11 +25,11 @@ export function useTypewriter(beat, speed, { sound = true } = {}) {
       if (!/[\s，。、…！？,.!?]/.test(chars[i])) blip(beat.speaker, beat.type)
     }, speed * 2) : null
     return () => { clearTimeout(finish); if (tick) clearInterval(tick) }
-  }, [beat && beat.key, chars, speed, sound])
-  return [done, chars, () => setDone(true)]
+  }, [key, chars, speed, sound, hold])
+  return [done, chars, () => setShown({ key, done: true })]
 }
 
-export function DialogBox({ beat, chars, done, color, quick, progress, status, hiddenText }) {
+export function DialogBox({ beat, chars, done, waiting, color, quick, progress, status, hiddenText }) {
   const speaker = beat.alias || beat.speaker
   const showName = speaker && beat.type !== 'narration'
   const speed = quick.speed
@@ -40,7 +44,7 @@ export function DialogBox({ beat, chars, done, color, quick, progress, status, h
       )}
       {hiddenText && <div className="igsd-text is-cardhint">〔 {CARD_LABEL[beat.card] || '卡片'} 〕</div>}
       {!hiddenText && (
-        <div className={`igsd-text is-${beat.type}${done ? ' is-done' : ''}`} key={beat.key} aria-live="polite">
+        <div className={`igsd-text is-${beat.type}${done ? ' is-done' : waiting ? ' is-wait' : ''}`} key={beat.key} aria-live="polite">
           {chars.map((ch, i) => <span key={i} className="igsd-char" style={{ '--d': (i * speed) + 'ms' }}>{ch}</span>)}
         </div>
       )}

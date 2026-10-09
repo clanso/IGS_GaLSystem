@@ -7,11 +7,21 @@ import { DialogBox, SceneCard, Choices, useTypewriter } from './Dialog.jsx'
 import { Backlog, Gallery, CastPanel, Settings } from './Panels.jsx'
 import { DirectorLog } from './DirectorLog.jsx'
 import { playBgm, stopBgm, sfx } from './audio.js'
-import { loadSkinFonts } from './skins.js'
+import { loadSkinFonts, loadGlyphs } from './skins.js'
 
 const POS_KEY = gameId => 'igsd:pos:' + gameId
 const readPos = gameId => { try { return localStorage.getItem(POS_KEY(gameId)) || '' } catch { return '' } }
 const writePos = (gameId, key) => { try { localStorage.setItem(POS_KEY(gameId), key) } catch {} }
+
+/** 提前下载后面几拍要用的字形分片。 */
+const GLYPH_AHEAD = 12
+/** 当前这句的字形没下载完时，最多等这么久再开始逐字显示。 */
+const GLYPH_WAIT = 1200
+/** 正文字体画台词；标题字体画名牌、地点和信件类卡片。 */
+const glyphsOf = list => ({
+  body: list.map(b => b.text).join(''),
+  display: list.map(b => (b.alias || b.speaker) + b.scene.location + (b.card ? b.text : '')).join(''),
+})
 
 /** 把选项 / 自由输入填进 Tavern 的输入框（尽力而为），同时复制到剪贴板。 */
 function fillComposer(text) {
@@ -79,6 +89,8 @@ function Theater({ gameId, view, viewError, cfg, startTurn, panel: initialPanel,
   const [choosing, setChoosing] = React.useState(false)
   const [closing, setClosing] = React.useState(false)
   const anchor = React.useRef('') // 当前拍的 key：视图刷新后按 key 找回位置
+  const rootRef = React.useRef(null)
+  const [glyphKey, setGlyphKey] = React.useState('') // 字形已经就绪的那一拍
   const placed = React.useRef(false)
 
   // 初始位置：指定轮 → 上次读到的位置 → 最新一轮开头。
@@ -104,12 +116,27 @@ function Theater({ gameId, view, viewError, cfg, startTurn, panel: initialPanel,
 
   const beat = index >= 0 ? beats[index] : null
   const speed = skip ? 0 : ui0.textSpeed
-  const [done, chars, finish] = useTypewriter(beat, title || panel ? 0 : speed, { sound: ui0.blip && !skip && !title })
+  const holdText = Boolean(beat) && glyphKey !== beat.key
+  const [done, chars, finish] = useTypewriter(beat, title || panel ? 0 : speed, { sound: ui0.blip && !skip && !title, hold: holdText })
   const cam = useCamera(title ? null : beat)
   const people = React.useMemo(() => new Map(((view && view.cast) || []).map(p => [p.name, p])), [view])
   const atEnd = beat && index === beats.length - 1
 
   React.useEffect(() => { loadSkinFonts(ui0.skin, ui0.assetBase) }, [ui0.skin, ui0.assetBase])
+  // 字体是按字切片的：这句用到的分片下载完再开始逐字显示，不然先用系统字体画、到了再换，整句会闪一下。
+  React.useEffect(() => {
+    if (!beat) return undefined
+    let live = true
+    loadSkinFonts(ui0.skin, ui0.assetBase)
+      .then(() => loadGlyphs(rootRef.current, glyphsOf([beat]), GLYPH_WAIT))
+      .then(() => { if (live) setGlyphKey(beat.key) })
+    return () => { live = false }
+  }, [beat && beat.key, ui0.skin, ui0.assetBase])
+  // 读这句的时候顺手把后面几句的分片下好。
+  React.useEffect(() => {
+    if (index < 0) return
+    loadSkinFonts(ui0.skin, ui0.assetBase).then(() => loadGlyphs(rootRef.current, glyphsOf(beats.slice(index + 1, index + 1 + GLYPH_AHEAD))))
+  }, [index, beats, ui0.skin, ui0.assetBase])
   // 配乐：按场景情绪与地点挑曲，换场才换歌。
   const scene = beat ? beat.scene : (beats[beats.length - 1] || {}).scene
   const track = React.useMemo(() => (ui0.bgm ? pickBgm(scene, ui0.assetBase) : null), [ui0.bgm, ui0.assetBase, scene && scene.mood, scene && scene.location])
@@ -221,7 +248,7 @@ function Theater({ gameId, view, viewError, cfg, startTurn, panel: initialPanel,
   ].filter(Boolean)
 
   return (
-    <div className={`igsd-theater${closing ? ' is-closing' : ''}${hidden ? ' igsd-ui-hidden' : ''}`} data-skin={ui0.skin} role="dialog" aria-label="IGS 剧场">
+    <div ref={rootRef} className={`igsd-theater${closing ? ' is-closing' : ''}${hidden ? ' igsd-ui-hidden' : ''}`} data-skin={ui0.skin} role="dialog" aria-label="IGS 剧场">
       <div className="igsd-stage" onClick={() => { if (hidden) { setHidden(false); return } if (!title && !panel && !choosing) advance() }}
         onWheel={e => { if (!title && !panel && e.deltaY < -30) setPanel('log') }}>
         <div className="igsd-camera" data-cam={cam}>
@@ -260,7 +287,7 @@ function Theater({ gameId, view, viewError, cfg, startTurn, panel: initialPanel,
 
         {beat && !title && beat.card && <SceneCard beat={beat} />}
         {beat && !title && (
-          <DialogBox beat={beat} chars={chars} done={done} color={color} quick={quick} progress={progressInTurn} status={status} hiddenText={Boolean(beat.card)} />
+          <DialogBox beat={beat} chars={chars} done={done} waiting={holdText} color={color} quick={quick} progress={progressInTurn} status={status} hiddenText={Boolean(beat.card)} />
         )}
         {!beat && !title && (
           <div className="igsd-choices"><div className="igsd-choices-title">{view ? '这一局还没有可以演的内容' : '读取中'}</div></div>
