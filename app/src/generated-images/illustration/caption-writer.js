@@ -41,8 +41,9 @@ export function parseCaptionSlots(text) {
         ? blocks.slice(1).reduce((list, item, index, all) => (index % 2 ? list : [...list, [Number(item), all[index + 1] || '']]), [])
         : [[1, body]];
     const captions = pairs.map(([slotId, block]) => {
+        // 只在本行里读：空的「char:」后面紧跟「uc: …」时，跨行会把负面词当成角色标签读走。
         const read = (key) => {
-            const m = String(block).match(new RegExp(`^\\s*${key}\\s*[:：]\\s*(.*)$`, 'im'));
+            const m = String(block).match(new RegExp(`^[ \\t]*${key}[ \\t]*[:：][ \\t]*(.*)$`, 'im'));
             return m ? m[1].trim() : '';
         };
         const scene = read('scene');

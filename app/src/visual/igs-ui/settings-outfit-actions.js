@@ -9,7 +9,7 @@ import { createSettingsDialogs } from './settings-dialog.js';
 import { beginSettingsProgress, remountSettingsNotice, SETTINGS_NOTICE_MS } from './settings-notice.js';
 import { readSourceMaterial } from '../../host/character-sources.js';
 import { prepareWorldContext } from './world-context.js';
-import { wardrobeClues } from './expression-fill.js';
+import { clothesClues } from './expression-fill.js';
 
 const BLOCKED_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
@@ -347,7 +347,7 @@ async function wardrobeWritingBackground(ctx, globalObj, subject = {}) {
     const { settingsState, options, persistSettingsDraft } = ctx;
     const material = await readSourceMaterial(globalObj);
     const prepared = await prepareWorldContext({ settingsState, service: options.generatedAssets, globalObj, material, persist: persistSettingsDraft });
-    return { world: prepared.world, ...wardrobeClues(material, draftEffectiveAssets(settingsState), subject) };
+    return { world: prepared.world, ...clothesClues(material, draftEffectiveAssets(settingsState), subject) };
 }
 
 export function handleOutfitAction(normalizedAction, ctx) {

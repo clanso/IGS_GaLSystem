@@ -203,7 +203,10 @@ export function buildExpressionDiffDescription(name, prompt, labels, dna, outfit
         ? clothes.words.map((item) => String(item || '').trim()).filter(Boolean)
         : [];
     const nude = Boolean(clothes && clothes.nude);
-    const clothesPrompt = nude ? '' : (clothes ? String(clothes.prompt || '').trim() : '');
+    const clothesPrompt = nude ? '' : (clothes ? wearableClothesPrompt(clothes.prompt) : '');
+    // 没有自己的图、也没有衣柜提示词的新服装：衣服只能照正文画（clothesName 是正文里这件衣服的叫法，story 是写它的段落）。
+    const clothesName = clothes ? String(clothes.clothesName || outfitName).trim() : '';
+    const story = clothes && !nude && !clothesPrompt && !clothes.ownImage ? String(clothes.story || '').trim() : '';
     const wordText = words.length ? `，衣服按这些词来画：${words.join('、')}` : '';
     const wear = caption
         ? '上面 char 里的衣服换成下面的服装提示词，人还是上面那个。'
@@ -218,7 +221,7 @@ export function buildExpressionDiffDescription(name, prompt, labels, dna, outfit
                 : `这一套要改成服装「${outfitName}」。${wear}不要沿用原装的衣服。`)
             : clothes.ownImage
                 ? `这一套就是服装「${outfitName}」${words.length ? `（${words.join('、')}）` : ''}。不要画成别的衣服。`
-                : `这一套要改成服装「${outfitName}」${wordText}。不要沿用原装的衣服。`;
+                : `这一套要改成服装「${outfitName}」${wordText}：衣服的款式、颜色、材质和配饰按正文和资料里对「${clothesName}」的描写来画，没写到的按世界观补；只画穿在身上的，不要沿用原装的衣服。`;
     return [
         outfitName
             ? `为角色「${name || ''}」的服装「${outfitName}」写 ${moods.length} 份立绘表情差分。`
@@ -228,6 +231,7 @@ export function buildExpressionDiffDescription(name, prompt, labels, dna, outfit
         clothesLine,
         clothes && clothes.nsfwBoost && !nude ? nsfwClothingBoostLine('character') : '',
         clothesPrompt ? `服装提示词：\n${clothesPrompt}` : '',
+        story ? `正文和数据库里写「${clothesName}」的地方（只取衣服本身，人物和剧情不要画）：\n${story}` : '',
         anchored ? `这一组表情分几次写，下面是前面已经写好的几份共有的外貌、服装和长期身体状态（表情和动作已经去掉）。这几项要和它完全一致，表情和动作按各自的情绪写，不要照搬别的份：\n${anchored}` : '',
         `正文和资料里写着的长期身体状态（${LASTING_STATE_TEXT}），每一份都要写上，各份写法一致；这不算改长相。${statedMonth ? '' : `怀孕按孕期写肚子大小：${pregnancyGuideText()}。`}`,
         `${TRANSIENT_STATE_TEXT}这类一会儿就过去的状态不要当成身体状态每份都写；某个表情本身要的（哭泣的眼泪、害羞的脸红、紧张的汗珠）只写在那一份里。`,
@@ -615,9 +619,24 @@ function storedCharTags(prompt) {
     return String(stored.positive || '');
 }
 
+// 衣柜提示词常按「衣服展示图」写（不画人、挂衣架、平铺、正反面、配件摆在旁边、背景和光线），还可能混进一行 uc 负面词。
+// 穿到角色身上时只留衣服本身：uc 那行往后整段不要，展示和画面用的词去掉，「挂在衣架上」「平铺在草席上」这类后缀剪掉。
+const CLOTHES_NEGATIVE_RE = /(?:^|\n)[ \t]*(?:uc|negative(?: prompt)?|scene_uc|char_uc)[ \t]*[:：][\s\S]*$/i;
+const CLOTHES_DISPLAY_TAG_RE = /^(?:no humans?|still life|full outfit|matching accessories|(?:full )?(?:outfit|clothing|clothes|swimsuit|swimwear|product)(?: set)? (?:display|focus)|(?:clothes |outfit )?laid out(?: flat)?|flat lay|front and back views?|multiple views|reference sheet|mannequin|(?:clothes |wooden )?hangers?|(?:clean )?composition|.*\b(?:background|floor|lighting|light|daylight|sunlight|shadows?|setting)|.*\b(?:arranged|beside|nearby|folded)\b.*)$/;
+const CLOTHES_DISPLAY_SUFFIX_RE = /\s+(?:laid out|displayed|hung|hanging|placed|arranged)\b.*$|\s+on (?:an? |the )?(?:[\w-]+ ){0,3}(?:hangers?|mats?|floor|table|bed|rack|mannequin)\b.*$/i;
+
+export function wearableClothesPrompt(prompt) {
+    const display = (tag) => CLOTHES_DISPLAY_TAG_RE.test(tagKey(tag));
+    return splitTags(String(prompt || '').replace(CLOTHES_NEGATIVE_RE, ''))
+        .filter((tag) => !display(tag))
+        .map((tag) => tag.replace(CLOTHES_DISPLAY_SUFFIX_RE, '').trim())
+        .filter((tag) => tag && !display(tag))
+        .join(', ');
+}
+
 export function expressionLookTags(basePrompt, outfit) {
     const clothes = outfit && typeof outfit === 'object' ? outfit : null;
-    const clothesPrompt = clothes ? String(clothes.prompt || '').trim() : '';
+    const clothesPrompt = clothes ? wearableClothesPrompt(clothes.prompt) : '';
     if (clothesPrompt) return dnaEnglishTags(clothesPrompt).join(', ');
     if (clothes && !clothes.ownImage) return '';
     // 原装那张自己的神态、手势，和画的时候出汗、湿身之类的临时状态，都不跟到别的表情里。
