@@ -10,11 +10,12 @@ import { formatEditablePrompt, formatStoredPrompt, normalizeStoredPrompt, parseE
 import { getNextSettingsTheme, normalizeSettingsTheme } from './settings-theme.js';
 import { DEFAULT_MOOD_GROUPS, MOOD_PRESET, moodPresetEntry, moodTierLabels, normalizeMoodGroups, resolvePresetGroup } from '../../scene/mood-groups.js';
 import { collectAssetZipEntries } from '../../scene/asset-zip.js';
-import { assetOwnerKey, draftAssetLibrary, draftEffectiveAssets, effectiveSceneAssets, ensureCardLibrary, libraryHasContent, moveLibraryEntry, rememberAssetScope, sceneAssetsForContext } from '../../scene/asset-scope.js';
+import { CHARACTER_FIELDS, assetOwnerKey, draftAssetLibrary, draftEffectiveAssets, effectiveSceneAssets, ensureCardLibrary, libraryHasContent, moveLibraryEntry, rememberAssetScope, sceneAssetsForContext } from '../../scene/asset-scope.js';
 import { buildCharacterCardPack, buildImageZip, buildPresetArchive, mergeLabelGroups, parseCharacterCardPack, parsePresetArchive, parseSettingsArchive, spriteEntriesForNames } from '../../scene/card-pack.js';
 import { getSillyTavernContext } from '../../host/tavern-helper-adapter.js';
-import { collectCharacterSources, formatCharacterSources, pickCharacterSources, pickChatMentions, readSourceMaterial } from '../../host/character-sources.js';
+import { formatCharacterSources, pickCharacterSources, pickChatMentions, readSourceMaterial } from '../../host/character-sources.js';
 import { extractWorldSummary, prepareWorldContext } from './world-context.js';
+import { applyCharacterExpression, applyOutfitExpression, characterAliasesOf, characterExpressionDna, clearExpressionNote, expressionBasePrompt, expressionNoteKey, expressionOutfitSpec, expressionProgressText, extractCharacterPersona, firstGeneratedOutfitUrl, paintThenWriteExpressions, saveCharacterPersona } from './expression-fill.js';
 import { localImageCacheFor } from '../../media/tavern-image-cache.js';
 import { createIndexedDbAssetThumbStore } from '../../media/asset-thumb-store.js';
 import { buildPageDiagnostic } from './page-diagnostic.js';
@@ -42,8 +43,6 @@ import { deleteTavernFont, loadCustomFonts, pickFontFile, saveCustomFonts, uploa
 import { normalizeSpriteHeads } from './fx-anchor.js';
 import { formatImageJobLogText } from '../../generated-images/image-job-log.js';
 import { addGeneratedAssetToLibrary, bindGeneratedBackground, bindGeneratedSprite, collectGeneratedImageIds, generatedAssetIdOf, isGeneratedAssetUrl, normalizeGeneratedLibrary, removeGeneratedLibraryEntry, renameGeneratedLibraryEntry, setGeneratedExpressionNote } from '../../scene/asset-match.js';
-import { resolveCharacterDna } from '../../scene/character-dna.js';
-import { resolveCharacterKey } from '../../scene/scene-directives.js';
 import { normalizeCharacterDna, normalizeCharacterDnaMap, removeCharacterDna, renameCharacterDna } from '../../scene/character-dna.js';
 import { normalizeCharacterHouses } from './magic-house.js';
 import { normalizeCharacterVoice, normalizeCharacterVoices, normalizeVoiceBarkSettings, previewVoicePack, resolveCharacterVoice } from './voice-bark.js';
@@ -53,7 +52,7 @@ import { handleOutfitAction } from './settings-outfit-actions.js';
 import { beginSettingsProgress, markSettingsButtonBusy, remountSettingsNotice } from './settings-notice.js';
 import { createSettingsDialogs } from './settings-dialog.js';
 import { SETTINGS_SECTIONS, buildSettingsExport, parseSettingsImport, resetSettingsSection, settingsExportFileName } from './settings-sections.js';
-import { isBuiltinNudeOutfit, normalizeCharacterOutfits, normalizeWardrobe, renameOutfitScene, resolveWardrobePrompt } from '../../scene/character-outfits.js';
+import { isBuiltinNudeOutfit, normalizeCharacterOutfits, normalizeWardrobe, renameOutfitScene } from '../../scene/character-outfits.js';
 
 import { migrateSpriteKeys } from './sprite-key-migration.js';
 import { NAI_OFFICIAL_MODELS } from '../../generated-images/request-builders/nai-v4-builder.js';
@@ -94,7 +93,6 @@ function assetFolderScope(settingsState, options) {
     return { globalObj, storage: globalObj.localStorage, scope: String(asyncState.assetScopeKey || '') };
 }
 
-const CHARACTER_FIELDS = ['characters', 'characterOutfits', 'characterDna', 'characterAliases', 'statusAvatars'];
 const SCENE_ACTION = /^scene-(?:(?:add|remove|rename|set|toggle|pick)-(?:bg|bg-word|bg-url|time|time-url|weather|weather-url)|variant-(?:set|retry))$/;
 const CHARACTER_ACTION = /^(?:scene-(?:add|remove|rename|set|toggle|pick)-(?:char|char-alias|mood|mood-url|dna-char|outfit-mood)|status-avatar-(?:pick|clear|set-url|generate)|char-generate-sprite|char-persona-extract|outfit-generate-nude|char-expression-(?:prompt|set|retry|resume)|outfit-expression-(?:prompt|set|retry|resume)|sprite-clear(?:-pick|-all|-apply)?)$/;
 
@@ -192,33 +190,9 @@ function installGeneratedCharacter(sceneAssets, name, replace = false) {
     return bound;
 }
 
-function characterExpressionDna(sceneAssets, name) {
-    const hit = resolveCharacterDna(
-        sceneAssets.characterDna,
-        name,
-        (raw) => resolveCharacterKey(sceneAssets.characters || {}, sceneAssets.characterAliases || {}, raw) || '',
-    );
-    return hit ? hit.dna : null;
-}
-
-// 「性格与表情习惯」：从角色卡 / 世界书 / 数据库收集提到这个角色的资料，交给副 LLM 提炼。
-async function extractCharacterPersona({ service, globalObj, sceneAssets, name }) {
-    if (!service || typeof service.summarizeCharacterPersona !== 'function') return { ok: false, error: '当前不能提炼性格' };
-    const sources = await collectCharacterSources(globalObj, { name, aliases: characterAliasesOf(sceneAssets, name) });
-    const sourcesText = formatCharacterSources(sources);
-    if (!sourcesText) {
-        return { ok: false, error: `角色卡、世界书和数据库里都没找到「${name}」的资料${sources.notes.length ? `（${sources.notes.join('，')}）` : ''}` };
-    }
-    const written = await service.summarizeCharacterPersona({ name, sourcesText });
-    if (!written || !written.ok) return { ok: false, error: (written && written.error) || '提炼失败' };
-    if (written.insufficient) return { ok: false, error: `资料里看不出「${name}」的性格` };
-    return { ok: true, persona: written.persona };
-}
-
 // 画默认立绘、头像时给写词的角色资料节选：比提炼性格时短，只补 DNA 没写到的长相和穿着。
 // 「副 LLM → 读取上下文」加大了预算时，素材服务另在说明前附上全部设定资料和正文原文。
 const SPRITE_SOURCE_LIMITS = Object.freeze({ card: 2000, worldbook: 2500, entry: 1000, database: 800 });
-const characterAliasesOf = (sceneAssets, name) => (sceneAssets.characterAliases && Array.isArray(sceneAssets.characterAliases[name]) ? sceneAssets.characterAliases[name] : []);
 
 // 角色卡 / 世界书 / 数据库节选，加上正文里提到这个角色的段落（长相、穿着常写在剧情里）。
 function characterSourcesText(material, sceneAssets, name) {
@@ -235,74 +209,9 @@ async function spriteWritingBackground({ settingsState, service, globalObj, scen
     return { world: prepared.world, sourcesText: characterSourcesText(material, sceneAssets, name) };
 }
 
-// 存进这个角色的 DNA（和 DNA 一起跟着角色走）；返回更新后的 DNA。
-function saveCharacterPersona(sceneAssets, name, persona) {
-    const map = sceneAssets.characterDna && typeof sceneAssets.characterDna === 'object' && !Array.isArray(sceneAssets.characterDna)
-        ? sceneAssets.characterDna : (sceneAssets.characterDna = {});
-    map[name] = normalizeCharacterDna({ ...normalizeCharacterDna(Object.hasOwn(map, name) ? map[name] : null), persona });
-    return map[name];
-}
-
-function expressionNoteKey(name, outfit) {
-    return outfit ? `${name}\u0001${outfit}` : name;
-}
-
-function firstGeneratedOutfitUrl(entry) {
-    const base = String(entry && entry.base || '').trim();
-    if (isGeneratedAssetUrl(base)) return base;
-    const moods = entry && entry.moods && typeof entry.moods === 'object' ? entry.moods : {};
-    for (const url of Object.values(moods)) {
-        const text = String(url || '').trim();
-        if (isGeneratedAssetUrl(text)) return text;
-    }
-    return '';
-}
-
-function clearExpressionNote(library, key, mood) {
-    if (!library.expressionNotes[key]) return library;
-    const notes = { ...library.expressionNotes[key] };
-    delete notes[mood];
-    if (Object.keys(notes).length) library.expressionNotes[key] = notes;
-    else delete library.expressionNotes[key];
-    return library;
-}
-
-function applyCharacterExpression(sceneAssets, name, item) {
-    const characters = { ...(sceneAssets.characters || {}) };
-    const current = { ...(characters[name] || {}) };
-    let library = normalizeGeneratedLibrary(sceneAssets.generated);
-    if (item && item.ok && item.imageId) {
-        current[item.mood] = `igs-gen:${item.imageId}`;
-        library = clearExpressionNote(library, name, item.mood);
-    } else {
-        // 停下没画的不建空槽，只把写好的词记在注记里，给「继续生图」用。
-        if (!Object.prototype.hasOwnProperty.call(current, item.mood) && item.error !== '已停止') current[item.mood] = '';
-        const noted = setGeneratedExpressionNote(library, name, item.mood, {
-            positive: item && item.prompt ? item.prompt.positive : '',
-            negative: item && item.prompt ? item.prompt.negative : '',
-            error: (item && item.error) || '出图失败',
-            caption: item && item.caption,
-        });
-        if (noted.ok) library = noted.library;
-    }
-    characters[name] = current;
-    sceneAssets.characters = characters;
-    sceneAssets.generated = library;
-}
-
 function settingsProgressHost(globalObj) {
     const doc = globalObj && globalObj.document;
     return doc && typeof doc.getElementById === 'function' ? doc.getElementById('igs-unified-settings') : null;
-}
-
-// 进度条写明在画谁：写词和出图分开说，一批多张带上第几张。
-function expressionProgressText(who, event) {
-    if (event && event.phase === 'write') return `写提示词：${who}`;
-    if (event && event.phase === 'persona') return `提炼性格：${who}`;
-    if (event && event.phase === 'world') return `提炼世界设定：${who}`;
-    const total = Number(event && event.total) || 0;
-    if (total > 1) return `生图中：${who}·${event.mood || ''} ${Number(event.done) || 0}/${total}`;
-    return `生图中：${who}`;
 }
 
 // 点下去就挂一条进度，结束时只收自己这一条；同时在画的其他格子进度还在。
@@ -352,63 +261,12 @@ function generationFailure(globalObj, dialogs, message, reason) {
     return { ok: false, reason };
 }
 
-// 已有提示词的先补画，不重写；剩下没有词的再写再画。补画中途停下就不再写。
-async function paintThenWriteExpressions({ service, name, paintItems, writeLabels, basePrompt, dna, outfit, note, nsfw, world = null, onProgress, signal }) {
-    const paint = paintItems.length && typeof service.paintExpressionCaptions === 'function'
-        ? await service.paintExpressionCaptions({ name, items: paintItems, basePrompt, dna, outfit, nsfw, onProgress, signal })
-        : null;
-    if (paint && !paint.ok) return paint;
-    if (paint && (paint.stopped || (signal && signal.aborted))) return paint;
-    const written = await service.generateExpressionSet({ name, basePrompt, moods: writeLabels, dna, outfit, note, nsfw, world, onProgress, signal });
-    if (!paint) return written;
-    const paintedItems = paint.items || [];
-    const wroteItems = written && written.items;
-    const failedWrite = !written || !written.ok
-        ? writeLabels.map((mood) => ({ mood, ok: false, error: (written && written.error) || '写提示词失败' }))
-        : [];
-    return {
-        ok: Boolean(written && written.ok) || paintedItems.some((item) => item.ok),
-        stopped: Boolean(written && written.stopped),
-        items: paintedItems.concat(wroteItems || failedWrite),
-        error: written && written.ok ? '' : (written && written.error),
-    };
-}
-
 function markExpressionActionBusy(globalObj, action, label = '生图中') {
     const host = settingsProgressHost(globalObj);
     const button = host && typeof host.querySelector === 'function'
         ? host.querySelector(`[data-action="${action}"]`)
         : null;
     return markSettingsButtonBusy(button, label);
-}
-
-function applyOutfitExpression(sceneAssets, name, outfitName, item) {
-    const mood = item && item.mood;
-    if (!mood || mood === '默认') return;
-    const all = { ...(sceneAssets.characterOutfits || {}) };
-    const outfits = { ...(all[name] || {}) };
-    const entry = { ...(outfits[outfitName] || { words: [], moods: {} }) };
-    const moods = { ...(entry.moods && typeof entry.moods === 'object' ? entry.moods : {}) };
-    const noteKey = expressionNoteKey(name, outfitName);
-    let library = normalizeGeneratedLibrary(sceneAssets.generated);
-    if (item.ok && item.imageId) {
-        moods[mood] = `igs-gen:${item.imageId}`;
-        library = clearExpressionNote(library, noteKey, mood);
-    } else {
-        if (!Object.prototype.hasOwnProperty.call(moods, mood) && item.error !== '已停止') moods[mood] = '';
-        const noted = setGeneratedExpressionNote(library, noteKey, mood, {
-            positive: item && item.prompt ? item.prompt.positive : '',
-            negative: item && item.prompt ? item.prompt.negative : '',
-            error: (item && item.error) || '出图失败',
-            caption: item && item.caption,
-        });
-        if (noted.ok) library = noted.library;
-    }
-    entry.moods = moods;
-    outfits[outfitName] = entry;
-    all[name] = outfits;
-    sceneAssets.characterOutfits = all;
-    sceneAssets.generated = library;
 }
 
 function persistGeneratedLibrary(persistSettingsDraft) {
@@ -1674,18 +1532,7 @@ export async function handleSettingsAction(action, ctx) {
             ? moodTierLabels(tier, { nsfw })
             : allGroups.map((group) => group.label);
         const ownUrl = outfitMode ? firstGeneratedOutfitUrl(outfitEntry) : '';
-        const baseUrl = ownUrl || String(character['默认'] || '');
-        const defaultId = generatedAssetIdOf(baseUrl);
-        let basePrompt = null;
-        try { basePrompt = defaultId ? await service.getImagePrompt(defaultId) : null; }
-        catch (error) { basePrompt = null; }
-        if (!basePrompt) {
-            const originId = generatedAssetIdOf(String(character['默认'] || ''));
-            if (originId && originId !== defaultId) {
-                try { basePrompt = await service.getImagePrompt(originId); }
-                catch (error) { basePrompt = null; }
-            }
-        }
+        const basePrompt = await expressionBasePrompt(service, character, ownUrl);
         const library = normalizeGeneratedLibrary(sceneAssets.generated);
         const noteKey = expressionNoteKey(name, outfitName);
         const note = retry ? (library.expressionNotes[noteKey] || {})[mood] : null;
@@ -1713,9 +1560,7 @@ export async function handleSettingsAction(action, ctx) {
             if (!savedCaption && note && note.caption) savedCaption = note.caption;
         }
         let dna = characterExpressionDna(sceneAssets, name);
-        const nude = outfitMode && isBuiltinNudeOutfit(outfitEntry.wardrobe);
-        const clothes = outfitMode && !nude ? resolveWardrobePrompt(draftEffectiveAssets(settingsState).wardrobe || {}, outfitEntry, outfitName) : null;
-        const outfit = outfitMode ? { name: outfitName, words: nude ? [] : outfitEntry.words, ownImage: Boolean(ownUrl), prompt: nude ? '' : (clothes ? clothes.prompt : ''), nude, nsfwBoost: Boolean(!nude && clothes && clothes.nsfwBoost) } : null;
+        const outfit = outfitMode ? expressionOutfitSpec(draftEffectiveAssets(settingsState).wardrobe, outfitName, outfitEntry, ownUrl) : null;
         if (retry && !mood) {
             endProgress();
             return rerenderSettings();

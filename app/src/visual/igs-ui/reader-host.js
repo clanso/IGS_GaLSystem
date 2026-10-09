@@ -10,7 +10,7 @@ import { normalizeBridgeConfig, normalizeReaderSettings } from './settings-host-
 import { extractSceneDirectives, resolveSceneStateAtIndex, resolveSceneAtSourceOffset, resolveIllustrationForPage, resolveHeldSourceOffsets, locateNarrativeOffset, stripIllustrationMarkers } from '../../scene/scene-directives.js';
 import { classifySceneKey, resolveCharacterKey } from '../../scene/scene-directives.js';
 import { recordOutfitReview, dropConfirmedOutfitReview } from '../../scene/outfit-review-store.js';
-import { draftAssetLibrary, ensureCardLibrary, relocateLegacyCard, rememberAssetScope, resolveAssetScope, sceneAssetsForContext } from '../../scene/asset-scope.js';
+import { CHARACTER_FIELDS, assetOwnerKey, draftAssetLibrary, ensureCardLibrary, relocateLegacyCard, rememberAssetScope, resolveAssetScope, sceneAssetsForContext } from '../../scene/asset-scope.js';
 import { getSillyTavernContext } from '../../host/tavern-helper-adapter.js';
 
 import { isMarkerDirectiveLine, stripMarkerDirectives } from '../../scene/directive-tags.js';
@@ -150,7 +150,9 @@ import {
 } from './embedded-reader-runtime.js';
 import { buildReaderSourceSignature, createReaderSourceCache } from './reader-source-cache.js';
 import { createImageResourceCache } from '../../media/resource-cache.js';
-import { collectFloorAssetUrls } from './floor-asset-prefetch.js';
+import { collectFloorAssetUrls, collectMissingExpressions } from './floor-asset-prefetch.js';
+import { checkExpressionGroups, expressionFillQuestion, expressionFillSummary, expressionGroupLabel, expressionProgressText, fillFloorExpressions } from './expression-fill.js';
+import { prepareWorld } from './world-context.js';
 import { createChatStreamObserver } from '../../host/chat-stream-observer.js';
 import { findAcuDice, formatCheckMessage, resolveDiceCommand } from '../../choices/dice-check.js';
 import { buildResultFxPlan, normalizeResultFxSettings, resultDetailOf } from './fx-result-model.js';
@@ -797,14 +799,19 @@ export function createIgsReaderHost(options = {}) {
         return model;
     }
 
+    // 这一楼的原文（带 igs 标签）：立绘预取和补表情都按它找每句是谁、什么表情、穿哪套。
+    function floorSourceText(payload) {
+        const liveMessage = (payload.message && payload.message.raw) || payload.message || payload.raw || '';
+        return String(payload.raw || (typeof liveMessage === 'string' ? liveMessage : '') || '');
+    }
+
     function warmActiveFloorImages(mountedSnapshot) {
         const current = state.activeReader;
         const payload = current && current.payload;
         const snapshot = mountedSnapshot || (current && current.snapshot);
         if (!payload || !snapshot) return;
         const readerSettings = snapshot.readerSettings || {};
-        const liveMessage = (payload.message && payload.message.raw) || payload.message || payload.raw || '';
-        const source = String(payload.raw || (typeof liveMessage === 'string' ? liveMessage : '') || '');
+        const source = floorSourceText(payload);
         const slots = snapshot.content && Array.isArray(snapshot.content.imageSlots) ? snapshot.content.imageSlots : [];
         const key = `${firstDefined(payload.messageId, payload.message && payload.message.id, '')}:${source.length}:${slots.map((slot) => (slot && slot.url) || '').join('|')}`;
         if (floorAssetPlan.key !== key) {
@@ -2329,7 +2336,9 @@ export function createIgsReaderHost(options = {}) {
         }
     }
 
-    async function runManualAssetGeneration({ deferSkip = false } = {}) {
+    // 「补全立绘与背景」：没登记的人物和缺的背景照旧交给素材补全（生成后待确认）；
+    // 已登记的角色按这一楼实际用到的「服装 + 表情」只补空着的那几格，先问一句再画，画好直接放进那一格。
+    async function runManualAssetGeneration() {
         const current = state.activeReader;
         if (!current) return { ok: false, reason: 'reader-not-open' };
         const feedback = (level, message, generating = false) => {
@@ -2338,14 +2347,6 @@ export function createIgsReaderHost(options = {}) {
             if (generating) writeGenerating();
             else imageNotice(level, message);
         };
-        // 没有可补全素材时交给重画当前图，这类跳过不必单独提示。
-        const skip = (result, message) => {
-            if (!deferSkip) {
-                feedback('warn', message);
-                return result;
-            }
-            return { ...result, skipMessage: message };
-        };
         const service = options.generatedAssets;
         if (!service || typeof service.processMessage !== 'function') {
             feedback('error', '补全素材不可用：素材生成服务未就绪');
@@ -2353,37 +2354,132 @@ export function createIgsReaderHost(options = {}) {
         }
         const target = readManualFloor(current);
         const messageId = target.messageId;
-        if (!target.floor) return skip({ ok: true, reason: target.reason }, `补全素材已跳过：${target.message}`);
+        if (!target.floor) {
+            feedback('warn', `补全素材已跳过：${target.message}`);
+            return { ok: true, reason: target.reason };
+        }
         if (current.assetGenerationPending) {
             feedback('info', '补全素材处理中，请等待当前任务完成', true);
             return { ok: true, reason: 'busy' };
         }
         current.assetGenerationPending = true;
-        feedback('info', `第 ${messageId} 楼补全素材：正在检查未登记的人物和场景…`, true);
         try {
-            const result = await service.processMessage(Number(messageId), { manual: true });
-            const skipped = {
-                disabled: '请在设置中开启自动背景或自动立绘并保存',
-                'scene-assets-disabled': '请在设置中开启场景素材并保存',
-                'not-eligible': '当前楼层不是最新的非空 AI 回复',
-                'nothing-missing': '本楼没有未登记的人物或场景，已登记的素材不会重复生成',
-            };
-            if (!result || !result.ok) {
-                feedback('error', `补全素材失败：${result && result.error || '素材生成失败（未返回具体原因）'}`);
-            } else if (result.reason === 'already-decided') {
-                feedback('warn', '补全素材已跳过：当前楼层已处理，请等待当前任务完成后重试');
-            } else if (skipped[result.reason]) {
-                return skip(result || { ok: false, reason: 'error' }, `补全素材已跳过：${skipped[result.reason]}`);
-            } else {
-                feedback('success', `补全素材完成：已生成 ${result.count || 0} 项素材，待确认`);
+            const expressions = await planFloorExpressions(current, service);
+            const fill = expressions.ready.length > 0 && await pageModal.confirm(expressionFillQuestion(expressions.ready));
+            feedback('info', `第 ${messageId} 楼补全素材：正在检查未登记的人物和场景…`, true);
+            let result;
+            let asset;
+            try {
+                result = await service.processMessage(Number(messageId), { manual: true });
+                asset = assetGenerationNotice(result, expressions);
+            } catch (error) {
+                result = { ok: false, reason: 'error' };
+                asset = { level: 'error', text: `补全素材异常：${(error && error.message) || error || '未知错误'}` };
             }
-            return result || { ok: false, reason: 'error' };
-        } catch (error) {
-            feedback('error', `补全素材异常：${(error && error.message) || error || '未知错误'}`);
-            return { ok: false, reason: 'error' };
+            const outcome = fill ? await runFloorExpressionFill(current, service, expressions.ready) : null;
+            const summary = expressionFillSummary({ outcome, ...expressions });
+            // 补了表情时，素材补全那边「没有要补的」就不用再说一遍。
+            const notices = [!outcome || !asset.skipped || !summary ? asset : null, summary].filter(Boolean);
+            const level = ['error', 'warn', 'success'].find((name) => notices.some((item) => item.level === name)) || 'info';
+            feedback(level, notices.map((item) => item.text).join('；'));
+            return outcome ? { ...result, expressions: outcome } : (result || { ok: false, reason: 'error' });
         } finally {
             current.assetGenerationPending = false;
         }
+    }
+
+    function assetGenerationNotice(result, expressions) {
+        const skipped = {
+            disabled: '请在设置中开启自动背景或自动立绘并保存',
+            'scene-assets-disabled': '请在设置中开启场景素材并保存',
+            'not-eligible': '当前楼层不是最新的非空 AI 回复',
+            'nothing-missing': '本楼没有未登记的人物或场景',
+        };
+        if (!result || !result.ok) return { level: 'error', text: `补全素材失败：${result && result.error || '素材生成失败（未返回具体原因）'}` };
+        if (result.reason === 'already-decided') return { level: 'warn', text: '补全素材已跳过：当前楼层已处理，请等待当前任务完成后重试' };
+        if (skipped[result.reason]) {
+            const allDrawn = result.reason === 'nothing-missing' && !expressions.ready.length && !expressions.skipped.length
+                && !expressions.unmapped.length && !expressions.pendingOutfits.length;
+            return { level: 'warn', skipped: true, text: `补全素材已跳过：${skipped[result.reason]}${allDrawn ? '，已登记角色用到的表情也都有图' : ''}` };
+        }
+        return { level: 'success', text: `补全素材完成：已生成 ${result.count || 0} 项素材，待确认` };
+    }
+
+    // 读当前合并后的素材库（本卡盖过全局）：补表情要看存档里最新的，不用阅读器上次渲染时的快照。
+    function readCurrentSceneAssets(current) {
+        const bridge = resolveBridgeConfigSnapshot({ mode: current.mode }).bridge;
+        return bridge.sceneAssets ? sceneAssetsForContext(bridge.sceneAssets, getSillyTavernContext(options.global || globalThis)) || {} : {};
+    }
+
+    // 已登记角色这一楼用到、还没有图的表情，按角色和服装分组；没有带提示词的生成立绘、照着写不了的组挪到 skipped。
+    async function planFloorExpressions(current, service) {
+        const none = { ready: [], skipped: [], unmapped: [], pendingOutfits: [] };
+        if (typeof service.generateExpressionSet !== 'function' || typeof service.getImagePrompt !== 'function') return none;
+        const payload = current.payload || {};
+        try {
+            const sceneAssets = readCurrentSceneAssets(current);
+            const missing = collectMissingExpressions({
+                source: floorSourceText(payload),
+                sceneAssets,
+                inheritedOutfits: payload.inheritedOutfits,
+                inheritedScene: payload.inheritedSceneState,
+                systemRole: current.snapshot && current.snapshot.readerSettings && current.snapshot.readerSettings.systemRole,
+                readClues: (names) => collectOutfitClues(readStatusHudTablesSafe(), names),
+            });
+            const checked = missing.groups.length ? await checkExpressionGroups({ groups: missing.groups, service, assets: sceneAssets }) : none;
+            return { ready: checked.ready, skipped: checked.skipped, unmapped: missing.unmapped, pendingOutfits: missing.pendingOutfits };
+        } catch (error) {
+            // 查不出来就只做原来的素材补全，原因记进生图日志。
+            if (options.imageJobLog && typeof options.imageJobLog.add === 'function') options.imageJobLog.add('warn', `查已登记角色缺的表情时出错：${(error && error.message) || error}`);
+            return none;
+        }
+    }
+
+    // 写词和设置里的「表情差分」同一条路；每组画完存进这个角色那一项所在的一边，阅读器马上换上。
+    function runFloorExpressionFill(current, service, groups) {
+        const globalObj = options.global || globalThis;
+        const bridge = resolveBridgeConfigSnapshot({ mode: current.mode }).bridge;
+        let world = null;
+        return fillFloorExpressions({
+            groups,
+            service,
+            globalObj,
+            readAssets: () => readCurrentSceneAssets(current),
+            save: (field, name, mutator) => {
+                const saved = mutateSceneLibrary(mutator, { collections: [field], name });
+                const ok = Boolean(saved && saved.ok !== false);
+                if (ok && state.activeReader === current) rerenderActiveReader();
+                return ok;
+            },
+            moodNoteOf: characterMoodNote,
+            // 世界设定提要和设置页一样记在当前角色卡上；这一次点击里只提炼一回。
+            getWorld: (report) => world || (world = prepareWorld({
+                assets: readCurrentSceneAssets(current),
+                service,
+                globalObj,
+                onProgress: report,
+                save: (summary) => mutateSceneLibrary((assets) => {
+                    assets.worldSummary = summary;
+                    return { ok: true };
+                }),
+            }).then((prepared) => prepared.world)),
+            nsfw: Boolean(bridge.autoIllustration && bridge.autoIllustration.nsfwEnabled === true),
+            onProgress: (group, event) => {
+                if (state.activeReader === current) generationStrip.manual(expressionProgressText(expressionGroupLabel(group), event));
+            },
+        });
+    }
+
+    // 设置里写表情差分时给这个角色记下的注意事项：记在角色所在的那一边，没有再看全局。
+    function characterMoodNote(name) {
+        const root = resolveBridgeConfigSnapshot({ mode: state.activeReader ? state.activeReader.mode : 'default' }).bridge.sceneAssets || {};
+        const scope = resolveAssetScope(getSillyTavernContext(options.global || globalThis));
+        const owner = assetOwnerKey(root, scope.key, CHARACTER_FIELDS, name);
+        const read = (library) => {
+            const notes = library && library.characterMoodNotes;
+            return notes && typeof notes[name] === 'string' ? notes[name].trim() : '';
+        };
+        return (owner && read((root.cards || {})[owner])) || read(root);
     }
 
     async function regenerateCurrentImage() {
@@ -4077,10 +4173,11 @@ export function createIgsReaderHost(options = {}) {
         });
     }
 
-    function mutateSceneLibrary(mutator) {
+    // target = { collections, name }：改的是已有的那一条时写回它所在的一边（本卡或全局）；不给就写当前角色卡（没打开卡时写全局）。
+    function mutateSceneLibrary(mutator, target = null) {
         if (state.activeSettings) {
             rememberAssetScope(state.activeSettings, getSillyTavernContext(options.global || globalThis));
-            const sceneAssets = draftAssetLibrary(state.activeSettings);
+            const sceneAssets = draftAssetLibrary(state.activeSettings, target);
             const result = mutator(sceneAssets);
             if (!result || result.ok === false) return result || { ok: false };
             const persisted = persistSettingsDraft();
@@ -4092,7 +4189,8 @@ export function createIgsReaderHost(options = {}) {
             const root = bridge.sceneAssets = bridge.sceneAssets || {};
             const scope = resolveAssetScope(getSillyTavernContext(options.global || globalThis));
             relocateLegacyCard(root, scope.key, scope.legacyKey);
-            const bucket = scope.key ? ensureCardLibrary(root, scope.key) : root;
+            const owner = target ? assetOwnerKey(root, scope.key, target.collections, target.name) : scope.key;
+            const bucket = owner ? ensureCardLibrary(root, owner) : root;
             result = mutator(bucket);
             if (!result || result.ok === false) return null;
             return { sceneAssets: root };

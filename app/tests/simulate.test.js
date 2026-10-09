@@ -844,6 +844,114 @@ test('gate:assets:reader-manual-rejects-ineligible-or-changed-floor', async () =
     } finally { host.destroy(); }
 });
 
+test('gate:assets:reader-manual-fills-registered-character-moods-used-in-the-floor', async () => {
+    const document = createFakeDocument();
+    const raw = [
+        '[igs-scene:教室|白天|晴]',
+        '[igs-char:冬月|委屈|校服|你又这样]',
+        '[igs-char:冬月|开心|算了]',
+        '[igs-char:冬月|平静|走吧]',
+    ].join('\n');
+    const floor = { chatId: 'chat-1', messageId: 39, swipeId: 0, isAi: true, isLatest: true, text: raw };
+    let bridge = {
+        autoIllustration: { assets: { spriteEnabled: true } },
+        sceneAssets: {
+            enabled: true,
+            scenes: {},
+            characters: { 冬月: { 默认: 'igs-gen:base' } },
+            characterDna: { 冬月: { persona: '嘴硬心软' } },
+            characterOutfits: { 冬月: { 校服: { words: [], moods: { 平和: 'igs-gen:calm' } } } },
+            worldSummary: '现代校园',
+        },
+    };
+    const calls = [];
+    const logs = [];
+    const service = {
+        resolveUrl: () => '',
+        async processMessage() { return { ok: true, reason: 'nothing-missing' }; },
+        async getImagePrompt(id) { return id === 'calm' ? { positive: '1girl, school uniform' } : null; },
+        async generateExpressionSet(args) {
+            calls.push(args);
+            return { ok: true, items: args.moods.map((mood, i) => ({ mood, ok: true, imageId: `new${i + 1}` })) };
+        },
+    };
+    const host = createIgsReaderHost({
+        global: { document },
+        getUnifiedSettings: () => ({ bridge, readerSettings: {} }),
+        saveUnifiedSettings: (next) => { bridge = next.bridge; return { ok: true }; },
+        getIllustrationSource: () => floor,
+        generatedAssets: service,
+        imageJobLog: { add: (level, message) => logs.push({ level, message }) },
+    });
+    try {
+        const opened = host.openReader({ messageId: 39, message: { id: 39, text: raw }, raw }, { mode: 'pc' });
+        assert.equal(opened.ok, true);
+        const result = await acceptPageModal(document, opened.controller.invokeAction('generate-assets'));
+        // 只补这一楼穿校服时用到、还空着的两格：委屈、开心（归「喜悦」）；平静归「平和」已有图。
+        assert.equal(calls.length, 1);
+        assert.deepEqual(calls[0].moods, ['委屈', '喜悦']);
+        assert.equal(calls[0].name, '冬月');
+        assert.deepEqual([calls[0].outfit.name, calls[0].outfit.ownImage], ['校服', true]);
+        assert.deepEqual(calls[0].basePrompt, { positive: '1girl, school uniform' });
+        assert.equal(calls[0].dna.persona, '嘴硬心软');
+        assert.equal(calls[0].world.summary, '现代校园');
+        assert.deepEqual(bridge.sceneAssets.characterOutfits.冬月.校服.moods, { 平和: 'igs-gen:calm', 委屈: 'igs-gen:new1', 喜悦: 'igs-gen:new2' });
+        assert.deepEqual(bridge.sceneAssets.characters.冬月, { 默认: 'igs-gen:base' }, '原装不动');
+        assert.equal(result.expressions.painted, 2);
+        assert.match(host.getState().activeReader.generationTip, /补好 2 张表情/);
+        assert.equal(logs.at(-1).level, 'success');
+        // 都补齐后再点：不再问，也不再画。
+        const again = await opened.controller.invokeAction('generate-assets');
+        assert.equal(again.reason, 'nothing-missing');
+        assert.equal(calls.length, 1);
+        assert.match(host.getState().activeReader.generationTip, /表情也都有图/);
+    } finally { host.destroy(); }
+});
+
+test('gate:assets:reader-manual-mood-fill-asks-first-and-skips-sprites-without-prompts', async () => {
+    const document = createFakeDocument();
+    const raw = '[igs-char:冬月|委屈|你又这样]\n[igs-char:小林|生气|喂]';
+    const floor = { chatId: 'chat-1', messageId: 39, swipeId: 0, isAi: true, isLatest: true, text: raw };
+    const bridge = {
+        sceneAssets: {
+            enabled: true,
+            scenes: {},
+            characters: { 冬月: { 默认: 'igs-gen:base' }, 小林: { 默认: 'https://example.com/lin.png' } },
+        },
+    };
+    const calls = [];
+    const host = createIgsReaderHost({
+        global: { document },
+        getUnifiedSettings: () => ({ bridge, readerSettings: {} }),
+        saveUnifiedSettings: () => { throw new Error('取消后不该保存'); },
+        getIllustrationSource: () => floor,
+        generatedAssets: {
+            resolveUrl: () => '',
+            async processMessage() { return { ok: true, reason: 'nothing-missing' }; },
+            async getImagePrompt(id) { return id === 'base' ? { positive: '1girl' } : null; },
+            async generateExpressionSet(args) { calls.push(args); return { ok: true, items: [] }; },
+        },
+    });
+    try {
+        const opened = host.openReader({ messageId: 39, message: { id: 39, text: raw }, raw }, { mode: 'pc' });
+        const pending = opened.controller.invokeAction('generate-assets');
+        let modal = null;
+        for (let i = 0; i < 40 && !modal; i += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            modal = document.querySelector('.igs-page-modal');
+        }
+        assert.ok(modal, '要画之前先问');
+        const question = modal.querySelector('.igs-page-modal-msg').textContent;
+        assert.match(question, /冬月：委屈/);
+        assert.doesNotMatch(question, /小林/, '自己上传的图没有提示词，照着写不了，不列进要画的');
+        modal.dispatchEvent({ type: 'click', target: { closest: () => ({ getAttribute: () => 'cancel' }) } });
+        const result = await pending;
+        assert.equal(result.reason, 'nothing-missing');
+        assert.equal(calls.length, 0);
+        assert.match(host.getState().activeReader.generationTip, /「小林」补不了表情/);
+    } finally { host.destroy(); }
+});
+
 test('gate:simulation:html-card-page-hides-inherited-sprite-and-restores-it-after-paging', () => {
     const document = createFakeDocument({ innerWidth: 1280, innerHeight: 720 });
     const raw = `<content>

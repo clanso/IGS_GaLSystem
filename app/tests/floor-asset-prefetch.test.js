@@ -40,3 +40,50 @@ test('gate:floor-assets:skips-narrators-and-keeps-inherited-background', () => {
     });
     assert.deepEqual(urls, ['class.png', 'igs-gen:base']);
 });
+
+test('gate:floor-assets:missing-expressions-only-the-moods-each-registered-outfit-uses', async () => {
+    const { collectMissingExpressions } = await import('../src/visual/igs-ui/floor-asset-prefetch.js');
+    const assets = {
+        ...sceneAssets,
+        characterOutfits: {
+            冬月: { 校服: { words: [], moods: { 平和: 'igs-gen:uniform-calm' } } },
+            小林: { 睡袍: { words: [], moods: {} } },
+        },
+    };
+    const missing = collectMissingExpressions({
+        source: [
+            '[igs-scene:教室|白天|晴]',
+            '[igs-char:冬月|开心|校服|早]',
+            '[igs-char:冬月|平静|还行]',
+            '[igs-char:冬月|委屈|你又这样]',
+            '[igs-char:冬月|高兴|算了]',
+            '[igs-char:冬月|严肃|说正事]',
+            '[igs-char:小林|生气|喂]',
+            '[igs-char:小林|害羞|睡袍-孕晚期|别看]',
+            '[igs-char:路人|生气|让开]',
+            '[igs-char:冬月|咕咕|嗯？]',
+        ].join('\n'),
+        sceneAssets: assets,
+    });
+    // 冬月穿校服：开心 / 高兴归「喜悦」只补一张，平静归「平和」已有，严肃归「默认」不补；小林原装缺「愤怒」。
+    assert.deepEqual(missing.groups, [
+        { character: '冬月', outfit: '校服', moods: ['喜悦', '委屈'] },
+        { character: '小林', outfit: '', moods: ['愤怒'] },
+    ]);
+    // 还没登记的「睡袍-孕晚期」不能当原装或「睡袍」去画；归不进情绪组的词单独列出；没登记的路人交给素材补全。
+    assert.deepEqual(missing.pendingOutfits, [{ character: '小林', outfit: '睡袍-孕晚期' }]);
+    assert.deepEqual(missing.unmapped, [{ character: '冬月', mood: '咕咕' }]);
+});
+
+test('gate:floor-assets:missing-expressions-follows-inherited-outfit-and-needs-scene-assets', async () => {
+    const { collectMissingExpressions } = await import('../src/visual/igs-ui/floor-asset-prefetch.js');
+    const assets = { ...sceneAssets, characterOutfits: { 冬月: { 校服: { words: [], moods: {} } } } };
+    const source = '[igs-char:冬月|喜悦|又见面了]';
+    assert.deepEqual(collectMissingExpressions({ source, sceneAssets: assets }).groups, [], '原装已有「喜悦」');
+    assert.deepEqual(
+        collectMissingExpressions({ source, sceneAssets: assets, inheritedOutfits: { 冬月: '校服' } }).groups,
+        [{ character: '冬月', outfit: '校服', moods: ['喜悦'] }],
+        '上一楼换上的校服接着穿',
+    );
+    assert.deepEqual(collectMissingExpressions({ source, sceneAssets: { ...assets, enabled: false }, inheritedOutfits: { 冬月: '校服' } }).groups, []);
+});
