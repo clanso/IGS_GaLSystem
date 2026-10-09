@@ -138,6 +138,9 @@ try {
   await page.locator('.igsd-field', { hasText: '模型' }).locator('select').first().selectOption('nai-diffusion-5-full')
   await sleep(1200)
   await shot('26-settings-nai-v5')
+  // 版本与更新：有新版本 → 一键更新 → 提示重启
+  await click('.igsd-tab:has-text("版本与更新")', 900); await shot('27-update-available')
+  await click('.igsd-btn:has-text("立即更新")', 2200); await shot('28-update-restart')
   await page.keyboard.press('Escape'); await sleep(300)
   await page.keyboard.press('Escape')
   await sleep(500)

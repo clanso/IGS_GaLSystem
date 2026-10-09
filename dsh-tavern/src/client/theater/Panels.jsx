@@ -1,6 +1,6 @@
 // 剧场里的四个面板：回想（Backlog）、鉴赏（CG / 背景 / 重画 / 改词）、人物志（外貌档案）、设置。导演日志在 DirectorLog.jsx。
 import React from 'react'
-import { api, assetUrl, toast, useConfig, patchConfig, setConfig } from '../api.js'
+import { api, assetUrl, toast, useConfig, patchConfig, setConfig, useUpdate, loadUpdate, setUpdate, updateAvailable } from '../api.js'
 import { EMOTION_LABEL, TIME_LABEL, WEATHER_LABEL, MOOD_LABEL, cgSrc } from './playback.js'
 import { Silhouette } from './Stage.jsx'
 import { SKINS } from './skins.js'
@@ -613,17 +613,66 @@ export function LookSection({ data }) {
   )
 }
 
+const stamp = t => new Date(t).toLocaleString('zh-CN', { year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+
+/** 版本与更新：插件目录是 git 克隆时，检查远端、一键快进；更新后提示重启 DSH。 */
+function UpdateSection({ data }) {
+  const u = useUpdate()
+  const [busy, run] = useBusy()
+  const act = (id, action, ok) => run(id, async () => setUpdate((await api.runUpdate(action)).update), ok)
+  const last = u && u.last
+  return (
+    <>
+      <div className="igsd-section">版本与更新</div>
+      {!u && <div className="igsd-note">读取中…</div>}
+      {u && !u.managed && (
+        <>
+          <Field label="当前版本">v{__IGS_VERSION__}</Field>
+          <div className="igsd-note">{u.reason} 手动更新：在终端里进 clone 下来的 IGS_GaLSystem 文件夹执行 <code>git pull</code>，再重新执行一遍安装命令，然后重启 DSH。</div>
+        </>
+      )}
+      {u && u.managed && (
+        <>
+          <Field label="当前版本" hint={u.current.subject}>v{__IGS_VERSION__} · {u.current.sha} · {stamp(u.current.time)}</Field>
+          <Field label="跟踪分支">{u.current.tracking}</Field>
+          {u.restartRequired && <div className="igsd-update-done">✓ 新版本已经下载好了。重启 DSH（关掉再打开）后刷新网页，就会用上新版本。</div>}
+          <Field label="远端">
+            {!last ? <span className="igsd-note">还没检查</span>
+              : last.error ? <span className="igsd-err">{last.error}{last.fallback ? `；可以改跟 ${last.fallback} 分支` : ''}</span>
+                : last.behind ? <b className="igsd-ok">有新版本：{last.commits.length || last.behind} 个更新（{last.target}）</b>
+                  : <span className="igsd-ok">已是最新</span>}
+            {last && <span className="igsd-note">　检查于 {stamp(last.checkedAt)}</span>}
+          </Field>
+          {last && last.commits.length > 0 && (
+            <div className="igsd-changes">
+              {last.commits.map(c => <div key={c.sha}><code>{c.sha}</code><span>{c.subject}</span><small>{stamp(c.time)}</small></div>)}
+            </div>
+          )}
+          <div className="igsd-row" style={{ margin: '1cqw 0 0 15.2cqw' }}>
+            <button type="button" className="igsd-btn" disabled={Boolean(busy)} onClick={() => run('check', () => loadUpdate('force'))}>{busy === 'check' ? '检查中…' : '检查更新'}</button>
+            {updateAvailable(u) && <button type="button" className="igsd-btn is-primary" disabled={Boolean(busy)} onClick={() => act('apply', 'apply', '已更新，重启 DSH 后生效')}>{busy === 'apply' ? '更新中…' : '立即更新'}</button>}
+            {last && last.gone && last.fallback && <button type="button" className="igsd-btn is-primary" disabled={Boolean(busy)} onClick={() => act('switch', 'switch', `已切到 ${last.fallback}，重启 DSH 后生效`)}>{busy === 'switch' ? '切换中…' : `改跟 ${last.fallback} 并更新`}</button>}
+          </div>
+          <div className="igsd-note" style={{ margin: '0.8cqw 0 0 15.2cqw' }}>只做快进更新：你本地改过的文件不会被覆盖，有冲突时会停下来把原因写在这里。</div>
+        </>
+      )}
+      <Field label="自动检查" hint="打开剧场时顺便看一眼有没有新版本，最多 12 小时一次。"><Toggle value={data.config.ui.updateCheck} onChange={v => patchConfig({ ui: { updateCheck: v } }).catch(e => toast(e.message, 'error'))} /></Field>
+    </>
+  )
+}
+
 export function Settings({ onClose, onDirectorLog = null, initialTab = 'look' }) {
   const data = useConfig()
   const [tab, setTab] = React.useState(initialTab)
   return (
-    <Panel title="设置" en="Config" onClose={onClose} tabs={[{ id: 'look', label: '外观与演出' }, { id: 'director', label: '导演' }, { id: 'images', label: '生图渠道' }, { id: 'style', label: '画风与配图' }]} tab={tab} onTab={setTab}
+    <Panel title="设置" en="Config" onClose={onClose} tabs={[{ id: 'look', label: '外观与演出' }, { id: 'director', label: '导演' }, { id: 'images', label: '生图渠道' }, { id: 'style', label: '画风与配图' }, { id: 'about', label: '版本与更新' }]} tab={tab} onTab={setTab}
       actions={data && <span className={`igsd-pill${data.ready ? '' : ' igsd-err'}`}>{data.ready ? '生图已就绪' : data.readyReason}</span>}>
       {!data && <div className="igsd-note">读取设置中…</div>}
       {data && tab === 'look' && <LookSection data={data} />}
       {data && tab === 'director' && <DirectorSection data={data} onDirectorLog={onDirectorLog} />}
       {data && tab === 'images' && <BackendSection data={data} />}
       {data && tab === 'style' && <><StyleSection data={data} /><ImagesSection data={data} /></>}
+      {data && tab === 'about' && <UpdateSection data={data} />}
       {data && <div className="igsd-note" style={{ marginTop: '2cqw' }}>Key 只存在 DSH 宿主（优先存进 DSH 凭据库：{data.secretStorage}），浏览器只看得到「有没有填」。</div>}
     </Panel>
   )

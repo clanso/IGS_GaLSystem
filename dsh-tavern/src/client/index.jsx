@@ -7,7 +7,7 @@ import theaterCss from './styles/theater.css'
 import skinsCss from './styles/skins.css'
 import chatCss from './styles/chat.css'
 import fxCss from './generated/igs-fx.css'
-import { api, openTheater, rememberGame, toast, useConfig, patchConfig } from './api.js'
+import { api, openTheater, rememberGame, toast, useConfig, patchConfig, useUpdate, updateAvailable } from './api.js'
 import { TheaterRoot, Toast } from './theater/Theater.jsx'
 import { SceneCardInline, CgCardInline } from './chat/ChatCards.jsx'
 
@@ -39,6 +39,19 @@ function Launcher(props) {
   )
 }
 
+/** 设置卡里的一行版本信息：有新版本 / 已下载待重启时提示，点进剧场的「版本与更新」页。 */
+function UpdateLine() {
+  const u = useUpdate()
+  const text = !u ? '' : !u.managed ? '' : u.restartRequired ? '新版本已下载，重启 DSH 后生效' : updateAvailable(u) ? `有新版本（${u.last.commits.length || u.last.behind} 个更新）` : ''
+  return (
+    <div className="igsd-settings-row">
+      <span style={{ opacity: 0.7 }}>v{__IGS_VERSION__}{u && u.managed ? ` · ${u.current.sha}` : ''}</span>
+      {text && <span style={{ color: '#d9822b' }}>● {text}</span>}
+      <button type="button" className="igsd-ghost" onClick={() => openTheater('', { panel: 'settings', panelArg: 'about' })}>版本与更新</button>
+    </div>
+  )
+}
+
 function SettingsSection() {
   const data = useConfig()
   if (!data) return <div className="igsd-settings-card">读取中…</div>
@@ -59,6 +72,7 @@ function SettingsSection() {
         <span style={{ color: data.ready ? '#4caf7a' : '#d9822b' }}>{data.ready ? '● 生图已就绪' : '● ' + data.readyReason}</span>
         <button type="button" className="igsd-play" onClick={() => openTheater('', { panel: 'settings' })}>打开完整设置</button>
       </div>
+      <UpdateLine />
     </div>
   )
 }

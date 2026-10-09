@@ -42,6 +42,8 @@ export const api = {
   test: () => call('/test', {}),
   models: () => call('/models'),
   llm: provider => call(`/llm?provider=${encodeURIComponent(provider || '')}`),
+  update: check => call(`/update${check ? `?check=${check}` : ''}`),
+  runUpdate: action => call('/update', { action }),
 }
 
 // ───────────── 全局状态：剧场是否打开、看哪一局、从哪一轮开始 ─────────────
@@ -95,6 +97,24 @@ export async function patchConfig(patch) {
   setConfig(data)
   return data
 }
+
+// ───────────── 插件更新状态（整个页面共用一份；自动检查由宿主限频） ─────────────
+let updateState = null
+const updateListeners = new Set()
+export function setUpdate(update) { updateState = update; for (const fn of [...updateListeners]) fn() }
+export function loadUpdate(check) { return api.update(check).then(r => { setUpdate(r.update); return r.update }) }
+/** 订阅更新状态；autoCheck 为真时（设置里开着自动检查）首次挂载顺便让宿主检查一次远端。 */
+export function useUpdate(autoCheck = false) {
+  const [, force] = React.useReducer(x => x + 1, 0)
+  React.useEffect(() => {
+    updateListeners.add(force)
+    if (!updateState || autoCheck) loadUpdate(autoCheck ? 'auto' : '').catch(() => {})
+    return () => updateListeners.delete(force)
+  }, [autoCheck])
+  return updateState
+}
+/** 有新版本可装（且还没装上等重启）。 */
+export const updateAvailable = u => Boolean(u && u.managed && u.last && u.last.behind > 0 && !u.restartRequired)
 
 /** 长轮询：fetchOnce(since, signal) 返回 { rev, ... }；修订号变了才更新。active=false 时不连。 */
 function useLongPoll(key, active, fetchOnce) {

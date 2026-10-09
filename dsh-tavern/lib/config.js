@@ -62,6 +62,7 @@ export const DEFAULT_CONFIG = {
     particles: true,
     fontScale: 1,
     autoOpen: false,         // 新一轮写完后自动打开剧场
+    updateCheck: true,       // 打开剧场时检查插件更新（最多 12 小时一次，只在插件是 git 克隆时生效）
   },
 }
 

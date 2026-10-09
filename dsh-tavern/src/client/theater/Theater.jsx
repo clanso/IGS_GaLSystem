@@ -1,6 +1,6 @@
 // 剧场：全屏 galgame 播放器。读宿主整理好的场景脚本，逐拍演出；导演没整理完的部分先按原文演。
 import React from 'react'
-import { api, ui, useUi, useGameView, useConfig, toast, openTheater } from '../api.js'
+import { api, ui, useUi, useGameView, useConfig, useUpdate, updateAvailable, toast, openTheater } from '../api.js'
 import { buildBeats, TIME_LABEL, WEATHER_LABEL, MOOD_LABEL, EMOTION_LABEL, pickBgm } from './playback.js'
 import { Backdrop, Cast, CgLayer, TitleCard, Flash, Particles, useCamera } from './Stage.jsx'
 import { DialogBox, SceneCard, Choices, useTypewriter } from './Dialog.jsx'
@@ -71,6 +71,8 @@ function Theater({ gameId, view, viewError, cfg, startTurn, panel: initialPanel,
   const [index, setIndex] = React.useState(-1)
   const [title, setTitle] = React.useState(startTurn == null && !initialPanel)
   const [panel, setPanel] = React.useState(initialPanel || '')
+  const [settingsTab, setSettingsTab] = React.useState(initialPanel === 'settings' && typeof panelArg === 'string' ? panelArg : 'look')
+  const update = useUpdate(Boolean(cfg && cfg.ui.updateCheck))
   const [auto, setAuto] = React.useState(false)
   const [skip, setSkip] = React.useState(false)
   const [hidden, setHidden] = React.useState(false)
@@ -213,7 +215,8 @@ function Theater({ gameId, view, viewError, cfg, startTurn, panel: initialPanel,
     gameId ? { id: 'director', label: '导演日志', en: 'Director', run: () => setPanel('director') } : null,
     { id: 'gallery', label: '鉴赏', en: 'Gallery', run: () => setPanel('gallery') },
     { id: 'cast', label: '人物志', en: 'Characters', run: () => setPanel('cast') },
-    { id: 'settings', label: '设置', en: 'Config', run: () => setPanel('settings') },
+    updateAvailable(update) ? { id: 'update', label: '更新插件', en: 'New version', badge: true, run: () => { setSettingsTab('about'); setPanel('settings') } } : null,
+    { id: 'settings', label: '设置', en: 'Config', run: () => { setSettingsTab('look'); setPanel('settings') } },
     { id: 'quit', label: '回到聊天', en: 'Return', run: close },
   ].filter(Boolean)
 
@@ -271,7 +274,7 @@ function Theater({ gameId, view, viewError, cfg, startTurn, panel: initialPanel,
             <div className="igsd-title-sub">{latest ? `第 ${latest.turn} 轮 · ${latest.scene.location || '—'} · ${TIME_LABEL[latest.scene.time] || ''}` : gameId ? '开场白还没有整理' : '先在聊天里打开一局'}</div>
             <div className="igsd-title-menu">
               {titleMenu.map((m, i) => (
-                <button key={m.id} type="button" style={{ '--i': i }} onMouseEnter={() => sfx('hover')} onClick={() => { sfx('select'); m.run() }}>{m.label}<span>{m.en}</span></button>
+                <button key={m.id} type="button" className={m.badge ? 'is-new' : undefined} style={{ '--i': i }} onMouseEnter={() => sfx('hover')} onClick={() => { sfx('select'); m.run() }}>{m.label}<span>{m.en}</span></button>
               ))}
             </div>
             <div className="igsd-title-foot">IGS 背景与配乐：IGS_GaLSystem 默认素材包 · 配乐 魔王魂 · 字体 霞鹜 / 汇文 / 思源（OFL）</div>
@@ -282,7 +285,7 @@ function Theater({ gameId, view, viewError, cfg, startTurn, panel: initialPanel,
         {panel === 'gallery' && <Gallery view={view} gameId={gameId} focusId={panelArg} onClose={() => setPanel('')} />}
         {panel === 'cast' && <CastPanel view={view} gameId={gameId} onClose={() => setPanel('')} />}
         {panel === 'director' && <DirectorLog gameId={gameId} focusTurn={panelArg} onClose={() => setPanel('')} />}
-        {panel === 'settings' && <Settings onClose={() => setPanel('')} onDirectorLog={gameId ? () => setPanel('director') : null} />}
+        {panel === 'settings' && <Settings initialTab={settingsTab} onClose={() => setPanel('')} onDirectorLog={gameId ? () => setPanel('director') : null} />}
       </div>
     </div>
   )

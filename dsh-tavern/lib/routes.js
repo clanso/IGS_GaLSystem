@@ -29,7 +29,7 @@ function readBody(req) {
   })
 }
 
-export function createRoutes({ engine, logger }) {
+export function createRoutes({ engine, updater, logger }) {
   // 每局一个修订号：浏览器长轮询 /game?since=N，有变化立即返回。
   const revisions = new Map()
   const waiters = new Map()
@@ -110,6 +110,13 @@ export function createRoutes({ engine, logger }) {
     json('POST', '/test', async () => engine.testBackend()),
     json('GET', '/models', async () => engine.listModels()),
     json('GET', '/llm', async ({ query }) => engine.llmModels(String(query.provider || ''))),
+    // 插件自更新：GET 看版本（check=auto / force 时顺便拉远端）；POST action=apply 快进更新，action=switch 改跟 main。
+    json(['GET', 'POST'], '/update', async ({ method, query, body }) => {
+      if (method === 'GET') return { update: await updater.status(['auto', 'force'].includes(query.check) ? query.check : 'none') }
+      if (body.action === 'apply') return { update: await updater.apply() }
+      if (body.action === 'switch') return { update: await updater.switchToFallback() }
+      throw new Error('未知的更新操作')
+    }),
     {
       kind: 'exact',
       path: BASE + '/asset',

@@ -89,7 +89,22 @@ async function settle(t) {
 for (const t of TURNS) await settle(t)
 
 // ───────── HTTP ─────────
-const routes = new Map(createRoutes({ engine, logger }).map(r => [r.path, r.handler]))
+// ───────── 假更新器：演示「有新版本」→「已下载，待重启」，不碰真的 git ─────────
+const hour = 3600 * 1000
+const update = {
+  managed: true, restartRequired: false,
+  current: { sha: 'b050994', time: Date.now() - 12 * hour, subject: 'feat(dsh-tavern): 浏览器半边——视觉小说剧场、聊天场景卡与插画卡', branch: 'feat/dsh-tavern-plugin', tracking: 'origin/feat/dsh-tavern-plugin' },
+  last: { checkedAt: Date.now(), behind: 2, ahead: 0, target: '8b6097f', error: '', gone: false, fallback: '', commits: [
+    { sha: '9c1e2a4', time: Date.now() - hour / 2, subject: 'feat(dsh-tavern): 剧场里检查更新、一键更新' },
+    { sha: '8b6097f', time: Date.now() - hour, subject: 'feat(dsh-tavern): 导演日志、生图模型实时列表、NovelAI V5 透明底与更多参数' },
+  ] },
+}
+const updater = {
+  status: async () => update,
+  apply: async () => { await sleep(1200); Object.assign(update, { restartRequired: true, last: { ...update.last, behind: 0, commits: [], checkedAt: Date.now() } }); return update },
+  switchToFallback: async () => update,
+}
+const routes = new Map(createRoutes({ engine, updater, logger }).map(r => [r.path, r.handler]))
 const TYPES = { '.js': 'text/javascript; charset=utf-8', '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.webp': 'image/webp', '.png': 'image/png', '.mp3': 'audio/mpeg', '.woff2': 'font/woff2', '.ttf': 'font/ttf', '.json': 'application/json' }
 async function sendFile(res, file) {
   try {

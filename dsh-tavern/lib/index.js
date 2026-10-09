@@ -4,6 +4,7 @@
 import { createStore } from './store.js'
 import { createEngine, PLUGIN } from './engine.js'
 import { createRoutes } from './routes.js'
+import { createUpdater } from './updater.js'
 
 export const name = PLUGIN
 export const inject = ['webServer']
@@ -27,7 +28,7 @@ export function apply(ctx) {
     logger.info?.(`[${PLUGIN}] 已接入 Tavern 插件接口 v${tavern.apiVersion}`)
   })
 
-  const routes = createRoutes({ engine, logger })
+  const routes = createRoutes({ engine, updater: createUpdater(), logger })
   const install = () => {
     const disposers = routes.map(route => ctx.webServer.register(route))
     return () => { for (const d of disposers) { try { typeof d === 'function' && d() } catch {} } }
