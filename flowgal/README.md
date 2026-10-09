@@ -1,5 +1,7 @@
 # FlowGal · DSH Tavern 视觉小说插件
 
+> **已搬到独立仓库：https://github.com/clanso/flowgal** 。这里不再更新。重装方法见新仓库 README 的「从旧版本搬过来」：先 `pnpm dsh plugin --profile web remove` 掉旧插件，再 `git clone https://github.com/clanso/flowgal.git` 并 `pnpm dsh plugin --profile web add ./flowgal`。设置、Key、存档都会保留。
+
 把 [DSH Tavern](https://github.com/flizzywine/dsh-tavern) 的聊天变成一部会自己排版、配图、配乐的视觉小说。
 
 **正文先出，演出后到。** Tavern 照常流式输出正文，你可以立刻读；这一轮写完后，插件在后台让一个「导演」模型把正文整理成场景脚本：谁在说话、什么表情、站在哪、镜头怎么走、要不要插一张 CG、给你几个选项。整理好之前剧场就能按原文先演，整理好后画面会原地更新。
