@@ -151,7 +151,7 @@ import {
 import { buildReaderSourceSignature, createReaderSourceCache } from './reader-source-cache.js';
 import { createImageResourceCache } from '../../media/resource-cache.js';
 import { collectFloorAssetUrls, collectMissingExpressions } from './floor-asset-prefetch.js';
-import { checkExpressionGroups, expressionFillQuestion, expressionFillSummary, expressionGroupLabel, expressionProgressText, fillFloorExpressions, wardrobeClues } from './expression-fill.js';
+import { checkExpressionGroups, expressionFillQuestion, expressionFillSummary, expressionGroupLabel, expressionProgressText, fillFloorExpressions, clothesClues } from './expression-fill.js';
 import { readSourceMaterial } from '../../host/character-sources.js';
 import { prepareWorld } from './world-context.js';
 import { createChatStreamObserver } from '../../host/chat-stream-observer.js';
@@ -2437,7 +2437,7 @@ export function createIgsReaderHost(options = {}) {
         }
     }
 
-    // 写词和设置里的「表情差分」同一条路；新服装先建好、补上衣柜提示词（和「待确认 → 生成提示词」同一条路）。
+    // 写词和设置里的「表情差分」同一条路；新服装先建好（不写衣柜），衣服照正文里写这件衣服的段落画。
     // 每组画完存进那一项所在的一边，阅读器马上换上。
     function runFloorExpressionFill(current, service, groups) {
         const globalObj = options.global || globalThis;
@@ -2467,10 +2467,7 @@ export function createIgsReaderHost(options = {}) {
             },
             moodNoteOf: characterMoodNote,
             getWorld,
-            wardrobeBackground: async (character, outfit, report) => {
-                const material = await readSourceMaterial(globalObj);
-                return { world: await getWorld(report), ...wardrobeClues(material, readCurrentSceneAssets(current), { character, outfit }) };
-            },
+            outfitClues: async (character, clothes) => clothesClues(await readSourceMaterial(globalObj), readCurrentSceneAssets(current), { character, outfit: clothes }),
             nsfw: Boolean(bridge.autoIllustration && bridge.autoIllustration.nsfwEnabled === true),
             onProgress: (group, event) => {
                 if (state.activeReader === current) generationStrip.manual(expressionProgressText(expressionGroupLabel(group), event));

@@ -5,14 +5,15 @@ import { collectCharacterSources, formatCharacterSources, pickChatMentions } fro
 import { collectOutfitClues } from '../../data/shujuku/outfit-clues.js';
 import { generatedAssetIdOf, isGeneratedAssetUrl, normalizeGeneratedLibrary, setGeneratedExpressionNote } from '../../scene/asset-match.js';
 import { normalizeCharacterDna, resolveCharacterDna } from '../../scene/character-dna.js';
-import { BUILTIN_NUDE_OUTFIT, isBuiltinNudeOutfit, isValidOutfitName, normalizeWardrobe, resolveWardrobePrompt, stateOutfitWardrobe } from '../../scene/character-outfits.js';
+import { BUILTIN_NUDE_OUTFIT, isBuiltinNudeOutfit, isValidOutfitName, resolveWardrobePrompt, stateOutfitWardrobe } from '../../scene/character-outfits.js';
+import { splitOutfitState } from '../../scene/body-state.js';
 import { resolveCharacterKey } from '../../scene/scene-directives.js';
 
 export const characterAliasesOf = (sceneAssets, name) => (sceneAssets.characterAliases && Array.isArray(sceneAssets.characterAliases[name]) ? sceneAssets.characterAliases[name] : []);
 
-// 写衣柜提示词的线索：正文里描写这套衣服的段落、数据库里这个角色提到这套衣服的穿着记录
+// 一件衣服的线索（写衣柜提示词、给没有图的新服装写表情时用）：正文里描写这套衣服的段落、数据库里这个角色提到这套衣服的穿着记录
 // （数据库记的是当前穿着，只留提到这套衣服名的，免得写成别的衣服）。世界背景由调用方另给。
-export function wardrobeClues(material, assets, { character = '', outfit = '' } = {}) {
+export function clothesClues(material, assets, { character = '', outfit = '' } = {}) {
     const clues = character ? collectOutfitClues(material.tables, [character, ...characterAliasesOf(assets, character)]) : { profile: [], worn: [] };
     return {
         context: pickChatMentions(material.chat, outfit),
@@ -57,7 +58,6 @@ export function expressionProgressText(who, event) {
     if (event && event.phase === 'write') return `写提示词：${who}`;
     if (event && event.phase === 'persona') return `提炼性格：${who}`;
     if (event && event.phase === 'world') return `提炼世界设定：${who}`;
-    if (event && event.phase === 'wardrobe') return `写服装提示词：${who}`;
     const total = Number(event && event.total) || 0;
     if (total > 1) return `生图中：${who}·${event.mood || ''} ${Number(event.done) || 0}/${total}`;
     return `生图中：${who}`;
@@ -223,77 +223,56 @@ export function expressionFillQuestion(groups) {
     return [
         `本楼已登记的角色还有 ${total} 张表情没有图：`,
         ...lines,
-        groups.some((group) => group.create) ? '新服装会先建好；衣柜里还没有这件衣服的提示词的，先按正文和资料写一份。' : '',
+        groups.some((group) => group.create) ? '新服装会先建好（不写衣柜），衣服照正文和资料里的描写画。' : '',
         '要补上这几张吗？写词和设置里的「表情差分」一样，已有的图不动。',
     ].filter(Boolean).join('\n');
 }
 
-// 正文里穿上的新服装：照「待确认 → 新建」建起来（「服装名-状态」挂前半段那套的衣柜），
-// 衣柜里这件衣服还没有提示词就先写一份（和「待确认 → 生成提示词」同一条路），再画表情。
-// 返回 { ok, note }：note 是衣柜提示词没写成时要告诉用户的话（不挡画表情，这次只按服装名和正文画）。
-async function prepareNewOutfit({ group, service, readAssets, save, wardrobeBackground, report }) {
+// 正文里穿上的新服装：照「待确认 → 新建」建在这个角色名下（「服装名-状态」照旧挂上前半段的名字），不写衣柜。
+// 衣柜按服装名共用、分不出是谁穿的；这一套画出第一张后，后面的表情照这套自己的图画，同一个人前后对得上。
+function createFloorOutfit({ group, readAssets, save }) {
     const name = group.character;
     const outfitName = group.outfit;
-    let assets = readAssets();
-    const outfits = (assets.characterOutfits || {})[name] || {};
-    if (!Object.hasOwn(outfits, outfitName)) {
-        if (!isValidOutfitName(outfitName)) return { ok: false, error: '这个名字不能用作服装名' };
-        const wardrobe = isBuiltinNudeOutfit(outfitName) ? BUILTIN_NUDE_OUTFIT : stateOutfitWardrobe(outfits, outfitName);
-        const created = save('characterOutfits', name, (bucket) => {
-            const all = { ...(bucket.characterOutfits || {}) };
-            const mine = { ...(all[name] || {}) };
-            if (!Object.hasOwn(mine, outfitName)) mine[outfitName] = wardrobe ? { words: [], moods: {}, wardrobe } : { words: [], moods: {} };
-            all[name] = mine;
-            bucket.characterOutfits = all;
-            return { ok: true };
-        });
-        if (!created) return { ok: false, error: '没能建这套服装' };
-        assets = readAssets();
-    }
-    const entry = ((assets.characterOutfits || {})[name] || {})[outfitName];
-    if (!entry) return { ok: false, error: '没能建这套服装' };
-    if (isBuiltinNudeOutfit(entry.wardrobe) || typeof service.writeWardrobePrompt !== 'function') return { ok: true };
-    const linked = resolveWardrobePrompt(assets.wardrobe || {}, entry, outfitName);
-    if (linked && linked.prompt) return { ok: true };
-    const key = linked ? linked.name : (typeof entry.wardrobe === 'string' && entry.wardrobe.trim()) || outfitName;
-    report({ phase: 'wardrobe' });
-    let written;
-    try {
-        written = await service.writeWardrobePrompt({ character: name, outfit: key, nsfwBoost: Boolean(linked && linked.nsfwBoost), ...(await wardrobeBackground(name, key, report)) });
-    } catch (error) {
-        written = { ok: false, error: (error && error.message) || '服装提示词编写失败' };
-    }
-    const prompt = written && written.ok ? String(written.prompt || '').trim() : '';
-    if (!prompt) return { ok: true, note: `「${key}」的服装提示词没写成（${(written && written.error) || '没有返回服装标签'}），这次只按服装名和正文画` };
-    const stored = save('wardrobe', key, (bucket) => {
-        const wardrobe = normalizeWardrobe(bucket.wardrobe);
-        wardrobe[key] = { ...(wardrobe[key] || {}), prompt };
-        bucket.wardrobe = wardrobe;
+    const outfits = (readAssets().characterOutfits || {})[name] || {};
+    if (Object.hasOwn(outfits, outfitName)) return { ok: true };
+    if (!isValidOutfitName(outfitName)) return { ok: false, error: '这个名字不能用作服装名' };
+    const wardrobe = isBuiltinNudeOutfit(outfitName) ? BUILTIN_NUDE_OUTFIT : stateOutfitWardrobe(outfits, outfitName);
+    const created = save('characterOutfits', name, (bucket) => {
+        const all = { ...(bucket.characterOutfits || {}) };
+        const mine = { ...(all[name] || {}) };
+        if (!Object.hasOwn(mine, outfitName)) mine[outfitName] = wardrobe ? { words: [], moods: {}, wardrobe } : { words: [], moods: {} };
+        all[name] = mine;
+        bucket.characterOutfits = all;
         return { ok: true };
     });
-    return stored ? { ok: true } : { ok: true, note: `「${key}」的服装提示词写好了，但没能存进衣柜` };
+    return created ? { ok: true } : { ok: false, error: '没能建这套服装' };
+}
+
+// 衣服在正文里叫什么：「墨绿泳装-孕中期」正文里写的是「墨绿泳装」；挂了别的名字就按那个名字找。
+function clothesNameOf(outfitName, entry) {
+    const linked = entry && typeof entry.wardrobe === 'string' ? entry.wardrobe.trim() : '';
+    return linked && !isBuiltinNudeOutfit(linked) ? linked : splitOutfitState(outfitName).base || outfitName;
 }
 
 // 阅读器「补全立绘与背景」：一组一组补（一个角色的一套服装算一组），写词、出图和设置里的「表情差分」走同一条路：
 // 还没有性格与表情习惯、世界设定提要的先提炼；「读取上下文」加大预算时附全部设定资料和正文原文（见素材服务 generateExpressionSet）。
-// 新服装（group.create）先建好、补上衣柜提示词再画。每组画完立刻存，后面出错不丢前面画好的。
+// 新服装（group.create）先建好再画，不写衣柜。每组画完立刻存，后面出错不丢前面画好的。
 // readAssets()：当前合并后的素材库；save(field, name, mutator)：把改动写回这一项所在的一边（本卡或全局），返回是否存上；
 // moodNoteOf(name)：设置里给这个角色记下的写表情注意事项；getWorld(onProgress)：世界背景，只在要写新词时才调；
-// wardrobeBackground(character, outfit, onProgress)：写衣柜提示词的世界背景和正文、数据库线索。
-export async function fillFloorExpressions({ groups, service, globalObj, readAssets, save, moodNoteOf = () => '', getWorld = async () => null, wardrobeBackground = async () => ({}), nsfw = false, onProgress }) {
-    const outcome = { painted: 0, failed: [], skipped: [], created: [], notes: [] };
+// outfitClues(character, clothes)：正文和数据库里写这件衣服的段落 { context, clues }，给还没有自己的图、也没有衣柜提示词的那一套。
+export async function fillFloorExpressions({ groups, service, globalObj, readAssets, save, moodNoteOf = () => '', getWorld = async () => null, outfitClues = async () => ({}), nsfw = false, onProgress }) {
+    const outcome = { painted: 0, failed: [], skipped: [], created: [] };
     for (const group of groups) {
         const name = group.character;
         const outfitName = group.outfit || '';
         const report = (event) => { if (typeof onProgress === 'function') onProgress(group, event); };
         if (group.create) {
-            const prepared = await prepareNewOutfit({ group, service, readAssets, save, wardrobeBackground, report });
-            if (!prepared.ok) {
-                outcome.skipped.push({ ...group, error: prepared.error });
+            const created = createFloorOutfit({ group, readAssets, save });
+            if (!created.ok) {
+                outcome.skipped.push({ ...group, error: created.error });
                 continue;
             }
             outcome.created.push(group);
-            if (prepared.note) outcome.notes.push(prepared.note);
         }
         const assets = readAssets();
         const plan = await planExpressionGroup({ service, assets, name, outfitName, moods: group.moods });
@@ -305,6 +284,13 @@ export async function fillFloorExpressions({ groups, service, globalObj, readAss
         let dna = characterExpressionDna(assets, name);
         let world = null;
         if (plan.writeLabels.length) {
+            // 这一套还没有自己的图、也没有衣柜提示词：衣服只能照正文画，把写这件衣服的段落带给写词。
+            const outfit = plan.outfit;
+            if (outfit && !outfit.nude && !outfit.ownImage && !outfit.prompt) {
+                const clothes = clothesNameOf(outfitName, ((assets.characterOutfits || {})[name] || {})[outfitName]);
+                const found = (await outfitClues(name, clothes)) || {};
+                plan.outfit = { ...outfit, clothesName: clothes, story: [found.context, found.clues].map((text) => String(text || '').trim()).filter(Boolean).join('\n') };
+            }
             // 提炼失败不挡生成，这次按默认写法写。
             if (!(dna && dna.persona)) {
                 report({ phase: 'persona' });
@@ -368,7 +354,6 @@ export function expressionFillSummary({ outcome = null, skipped = [], unmapped =
     parts.push(...good);
     if (failedCount) parts.push(`${failedCount} 张表情没画成：${failed[0].error}`);
     for (const item of skipped.concat(outcome ? outcome.skipped : [])) parts.push(`「${expressionGroupLabel(item)}」补不了表情：${item.error}`);
-    parts.push(...(outcome ? outcome.notes : []));
     if (unmapped.length) parts.push(`表情词「${unmapped.slice(0, 3).map((item) => item.mood).join('、')}」${unmapped.length > 3 ? '等' : ''}还没归进情绪组，没补`);
     if (!parts.length) return null;
     // 除了「建了什么、补好几张」之外还有话要说（没画成的、补不了的）就算提醒。

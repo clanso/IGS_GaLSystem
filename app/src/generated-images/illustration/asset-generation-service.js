@@ -812,8 +812,7 @@ export function createAssetGenerationService(deps) {
         return [name, ...aliases];
     };
     const SPRITE_MATERIAL_GUIDE = (name) => `下面先给出这个故事的设定资料（角色卡、世界书、数据库）和正文原文，供你把「${name}」画准：长相、身材和固定特征以后面说明里的角色设定（DNA）为准；设定没写到的，按资料和正文里对「${name}」的描写补；穿着、发型、配饰后面说明指定了就照说明，没指定的按正文里最近的样子；身体状态（例如怀孕、受伤包扎）也按正文里最近的样子写上。资料和正文里的剧情、其他角色不要画进去。`;
-    const EXPRESSION_MATERIAL_GUIDE = (name) => `下面先给出这个故事的设定资料（角色卡、世界书、数据库）和正文原文：「${name}」每个表情的幅度和方式，照正文里这个角色说话做事的样子来定。长相和衣服按后面的说明，不要按正文改；资料和正文里的剧情、其他角色不要画进去。`;
-    const WARDROBE_MATERIAL_GUIDE = (outfit) => `下面先给出这个故事的设定资料（角色卡、世界书、数据库）和正文原文，供你把服装「${outfit}」写准：款式、颜色、材质、长短和配饰按资料和正文里对这套衣服的描写；没写到的按世界观补。只写衣服本身，资料和正文里的人物、剧情不要写进去。`;
+    const EXPRESSION_MATERIAL_GUIDE = (name) => `下面先给出这个故事的设定资料（角色卡、世界书、数据库）和正文原文：「${name}」每个表情的幅度和方式，照正文里这个角色说话做事的样子来定。长相和衣服按后面的说明，不要按正文改（说明让你照正文画衣服的，衣服按正文里对那件衣服的描写）；资料和正文里的剧情、其他角色不要画进去。`;
 
     // 设置页写立绘 / 头像 / 表情差分：「读取上下文」加大预算时，说明前面附上全部设定资料（四成预算）
     // 和正文原文（连用户发言，从最新往前读满剩下的预算）。标准长度、或者走数据库生图插件（它自己读上下文）时原样返回。
@@ -1285,11 +1284,9 @@ export function createAssetGenerationService(deps) {
         const clothes = String(outfit || '').trim();
         if (!clothes) return { ok: false, error: '没有待确认的服装' };
         if (!nai || typeof nai.writeDbgenPrompt !== 'function') return { ok: false, error: '当前图像来源不能写服装提示词' };
-        // 「读取上下文」加大预算时和表情差分一样，先附全部设定资料和正文原文；提到这件衣服和穿着者的排前面。
-        const withMaterial = await writingMaterial([clothes, ...(name ? characterNamesOf(name, readSettings()) : [])], WARDROBE_MATERIAL_GUIDE(clothes));
         let written;
         try {
-            written = await nai.writeDbgenPrompt({ description: withMaterial(buildWardrobeClothingDescription(name, clothes, { nsfwBoost, world, context, clues })) });
+            written = await nai.writeDbgenPrompt({ description: buildWardrobeClothingDescription(name, clothes, { nsfwBoost, world, context, clues }) });
         } catch (error) {
             return { ok: false, error: (error && error.message) || '写服装提示词失败' };
         }

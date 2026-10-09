@@ -69,3 +69,38 @@ test('gate:expression-consistency:one-diffs-own-expression-and-hands-never-carry
     assert.equal(shared.v4_prompt.caption.char_captions[0].char_caption, 'elf, robe');
     assert.equal(sharedLookCaption([]), null);
 });
+
+test('gate:expression-consistency:empty-char-line-does-not-swallow-the-uc-line', () => {
+    // 2026-10-09 实测：衣柜提示词写成「scene: … / char: / uc: humans, phone, sneakers…」，uc 那行被读成了角色标签，手机球鞋画进了立绘。
+    const parsed = parseCaptionSlots('scene: no humans, white one-piece swimsuit\nchar:\nuc: humans, phone, sneakers');
+    const caption = parsed.captions[0].caption;
+    assert.deepEqual(caption.v4_prompt.caption.char_captions, []);
+    assert.equal(caption.v4_negative_prompt.caption.base_caption, 'humans, phone, sneakers');
+});
+
+test('gate:expression-consistency:wardrobe-display-prompts-are-trimmed-to-the-clothes-before-wearing', async () => {
+    const { buildExpressionDiffDescription, expressionLookTags, wearableClothesPrompt } = await import('../src/generated-images/dbgen-prompt.js');
+    // 用户衣柜里存过的三份（衣服展示图写法，还混了一行 uc）。
+    const swimsuit = 'no humans, still life, clothing display, full outfit laid out, white one-piece swimsuit on wooden hanger, front and back view, matching accessories arranged below, simple light wooden background, soft natural daylight, fantasy setting, clean composition\nuc: humans, 1girl, person, body, face, mannequin head, modern clothing, bikini, zipper, plastic, logo, text, phone, sneakers, sunglasses, goggles, nsfw, nipples, child, loli';
+    assert.equal(wearableClothesPrompt(swimsuit), 'white one-piece swimsuit');
+    const green = 'no humans, still life, clothing focus, swimsuit display, dark green two-piece maternity swimsuit laid out flat on woven rush straw mat, fantasy setting, swimwear set, crop top bikini with wide shoulder straps, wide-brimmed woven straw hat beside, brown leather strap sandals, soft daylight, warm sunlight, light shadows, simple background\nuc: humans, smartphone';
+    assert.equal(wearableClothesPrompt(green), 'dark green two-piece maternity swimsuit, swimwear set, crop top bikini with wide shoulder straps, brown leather strap sandals');
+    const dress = 'no humans, still life, full outfit display, clothes laid out flat, light blue summer dress, white lace trim collar, pale blue hair ribbon, plain wooden floor, simple light background, soft natural light, clothes focus, product display';
+    assert.equal(wearableClothesPrompt(dress), 'light blue summer dress, white lace trim collar, pale blue hair ribbon');
+    assert.equal(wearableClothesPrompt('yukata, floral pattern, obi'), 'yukata, floral pattern, obi', '本来就只写衣服的原样保留');
+    // 写词说明和出图前拼进角色的长相都用修过的。
+    const outfit = { name: '白色泳装', words: [], ownImage: false, prompt: swimsuit };
+    assert.equal(expressionLookTags(null, outfit), 'white one-piece swimsuit');
+    const text = buildExpressionDiffDescription('柯萝伊', null, ['害羞'], null, outfit);
+    assert.ok(text.includes('服装提示词：\nwhite one-piece swimsuit\n'));
+    assert.ok(!/hanger|no humans|phone|sneakers/.test(text));
+});
+
+test('gate:expression-consistency:new-outfit-without-image-or-wardrobe-is-drawn-from-the-story', async () => {
+    const { buildExpressionDiffDescription } = await import('../src/generated-images/dbgen-prompt.js');
+    const text = buildExpressionDiffDescription('阿黛尔', null, ['害羞'], null, { name: '墨绿泳装-孕中期', words: [], ownImage: false, prompt: '', clothesName: '墨绿泳装', story: '阿黛尔换上了墨绿色的连体泳衣，外面系着薄纱裙。' });
+    assert.ok(text.includes('这一套要改成服装「墨绿泳装-孕中期」：衣服的款式、颜色、材质和配饰按正文和资料里对「墨绿泳装」的描写来画'));
+    assert.ok(text.includes('正文和数据库里写「墨绿泳装」的地方（只取衣服本身，人物和剧情不要画）：\n阿黛尔换上了墨绿色的连体泳衣，外面系着薄纱裙。'));
+    const own = buildExpressionDiffDescription('阿黛尔', null, ['害羞'], null, { name: '墨绿泳装-孕中期', words: [], ownImage: true, prompt: '', story: '不该出现' });
+    assert.ok(!own.includes('不该出现'), '这一套已经有自己的图：照图画，不再附正文');
+});
